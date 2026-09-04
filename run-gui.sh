@@ -2,12 +2,13 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
+BUILD_DIR="${SCRIPT_DIR}/build"
 
-# 检查依赖环境
-python3 "${SCRIPT_DIR}/check-env.py" > /dev/null 2>&1 || {
-    python3 "${SCRIPT_DIR}/check-env.py"
-    exit 1
-}
+if [ ! -f "${BUILD_DIR}/src/sshuttle-gui" ]; then
+    if [ ! -d "${BUILD_DIR}" ]; then
+        meson setup "${BUILD_DIR}" "${SCRIPT_DIR}"
+    fi
+    ninja -C "${BUILD_DIR}"
+fi
 
-exec python3 "${SCRIPT_DIR}/src/main.py" "$@"
+exec "${BUILD_DIR}/src/sshuttle-gui" "$@"
