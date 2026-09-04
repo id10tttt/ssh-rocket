@@ -12,25 +12,42 @@
   - 同时内置直连回退模式，开箱即可通过 `pkexec` 本地运行测试。
 - **实时日志流**：内置独立的日志查看器，支持实时流式追加、一键复制与清空。
 
-## 运行依赖
+## 运行依赖与环境检查
 
-- Python 3.9+
-- `sshuttle`
-- `PyGObject`
-- `gtk4`
-- `libadwaita`
+本项目是基于 PyGObject 的 GTK4/Libadwaita 原生应用，需要 Python 桥接包与系统原生 GUI 运行时库：
 
-在 Fedora / CentOS Stream / RHEL 上安装依赖：
+### 1. 快速检查当前环境
 
 ```bash
-sudo dnf install -y python3-gobject gtk4 libadwaita sshuttle
+./check-env.py
 ```
+该脚本会自动检测缺失的依赖，并给出当前系统的包安装建议。
 
-在 Ubuntu / Debian 上安装依赖：
+### 2. 系统级依赖安装
+
+- **Fedora / CentOS Stream / RHEL**：
+  ```bash
+  sudo dnf install -y python3-gobject gtk4 libadwaita sshuttle
+  ```
+
+- **Ubuntu / Debian**：
+  ```bash
+  sudo apt update && sudo apt install -y python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 sshuttle
+  ```
+
+- **Arch Linux / Manjaro**：
+  ```bash
+  sudo pacman -S python-gobject gtk4 libadwaita sshuttle
+  ```
+
+### 3. Python pip 依赖
+
+若使用虚拟环境（venv）：
 
 ```bash
-sudo apt update && sudo apt install -y python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 sshuttle
+pip install -r requirements.txt
 ```
+*(注意：虚拟环境依然需要系统安装有 gtk4 与 libadwaita 动态库及其 gobject-introspection typelib)*
 
 ## 本地运行
 
