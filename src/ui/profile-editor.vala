@@ -12,6 +12,10 @@ namespace Sshuttle {
         private Adw.SpinRow port_row;
         private Adw.EntryRow user_row;
 
+        private Adw.ComboRow auth_row;
+        private Adw.EntryRow key_row;
+        private Adw.PasswordEntryRow password_row;
+
         private Adw.EntryRow routes_row;
         private Adw.SwitchRow dns_row;
         private Adw.SwitchRow ipv6_row;
@@ -25,6 +29,9 @@ namespace Sshuttle {
         private Adw.ComboRow verbosity_row;
         private Adw.SwitchRow auto_connect_row;
 
+        private static string[] AUTH_TYPES = { "agent", "key", "password" };
+        private static string[] AUTH_LABELS = { "SSH Agent / Default", "Private Key File", "Password" };
+
         private static string[] METHODS = { "auto", "nat", "tproxy", "nft" };
         private static string[] VERBOSITIES = { "normal", "verbose", "very_verbose" };
         private static string[] VERBOSITY_LABELS = { "Normal", "Verbose", "Very Verbose" };
@@ -35,7 +42,7 @@ namespace Sshuttle {
             this.transient_for = parent;
             this.modal = true;
             this.default_width = 460;
-            this.default_height = 640;
+            this.default_height = 660;
 
             this.excludes = new GLib.GenericArray<string> ();
             if (profile != null) {
@@ -51,7 +58,7 @@ namespace Sshuttle {
 
             // SSH 分组
             var ssh_group = new Adw.PreferencesGroup ();
-            ssh_group.title = "SSH";
+            ssh_group.title = "SSH Connection";
             page.add (ssh_group);
 
             this.name_row = new Adw.EntryRow ();
@@ -73,6 +80,42 @@ namespace Sshuttle {
             this.user_row.title = "Username";
             this.user_row.text = (profile != null) ? profile.username : "";
             ssh_group.add (this.user_row);
+
+            // 认证模式
+            this.auth_row = new Adw.ComboRow ();
+            this.auth_row.title = "Login Mode";
+            var auth_model = new Gtk.StringList (AUTH_LABELS);
+            this.auth_row.model = auth_model;
+            string cur_auth = (profile != null) ? profile.auth_type : "agent";
+            for (uint i = 0; i < AUTH_TYPES.length; i++) {
+                if (AUTH_TYPES[i] == cur_auth) {
+                    this.auth_row.selected = i;
+                    break;
+                }
+            }
+            ssh_group.add (this.auth_row);
+
+            // 私钥文件选择行
+            this.key_row = new Adw.EntryRow ();
+            this.key_row.title = "Private Key File";
+            this.key_row.text = (profile != null) ? profile.key_path : "";
+
+            var browse_btn = new Gtk.Button.from_icon_name ("folder-open-symbolic");
+            browse_btn.add_css_class ("flat");
+            browse_btn.valign = Gtk.Align.CENTER;
+            browse_btn.tooltip_text = "Choose Key File";
+            browse_btn.clicked.connect (this.on_browse_key_clicked);
+            this.key_row.add_suffix (browse_btn);
+            ssh_group.add (this.key_row);
+
+            // 密码输入行
+            this.password_row = new Adw.PasswordEntryRow ();
+            this.password_row.title = "Password";
+            this.password_row.text = (profile != null) ? profile.password : "";
+            ssh_group.add (this.password_row);
+
+            this.auth_row.notify["selected"].connect (this.update_auth_fields_visibility);
+            this.update_auth_fields_visibility ();
 
             // 路由分组
             var routing_group = new Adw.PreferencesGroup ();
@@ -175,6 +218,30 @@ namespace Sshuttle {
             }
         }
 
+        private void update_auth_fields_visibility () {
+            uint idx = this.auth_row.selected;
+            string auth_mode = (idx < AUTH_TYPES.length) ? AUTH_TYPES[idx] : "agent";
+
+            this.key_row.visible = (auth_mode == "key");
+            this.password_row.visible = (auth_mode == "password");
+        }
+
+        private void on_browse_key_clicked () {
+            var dialog = new Gtk.FileDialog ();
+            dialog.title = "Select SSH Private Key";
+
+            dialog.open.begin (this, null, (obj, res) => {
+                try {
+                    var file = dialog.open.end (res);
+                    if (file != null) {
+                        this.key_row.text = file.get_path ();
+                    }
+                } catch (GLib.Error e) {
+                    // 用户取消选择
+                }
+            });
+        }
+
         private void refresh_excludes () {
             var child = this.exclude_rows_box.get_first_child ();
             while (child != null) {
@@ -233,6 +300,11 @@ namespace Sshuttle {
             p.host = this.host_row.text.strip ();
             p.port = (int) this.port_row.value;
             p.username = this.user_row.text.strip ();
+
+            uint a_idx = this.auth_row.selected;
+            p.auth_type = (a_idx < AUTH_TYPES.length) ? AUTH_TYPES[a_idx] : "agent";
+            p.key_path = this.key_row.text.strip ();
+            p.password = this.password_row.text;
 
             string raw_routes = this.routes_row.text.strip ();
             string[] split_routes = raw_routes.split (",");

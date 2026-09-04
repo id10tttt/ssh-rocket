@@ -12,34 +12,33 @@ namespace Sshuttle {
         private Gtk.Button action_btn;
         private Gtk.Label btn_label;
         private Gtk.Spinner spinner;
-        private Gtk.Image status_dot;
+        private Gtk.Image status_icon;
+        private Gtk.Label status_label;
 
         public ConnectionCard (Profile profile, TunnelManager tunnel_manager) {
-            Object (orientation: Gtk.Orientation.VERTICAL, spacing: 10);
+            Object (orientation: Gtk.Orientation.VERTICAL, spacing: 0);
             this.profile = profile;
             this.tunnel_manager = tunnel_manager;
 
             this.add_css_class ("card");
-            this.set_size_request (280, -1);
-            this.margin_start = 8;
-            this.margin_end = 8;
-            this.margin_top = 8;
-            this.margin_bottom = 8;
+            this.set_size_request (300, -1);
 
             // 内部主体布局
-            var inner_box = new Gtk.Box (Gtk.Orientation.VERTICAL, 10);
-            inner_box.margin_start = 14;
-            inner_box.margin_end = 14;
-            inner_box.margin_top = 14;
-            inner_box.margin_bottom = 14;
+            var inner_box = new Gtk.Box (Gtk.Orientation.VERTICAL, 0);
+            inner_box.margin_start = 16;
+            inner_box.margin_end = 16;
+            inner_box.margin_top = 16;
+            inner_box.margin_bottom = 12;
             this.append (inner_box);
 
-            // 顶部：图标 + 节点名称 + 状态小圆点
+            // 顶部：状态图标 + 节点名称 + 编辑/删除操作
             var header_box = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 10);
-            var icon = new Gtk.Image.from_icon_name ("network-workgroup-symbolic");
-            icon.pixel_size = 24;
-            icon.add_css_class ("accent");
-            header_box.append (icon);
+            header_box.margin_bottom = 12;
+
+            this.status_icon = new Gtk.Image.from_icon_name ("network-vpn-disconnected-symbolic");
+            this.status_icon.pixel_size = 24;
+            this.status_icon.add_css_class ("dim-label");
+            header_box.append (this.status_icon);
 
             var title_label = new Gtk.Label (profile.name);
             title_label.add_css_class ("title-3");
@@ -48,60 +47,57 @@ namespace Sshuttle {
             title_label.ellipsize = Pango.EllipsizeMode.END;
             header_box.append (title_label);
 
-            this.status_dot = new Gtk.Image.from_icon_name ("media-record-symbolic");
-            this.status_dot.pixel_size = 10;
-            this.status_dot.visible = false;
-            header_box.append (this.status_dot);
-
-            inner_box.append (header_box);
-
-            // 中间信息区 (类似截图排版)
-            var grid = new Gtk.Grid ();
-            grid.row_spacing = 6;
-            grid.column_spacing = 16;
-            inner_box.append (grid);
-
-            this.add_info_row (grid, 0, "Server:", profile.host);
-            this.add_info_row (grid, 1, "Port:", @"$(profile.port)");
-            string user_text = (profile.username != "") ? profile.username : "None";
-            this.add_info_row (grid, 2, "Username:", user_text);
-            this.add_info_row (grid, 3, "Routing:", profile.get_summary ());
-
-            // 底部分割线
-            var separator = new Gtk.Separator (Gtk.Orientation.HORIZONTAL);
-            separator.margin_top = 4;
-            separator.margin_bottom = 2;
-            inner_box.append (separator);
-
-            // 底部操作区：左侧编辑、删除；右侧 Connect/Disconnect 按钮
-            var bottom_bar = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 8);
-            inner_box.append (bottom_bar);
-
             var edit_btn = new Gtk.Button.from_icon_name ("document-edit-symbolic");
             edit_btn.add_css_class ("flat");
+            edit_btn.add_css_class ("dim-label");
+            edit_btn.valign = Gtk.Align.CENTER;
             edit_btn.tooltip_text = "Edit";
             edit_btn.clicked.connect (() => {
                 this.edit_requested (this.profile);
             });
-            bottom_bar.append (edit_btn);
+            header_box.append (edit_btn);
 
             var del_btn = new Gtk.Button.from_icon_name ("user-trash-symbolic");
             del_btn.add_css_class ("flat");
+            del_btn.add_css_class ("dim-label");
+            del_btn.valign = Gtk.Align.CENTER;
             del_btn.tooltip_text = "Delete";
             del_btn.clicked.connect (() => {
                 this.delete_requested (this.profile);
             });
-            bottom_bar.append (del_btn);
+            header_box.append (del_btn);
 
-            // 弹簧占位
-            var spacer = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 0);
-            spacer.hexpand = true;
-            bottom_bar.append (spacer);
+            inner_box.append (header_box);
 
-            // 右侧主操作按钮
+            // 中间信息区
+            var info_box = new Gtk.Box (Gtk.Orientation.VERTICAL, 6);
+            info_box.margin_bottom = 12;
+            inner_box.append (info_box);
+
+            this.add_info_row (info_box, "Server", profile.host);
+            this.add_info_row (info_box, "Port", @"$(profile.port)");
+            string user_text = (profile.username != "") ? profile.username : "—";
+            this.add_info_row (info_box, "Username", user_text);
+            this.add_info_row (info_box, "Login Mode", profile.get_login_mode_label ());
+
+            // 底部：状态文字 + 主操作按钮
+            var separator = new Gtk.Separator (Gtk.Orientation.HORIZONTAL);
+            separator.margin_bottom = 10;
+            inner_box.append (separator);
+
+            var bottom_bar = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 8);
+            inner_box.append (bottom_bar);
+
+            this.status_label = new Gtk.Label ("Disconnected");
+            this.status_label.add_css_class ("dim-label");
+            this.status_label.add_css_class ("caption");
+            this.status_label.xalign = 0;
+            this.status_label.hexpand = true;
+            bottom_bar.append (this.status_label);
+
+            // 主操作按钮
             this.action_btn = new Gtk.Button ();
             this.action_btn.add_css_class ("pill");
-            this.action_btn.set_size_request (95, -1);
 
             var btn_box = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 6);
             btn_box.halign = Gtk.Align.CENTER;
@@ -111,7 +107,6 @@ namespace Sshuttle {
             btn_box.append (this.spinner);
 
             this.btn_label = new Gtk.Label ("Connect");
-            this.btn_label.add_css_class ("title-4");
             btn_box.append (this.btn_label);
 
             this.action_btn.set_child (btn_box);
@@ -121,17 +116,27 @@ namespace Sshuttle {
             this.update_state ();
         }
 
-        private void add_info_row (Gtk.Grid grid, int row, string key, string val) {
+        private void add_info_row (Gtk.Box parent, string key, string val) {
+            var row = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 8);
+
             var key_lbl = new Gtk.Label (key);
             key_lbl.xalign = 0;
             key_lbl.add_css_class ("dim-label");
-            grid.attach (key_lbl, 0, row);
+            key_lbl.add_css_class ("caption");
+            row.append (key_lbl);
+
+            var spacer = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 0);
+            spacer.hexpand = true;
+            row.append (spacer);
 
             var val_lbl = new Gtk.Label (val);
             val_lbl.xalign = 1;
-            val_lbl.hexpand = true;
+            val_lbl.add_css_class ("caption");
             val_lbl.ellipsize = Pango.EllipsizeMode.END;
-            grid.attach (val_lbl, 1, row);
+            val_lbl.max_width_chars = 22;
+            row.append (val_lbl);
+
+            parent.append (row);
         }
 
         public void update_state () {
@@ -141,16 +146,15 @@ namespace Sshuttle {
 
             this.action_btn.remove_css_class ("suggested-action");
             this.action_btn.remove_css_class ("destructive-action");
-            this.action_btn.remove_css_class ("success");
-            this.remove_css_class ("accent-border");
-            this.status_dot.visible = false;
+
+            // 重置状态图标
+            this.status_icon.remove_css_class ("accent");
+            this.status_icon.remove_css_class ("success");
+            this.status_icon.remove_css_class ("warning");
+            this.status_icon.remove_css_class ("error");
+            this.status_icon.remove_css_class ("dim-label");
 
             if (is_active) {
-                this.status_dot.visible = true;
-                this.status_dot.remove_css_class ("success");
-                this.status_dot.remove_css_class ("warning");
-                this.status_dot.remove_css_class ("error");
-
                 switch (state) {
                     case TunnelState.CONNECTED:
                         this.btn_label.label = "Disconnect";
@@ -158,7 +162,9 @@ namespace Sshuttle {
                         this.action_btn.sensitive = true;
                         this.spinner.visible = false;
                         this.spinner.stop ();
-                        this.status_dot.add_css_class ("success");
+                        this.status_icon.icon_name = "network-vpn-symbolic";
+                        this.status_icon.add_css_class ("success");
+                        this.status_label.label = "Connected";
                         break;
 
                     case TunnelState.CONNECTING:
@@ -166,7 +172,9 @@ namespace Sshuttle {
                         this.action_btn.sensitive = false;
                         this.spinner.visible = true;
                         this.spinner.start ();
-                        this.status_dot.add_css_class ("warning");
+                        this.status_icon.icon_name = "network-vpn-acquiring-symbolic";
+                        this.status_icon.add_css_class ("warning");
+                        this.status_label.label = "Connecting…";
                         break;
 
                     case TunnelState.DISCONNECTING:
@@ -174,7 +182,9 @@ namespace Sshuttle {
                         this.action_btn.sensitive = false;
                         this.spinner.visible = true;
                         this.spinner.start ();
-                        this.status_dot.add_css_class ("warning");
+                        this.status_icon.icon_name = "network-vpn-acquiring-symbolic";
+                        this.status_icon.add_css_class ("warning");
+                        this.status_label.label = "Disconnecting…";
                         break;
 
                     case TunnelState.ERROR:
@@ -183,7 +193,9 @@ namespace Sshuttle {
                         this.action_btn.sensitive = true;
                         this.spinner.visible = false;
                         this.spinner.stop ();
-                        this.status_dot.add_css_class ("error");
+                        this.status_icon.icon_name = "dialog-error-symbolic";
+                        this.status_icon.add_css_class ("error");
+                        this.status_label.label = "Error";
                         break;
 
                     default: // DISCONNECTED
@@ -192,15 +204,20 @@ namespace Sshuttle {
                         this.action_btn.sensitive = true;
                         this.spinner.visible = false;
                         this.spinner.stop ();
+                        this.status_icon.icon_name = "network-vpn-disconnected-symbolic";
+                        this.status_icon.add_css_class ("dim-label");
+                        this.status_label.label = "Disconnected";
                         break;
                 }
             } else {
                 this.btn_label.label = "Connect";
                 this.action_btn.add_css_class ("suggested-action");
-                // 若其它节点正在连接或已连接，此节点可切换激活连接
                 this.action_btn.sensitive = (state != TunnelState.CONNECTING && state != TunnelState.DISCONNECTING);
                 this.spinner.visible = false;
                 this.spinner.stop ();
+                this.status_icon.icon_name = "network-vpn-disconnected-symbolic";
+                this.status_icon.add_css_class ("dim-label");
+                this.status_label.label = "Disconnected";
             }
         }
 

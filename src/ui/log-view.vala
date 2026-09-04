@@ -13,29 +13,26 @@ namespace Sshuttle {
             var action_bar = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 8);
             action_bar.margin_start = 16;
             action_bar.margin_end = 16;
-            action_bar.margin_top = 10;
-            action_bar.margin_bottom = 10;
+            action_bar.margin_top = 8;
+            action_bar.margin_bottom = 8;
             this.append (action_bar);
-
-            var title_lbl = new Gtk.Label ("Real-time Output");
-            title_lbl.add_css_class ("dim-label");
-            action_bar.append (title_lbl);
 
             var spacer = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 0);
             spacer.hexpand = true;
             action_bar.append (spacer);
 
             var copy_btn = new Gtk.Button.from_icon_name ("edit-copy-symbolic");
+            copy_btn.add_css_class ("flat");
             copy_btn.tooltip_text = "Copy Log";
             copy_btn.clicked.connect (this.on_copy_clicked);
             action_bar.append (copy_btn);
 
             var clear_btn = new Gtk.Button.from_icon_name ("edit-clear-all-symbolic");
+            clear_btn.add_css_class ("flat");
             clear_btn.tooltip_text = "Clear Log";
             clear_btn.clicked.connect (this.on_clear_clicked);
             action_bar.append (clear_btn);
 
-            // 分割线
             var sep = new Gtk.Separator (Gtk.Orientation.HORIZONTAL);
             this.append (sep);
 
@@ -53,6 +50,7 @@ namespace Sshuttle {
             this.text_view.bottom_margin = 12;
             this.text_view.left_margin = 16;
             this.text_view.right_margin = 16;
+            this.text_view.add_css_class ("dim-label");
 
             scrolled.set_child (this.text_view);
             this.buffer = this.text_view.get_buffer ();

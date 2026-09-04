@@ -21,7 +21,7 @@ namespace Sshuttle {
                 } else if (state == TunnelState.CONNECTING || state == TunnelState.DISCONNECTING) {
                     return "network-vpn-acquiring-symbolic";
                 }
-                return "network-vpn-symbolic";
+                return "network-vpn-disconnected-symbolic";
             }
         }
         public ObjectPath menu { owned get { return new ObjectPath ("/MenuBar"); } }
@@ -40,7 +40,6 @@ namespace Sshuttle {
         }
 
         public void context_menu (int x, int y) throws GLib.Error {
-            // 右键菜单由 DBusMenu 自动接管
         }
 
         public void scroll (int delta, string orientation) throws GLib.Error {
@@ -51,13 +50,33 @@ namespace Sshuttle {
         }
     }
 
+    /**
+     * 匹配 com.canonical.dbusmenu 规范的 D-Bus 服务，
+     * 使用结构体确保 Vala 生成正确的 (ia{sv}av) 与 a(ia{sv}) 签名。
+     */
+    public struct MenuItemLayout {
+        public int id;
+        public GLib.HashTable<string, Variant> properties;
+        public Variant[] children;
+    }
+
+    public struct MenuProperties {
+        public int id;
+        public GLib.HashTable<string, Variant> properties;
+    }
+
     [DBus (name = "com.canonical.dbusmenu")]
     public class DBusMenuService : Object {
         private TrayManager manager;
         private uint revision = 1;
 
         public uint version { get { return 3; } }
+        [DBus (name = "TextDirection")]
+        public string text_direction { owned get { return "ltr"; } }
+        [DBus (name = "Status")]
         public string status { owned get { return "normal"; } }
+        [DBus (name = "IconThemePath")]
+        public string[] icon_theme_path { owned get { return new string[0]; } }
 
         public signal void layout_updated (uint revision, int parent);
 
@@ -70,19 +89,49 @@ namespace Sshuttle {
             this.layout_updated (this.revision, 0);
         }
 
-        public bool get_layout (int parent_id, int recursion_depth, string[] property_names, out uint out_revision, out Variant layout) throws GLib.Error {
+        // 构建单个菜单项的 Variant
+        private Variant make_item_variant (int id, string label, bool enabled) {
+            var b = new VariantBuilder (new VariantType ("(ia{sv}av)"));
+            b.add ("i", id);
+
+            b.open (new VariantType ("a{sv}"));
+            b.add ("{sv}", "label", new Variant.string (label));
+            b.add ("{sv}", "enabled", new Variant.boolean (enabled));
+            b.add ("{sv}", "visible", new Variant.boolean (true));
+            b.close ();
+
+            b.open (new VariantType ("av"));
+            b.close ();
+
+            return b.end ();
+        }
+
+        // 构建分隔符
+        private Variant make_separator_variant (int id) {
+            var b = new VariantBuilder (new VariantType ("(ia{sv}av)"));
+            b.add ("i", id);
+
+            b.open (new VariantType ("a{sv}"));
+            b.add ("{sv}", "type", new Variant.string ("separator"));
+            b.add ("{sv}", "visible", new Variant.boolean (true));
+            b.close ();
+
+            b.open (new VariantType ("av"));
+            b.close ();
+
+            return b.end ();
+        }
+
+        /**
+         * 返回菜单树布局，签名严格匹配规范 (i, i, as) -> (u, (ia{sv}av))
+         */
+        public void get_layout (int parent_id, int recursion_depth, string[] property_names, out uint out_revision, out MenuItemLayout layout) throws GLib.Error {
             out_revision = this.revision;
 
-            var builder = new VariantBuilder (new VariantType ("(ia{sv}av)"));
-            builder.add ("i", 0); // Root ID
+            // 动态生成子项列表
+            var items = new GLib.GenericArray<Variant> ();
 
-            builder.open (new VariantType ("a{sv}"));
-            builder.add ("{sv}", "children-display", new Variant.string ("submenu"));
-            builder.close ();
-
-            builder.open (new VariantType ("av"));
-
-            // 1. 动态生成服务器列表项
+            // 1. 服务器列表
             var profiles = this.manager.config_manager.get_profiles ();
             var active_p = this.manager.config_manager.get_active_profile ();
             string? active_id = (active_p != null) ? active_p.id : null;
@@ -91,88 +140,65 @@ namespace Sshuttle {
                 var p = profiles[i];
                 bool is_active = (active_id != null && p.id == active_id);
                 string prefix = is_active ? "● " : "○ ";
-                string label = prefix + p.name;
-
-                builder.open (new VariantType ("v"));
-                this.build_menu_item (builder, 1000 + i, label, true, false);
-                builder.close ();
+                items.add (this.make_item_variant (1000 + i, prefix + p.name, true));
             }
 
             if (profiles.length > 0) {
-                builder.open (new VariantType ("v"));
-                this.build_separator (builder, 200);
-                builder.close ();
+                items.add (this.make_separator_variant (200));
             }
 
-            // 2. Connect / Disconnect 动态控制项
+            // 2. Connect / Disconnect
             var state = this.manager.tunnel_manager.state;
             string toggle_label = "Connect";
             if (state == TunnelState.CONNECTED) {
                 toggle_label = "Disconnect";
             } else if (state == TunnelState.CONNECTING) {
-                toggle_label = "Connecting...";
+                toggle_label = "Connecting…";
             } else if (state == TunnelState.DISCONNECTING) {
-                toggle_label = "Disconnecting...";
+                toggle_label = "Disconnecting…";
             }
+            items.add (this.make_item_variant (201, toggle_label, profiles.length > 0));
 
-            builder.open (new VariantType ("v"));
-            this.build_menu_item (builder, 201, toggle_label, profiles.length > 0, false);
-            builder.close ();
-
-            builder.open (new VariantType ("v"));
-            this.build_separator (builder, 202);
-            builder.close ();
+            items.add (this.make_separator_variant (202));
 
             // 3. Show Window
-            builder.open (new VariantType ("v"));
-            this.build_menu_item (builder, 203, "Show SShuttle", true, false);
-            builder.close ();
+            items.add (this.make_item_variant (203, "Show SShuttle", true));
 
             // 4. Quit
-            builder.open (new VariantType ("v"));
-            this.build_menu_item (builder, 204, "Quit", true, false);
-            builder.close ();
+            items.add (this.make_item_variant (204, "Quit", true));
 
-            builder.close (); // 结束 av
+            // 组装根节点
+            var root_props = new GLib.HashTable<string, Variant> (GLib.str_hash, GLib.str_equal);
+            root_props.insert ("children-display", new Variant.string ("submenu"));
 
-            layout = builder.end ();
-            return true;
-        }
-
-        private void build_menu_item (VariantBuilder builder, int id, string label, bool enabled, bool is_separator) {
-            builder.open (new VariantType ("(ia{sv}av)"));
-            builder.add ("i", id);
-
-            builder.open (new VariantType ("a{sv}"));
-            builder.add ("{sv}", "label", new Variant.string (label));
-            builder.add ("{sv}", "enabled", new Variant.boolean (enabled));
-            builder.add ("{sv}", "visible", new Variant.boolean (true));
-            if (is_separator) {
-                builder.add ("{sv}", "type", new Variant.string ("separator"));
+            var children = new Variant[items.length];
+            for (int i = 0; i < items.length; i++) {
+                children[i] = items[i];
             }
-            builder.close ();
 
-            builder.open (new VariantType ("av"));
-            builder.close ();
-
-            builder.close ();
+            layout = MenuItemLayout ();
+            layout.id = 0;
+            layout.properties = root_props;
+            layout.children = children;
         }
 
-        private void build_separator (VariantBuilder builder, int id) {
-            builder.open (new VariantType ("(ia{sv}av)"));
-            builder.add ("i", id);
-
-            builder.open (new VariantType ("a{sv}"));
-            builder.add ("{sv}", "type", new Variant.string ("separator"));
-            builder.add ("{sv}", "visible", new Variant.boolean (true));
-            builder.close ();
-
-            builder.open (new VariantType ("av"));
-            builder.close ();
-
-            builder.close ();
+        /**
+         * 返回指定 ID 的属性，签名 (ai, as) -> a(ia{sv})
+         */
+        public void get_group_properties (int[] ids, string[] property_names, out MenuProperties[] properties) throws GLib.Error {
+            properties = new MenuProperties[0];
         }
 
+        /**
+         * 菜单即将显示回调，签名 (i) -> (b)
+         */
+        public bool about_to_show (int id) throws GLib.Error {
+            return false;
+        }
+
+        /**
+         * 菜单项点击事件，签名 (i, s, v, u) -> ()
+         */
         public void @event (int id, string event_id, Variant data, uint timestamp) throws GLib.Error {
             if (event_id != "clicked") {
                 return;
@@ -229,11 +255,9 @@ namespace Sshuttle {
             try {
                 this.connection = yield GLib.Bus.get (GLib.BusType.SESSION, null);
 
-                // 注册 SNI 服务与 DBusMenu
                 this.connection.register_object ("/StatusNotifierItem", this.sni_service);
                 this.connection.register_object ("/MenuBar", this.menu_service);
 
-                // 向 StatusNotifierWatcher 注册
                 var watcher = yield this.connection.get_proxy<StatusNotifierWatcher> (
                     "org.kde.StatusNotifierWatcher",
                     "/StatusNotifierWatcher"
@@ -241,7 +265,7 @@ namespace Sshuttle {
                 watcher.register_status_notifier_item ("/StatusNotifierItem");
 
             } catch (GLib.Error e) {
-                // 若桌面环境未运行 StatusNotifierWatcher，优雅降级，不阻断程序运行
+                // 若桌面环境未运行 StatusNotifierWatcher，优雅降级
             }
         }
     }

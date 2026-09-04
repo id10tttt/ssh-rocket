@@ -34,6 +34,15 @@ namespace Sshuttle {
                 argv.add ("-vv");
             }
 
+            // 处理 SSH 认证（私钥与密码）
+            if (profile.auth_type == "key" && profile.key_path.strip () != "") {
+                argv.add ("-e");
+                argv.add (@"ssh -i $(profile.key_path.strip ())");
+            } else if (profile.auth_type == "password" && profile.password != "") {
+                argv.add ("-e");
+                argv.add (@"sshpass -p '$(profile.password)' ssh");
+            }
+
             argv.add ("-r");
             argv.add (profile.get_ssh_target ());
 

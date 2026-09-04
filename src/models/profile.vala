@@ -44,6 +44,9 @@ namespace Sshuttle {
         public string host { get; set; default = ""; }
         public int port { get; set; default = 22; }
         public string username { get; set; default = ""; }
+        public string auth_type { get; set; default = "agent"; } // "agent", "key", "password"
+        public string key_path { get; set; default = ""; }
+        public string password { get; set; default = ""; }
         public string[] routes { get; set; }
         public string[] exclude { get; set; }
         public bool dns { get; set; default = true; }
@@ -69,6 +72,19 @@ namespace Sshuttle {
                 target = @"$(target):$(this.port)";
             }
             return target;
+        }
+
+        public string get_login_mode_label () {
+            if (this.auth_type == "key") {
+                if (this.key_path != "") {
+                    string basename = GLib.Path.get_basename (this.key_path);
+                    return @"Key ($basename)";
+                }
+                return "Private Key";
+            } else if (this.auth_type == "password") {
+                return "Password";
+            }
+            return "SSH Agent";
         }
 
         public string get_summary () {
@@ -113,6 +129,15 @@ namespace Sshuttle {
 
             builder.set_member_name ("username");
             builder.add_string_value (this.username);
+
+            builder.set_member_name ("auth_type");
+            builder.add_string_value (this.auth_type);
+
+            builder.set_member_name ("key_path");
+            builder.add_string_value (this.key_path);
+
+            builder.set_member_name ("password");
+            builder.add_string_value (this.password);
 
             builder.set_member_name ("dns");
             builder.add_boolean_value (this.dns);
@@ -164,6 +189,15 @@ namespace Sshuttle {
             }
             if (obj.has_member ("username")) {
                 p.username = obj.get_string_member ("username");
+            }
+            if (obj.has_member ("auth_type")) {
+                p.auth_type = obj.get_string_member ("auth_type");
+            }
+            if (obj.has_member ("key_path")) {
+                p.key_path = obj.get_string_member ("key_path");
+            }
+            if (obj.has_member ("password")) {
+                p.password = obj.get_string_member ("password");
             }
             if (obj.has_member ("dns")) {
                 p.dns = obj.get_boolean_member ("dns");

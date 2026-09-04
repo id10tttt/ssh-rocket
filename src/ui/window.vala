@@ -10,10 +10,6 @@ namespace Sshuttle {
         private Gtk.Stack content_stack;
         private GLib.GenericArray<ConnectionCard> cards;
 
-        private Gtk.Button tab_connect_btn;
-        private Gtk.Button tab_rules_btn;
-        private Gtk.Button tab_log_btn;
-
         public MainWindow (Adw.Application app, TunnelManager tunnel_manager) {
             Object (application: app);
             this.tunnel_manager = tunnel_manager;
@@ -26,7 +22,7 @@ namespace Sshuttle {
                 w = 880;
             }
             if (h < 540) {
-                h = 580;
+                h = 600;
             }
             this.set_default_size (w, h);
             this.title = "SShuttle";
@@ -69,117 +65,60 @@ namespace Sshuttle {
             var toolbar_view = new Adw.ToolbarView ();
             this.set_content (toolbar_view);
 
-            // 极简原生窗体顶栏
+            // 使用原生 Adw.HeaderBar + ViewSwitcher 实现 GNOME 风格 Tab 导航
             var header_bar = new Adw.HeaderBar ();
-            header_bar.show_title = true;
-            toolbar_view.add_top_bar (header_bar);
 
-            // 主垂直容器：顶部独立导航栏 + 分割线 + ViewStack 内容区
-            var main_vbox = new Gtk.Box (Gtk.Orientation.VERTICAL, 0);
-            toolbar_view.set_content (main_vbox);
+            // 中央 ViewSwitcher（Connect / Rules / Log）
+            this.view_stack = new Adw.ViewStack ();
 
-            // 独立的整齐导航栏 (参考截图设计)
-            var nav_bar = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 12);
-            nav_bar.margin_start = 20;
-            nav_bar.margin_end = 20;
-            nav_bar.margin_top = 10;
-            nav_bar.margin_bottom = 10;
-            main_vbox.append (nav_bar);
+            var switcher = new Adw.ViewSwitcher ();
+            switcher.stack = this.view_stack;
+            switcher.policy = Adw.ViewSwitcherPolicy.WIDE;
+            header_bar.set_title_widget (switcher);
 
-            // 左侧 Tab 按钮组 (Connect / Rules / Log)
-            var tabs_box = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 6);
-            nav_bar.append (tabs_box);
-
-            this.tab_connect_btn = this.create_tab_button ("Connect", "connect");
-            this.tab_rules_btn = this.create_tab_button ("Rules", "rules");
-            this.tab_log_btn = this.create_tab_button ("Log", "log");
-
-            tabs_box.append (this.tab_connect_btn);
-            tabs_box.append (this.tab_rules_btn);
-            tabs_box.append (this.tab_log_btn);
-
-            // 弹簧占位
-            var spacer = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 0);
-            spacer.hexpand = true;
-            nav_bar.append (spacer);
-
-            // 右侧操作项：+ Add Connection 按钮与 Settings 菜单
-            var right_box = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 8);
-            nav_bar.append (right_box);
-
-            var add_btn = new Gtk.Button ();
-            add_btn.add_css_class ("suggested-action");
-
-            var add_content = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 6);
-            var add_icon = new Gtk.Image.from_icon_name ("list-add-symbolic");
-            var add_label = new Gtk.Label ("Add Connection");
-            add_content.append (add_icon);
-            add_content.append (add_label);
-            add_btn.set_child (add_content);
+            // 右侧操作按钮
+            var add_btn = new Gtk.Button.from_icon_name ("list-add-symbolic");
+            add_btn.tooltip_text = "Add Connection";
+            add_btn.add_css_class ("flat");
             add_btn.clicked.connect (this.on_add_profile);
-            right_box.append (add_btn);
+            header_bar.pack_end (add_btn);
 
             var settings_btn = new Gtk.MenuButton ();
-            settings_btn.icon_name = "emblem-system-symbolic";
-            settings_btn.tooltip_text = "Settings";
+            settings_btn.icon_name = "open-menu-symbolic";
+            settings_btn.tooltip_text = "Menu";
+            settings_btn.add_css_class ("flat");
 
             var menu = new GLib.Menu ();
             menu.append ("About SShuttle", "app.about");
             menu.append ("Quit", "app.quit");
             settings_btn.menu_model = menu;
-            right_box.append (settings_btn);
+            header_bar.pack_end (settings_btn);
 
-            // 导航栏下方精细分割线
-            var nav_separator = new Gtk.Separator (Gtk.Orientation.HORIZONTAL);
-            main_vbox.append (nav_separator);
+            toolbar_view.add_top_bar (header_bar);
 
             // ViewStack 内容承载区
-            this.view_stack = new Adw.ViewStack ();
             this.view_stack.vexpand = true;
-            main_vbox.append (this.view_stack);
+            toolbar_view.set_content (this.view_stack);
 
-            // Page 1: Connect 视图
+            // Page 1: Connect
             var connect_page = this.build_connect_page ();
-            this.view_stack.add_named (connect_page, "connect");
+            var connect_vs_page = this.view_stack.add_named (connect_page, "connect");
+            connect_vs_page.title = "Connect";
+            connect_vs_page.icon_name = "network-vpn-symbolic";
 
-            // Page 2: Rules 视图
+            // Page 2: Rules
             var rules_view = new RulesView (this.config_manager, this.tunnel_manager);
-            this.view_stack.add_named (rules_view, "rules");
+            var rules_vs_page = this.view_stack.add_named (rules_view, "rules");
+            rules_vs_page.title = "Rules";
+            rules_vs_page.icon_name = "preferences-system-network-symbolic";
 
-            // Page 3: Log 视图
+            // Page 3: Log
             var log_view = new LogView (this.tunnel_manager);
-            this.view_stack.add_named (log_view, "log");
-
-            // 默认选中 Connect Tab
-            this.switch_to_tab ("connect");
+            var log_vs_page = this.view_stack.add_named (log_view, "log");
+            log_vs_page.title = "Log";
+            log_vs_page.icon_name = "utilities-terminal-symbolic";
 
             this.refresh_connections ();
-        }
-
-        private Gtk.Button create_tab_button (string label, string page_name) {
-            var btn = new Gtk.Button.with_label (label);
-            btn.add_css_class ("flat");
-            btn.add_css_class ("title-4");
-            btn.clicked.connect (() => {
-                this.switch_to_tab (page_name);
-            });
-            return btn;
-        }
-
-        private void switch_to_tab (string page_name) {
-            this.view_stack.visible_child_name = page_name;
-
-            this.tab_connect_btn.remove_css_class ("suggested-action");
-            this.tab_rules_btn.remove_css_class ("suggested-action");
-            this.tab_log_btn.remove_css_class ("suggested-action");
-
-            if (page_name == "connect") {
-                this.tab_connect_btn.add_css_class ("suggested-action");
-            } else if (page_name == "rules") {
-                this.tab_rules_btn.add_css_class ("suggested-action");
-            } else if (page_name == "log") {
-                this.tab_log_btn.add_css_class ("suggested-action");
-            }
         }
 
         private Gtk.Widget build_connect_page () {
@@ -187,9 +126,18 @@ namespace Sshuttle {
 
             // 空状态占位页
             this.empty_page = new Adw.StatusPage ();
-            this.empty_page.icon_name = "network-workgroup-symbolic";
+            this.empty_page.icon_name = "network-vpn-disconnected-symbolic";
             this.empty_page.title = "No Connections";
-            this.empty_page.description = "Click 'Add Connection' above to add your first server.";
+            this.empty_page.description = "Add a server to get started.";
+            this.empty_page.vexpand = true;
+
+            var empty_add_btn = new Gtk.Button.with_label ("Add Connection");
+            empty_add_btn.add_css_class ("pill");
+            empty_add_btn.add_css_class ("suggested-action");
+            empty_add_btn.halign = Gtk.Align.CENTER;
+            empty_add_btn.clicked.connect (this.on_add_profile);
+            this.empty_page.set_child (empty_add_btn);
+
             this.content_stack.add_named (this.empty_page, "empty");
 
             // 多卡片 FlowBox 容器
@@ -201,12 +149,13 @@ namespace Sshuttle {
             this.flow_box.max_children_per_line = 10;
             this.flow_box.min_children_per_line = 1;
             this.flow_box.selection_mode = Gtk.SelectionMode.NONE;
-            this.flow_box.margin_start = 20;
-            this.flow_box.margin_end = 20;
-            this.flow_box.margin_top = 16;
-            this.flow_box.margin_bottom = 20;
-            this.flow_box.column_spacing = 16;
-            this.flow_box.row_spacing = 16;
+            this.flow_box.margin_start = 24;
+            this.flow_box.margin_end = 24;
+            this.flow_box.margin_top = 24;
+            this.flow_box.margin_bottom = 24;
+            this.flow_box.column_spacing = 20;
+            this.flow_box.row_spacing = 20;
+            this.flow_box.homogeneous = true;
 
             scrolled.set_child (this.flow_box);
             this.content_stack.add_named (scrolled, "cards");
