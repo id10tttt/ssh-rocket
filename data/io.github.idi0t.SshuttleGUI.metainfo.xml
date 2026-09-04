@@ -1,14 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>io.giggle.SshuttleGUI</id>
+  <id>io.github.idi0t.SshuttleGUI</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
   <name>SShuttle</name>
+  <developer_name>1di0t</developer_name>
   <summary>Native GTK4 and Libadwaita client for sshuttle</summary>
   <description>
     <p>A modern and native GNOME front-end for managing sshuttle transparent proxy VPN connections.</p>
   </description>
-  <launchable type="desktop-id">io.giggle.SshuttleGUI.desktop</launchable>
+  <launchable type="desktop-id">io.github.idi0t.SshuttleGUI.desktop</launchable>
   <provides>
     <binary>sshuttle-gui</binary>
   </provides>

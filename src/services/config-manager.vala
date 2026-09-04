@@ -59,7 +59,9 @@ namespace Sshuttle {
                             arr.foreach_element ((array, index, element_node) => {
                                 if (element_node.get_node_type () == Json.NodeType.OBJECT) {
                                     var p = Profile.deserialize (element_node.get_object ());
-                                    this.profiles.add (p);
+                                    if (p.name != "Example VPS") {
+                                        this.profiles.add (p);
+                                    }
                                 }
                             });
                         }
@@ -69,21 +71,10 @@ namespace Sshuttle {
                 }
             }
 
-            if (this.profiles.length == 0) {
-                var default_p = new Profile ();
-                default_p.name = "Example VPS";
-                default_p.host = "gateway.example.com";
-                default_p.port = 22;
-                default_p.username = "root";
-                default_p.routes = new string[] { "0.0.0.0/0" };
-                default_p.exclude = new string[] { "192.168.0.0/16", "10.0.0.0/8" };
-                default_p.dns = true;
-                default_p.ipv6 = false;
-                default_p.method = "auto";
-
-                this.profiles.add (default_p);
-                this.active_profile_id = default_p.id;
-                this.save_profiles ();
+            if (this.profiles.length > 0 && (this.active_profile_id == null || this.get_active_profile () == null)) {
+                this.active_profile_id = this.profiles[0].id;
+            } else if (this.profiles.length == 0) {
+                this.active_profile_id = null;
             }
 
             if (GLib.FileUtils.test (this.settings_path, GLib.FileTest.EXISTS)) {

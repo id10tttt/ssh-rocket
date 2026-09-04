@@ -48,9 +48,9 @@ namespace Sshuttle {
             var about = new Adw.AboutDialog ();
             about.application_name = "SShuttle";
             about.application_icon = "network-vpn-symbolic";
-            about.developer_name = "Giggle";
+            about.developer_name = "1di0t";
             about.version = Config.VERSION;
-            about.copyright = "© 2026 Giggle";
+            about.copyright = "© 2026 1di0t";
             about.present (this.window);
         }
     }

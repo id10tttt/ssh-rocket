@@ -3,10 +3,10 @@
  "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <policyconfig>
-  <vendor>SShuttle GUI</vendor>
-  <vendor_url>https://github.com/giggle/sshuttle-gui</vendor_url>
+  <vendor>1di0t</vendor>
+  <vendor_url>https://github.com/1di0t/sshuttle-gui</vendor_url>
 
-  <action id="io.giggle.sshuttle.start">
+  <action id="io.github.idi0t.sshuttle.start">
     <description>Start sshuttle proxy tunnel</description>
     <message>Authentication is required to start sshuttle transparent proxy</message>
     <defaults>
@@ -16,7 +16,7 @@
     </defaults>
   </action>
 
-  <action id="io.giggle.sshuttle.stop">
+  <action id="io.github.idi0t.sshuttle.stop">
     <description>Stop sshuttle proxy tunnel</description>
     <message>Authentication is required to stop sshuttle transparent proxy</message>
     <defaults>

@@ -1,35 +1,49 @@
 namespace Sshuttle {
 
-    public class LogWindow : Adw.Window {
+    public class LogView : Gtk.Box {
         private TunnelManager tunnel_manager;
         private Gtk.TextView text_view;
         private Gtk.TextBuffer buffer;
-        private ulong log_handler_id = 0;
 
-        public LogWindow (TunnelManager tunnel_manager, Gtk.Window parent) {
+        public LogView (TunnelManager tunnel_manager) {
+            Object (orientation: Gtk.Orientation.VERTICAL, spacing: 0);
             this.tunnel_manager = tunnel_manager;
-            this.transient_for = parent;
-            this.default_width = 580;
-            this.default_height = 420;
-            this.title = "Logs";
 
-            var toolbar_view = new Adw.ToolbarView ();
-            this.set_content (toolbar_view);
+            // 顶部操作栏
+            var action_bar = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 8);
+            action_bar.margin_start = 16;
+            action_bar.margin_end = 16;
+            action_bar.margin_top = 10;
+            action_bar.margin_bottom = 10;
+            this.append (action_bar);
 
-            var header_bar = new Adw.HeaderBar ();
-            toolbar_view.add_top_bar (header_bar);
+            var title_lbl = new Gtk.Label ("Real-time Output");
+            title_lbl.add_css_class ("dim-label");
+            action_bar.append (title_lbl);
+
+            var spacer = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 0);
+            spacer.hexpand = true;
+            action_bar.append (spacer);
 
             var copy_btn = new Gtk.Button.from_icon_name ("edit-copy-symbolic");
-            copy_btn.tooltip_text = "Copy";
+            copy_btn.tooltip_text = "Copy Log";
             copy_btn.clicked.connect (this.on_copy_clicked);
-            header_bar.pack_start (copy_btn);
+            action_bar.append (copy_btn);
 
             var clear_btn = new Gtk.Button.from_icon_name ("edit-clear-all-symbolic");
-            clear_btn.tooltip_text = "Clear";
+            clear_btn.tooltip_text = "Clear Log";
             clear_btn.clicked.connect (this.on_clear_clicked);
-            header_bar.pack_start (clear_btn);
+            action_bar.append (clear_btn);
 
+            // 分割线
+            var sep = new Gtk.Separator (Gtk.Orientation.HORIZONTAL);
+            this.append (sep);
+
+            // 滚动日志文本区域
             var scrolled = new Gtk.ScrolledWindow ();
+            scrolled.vexpand = true;
+            this.append (scrolled);
+
             this.text_view = new Gtk.TextView ();
             this.text_view.editable = false;
             this.text_view.cursor_visible = false;
@@ -37,14 +51,13 @@ namespace Sshuttle {
             this.text_view.wrap_mode = Gtk.WrapMode.WORD_CHAR;
             this.text_view.top_margin = 12;
             this.text_view.bottom_margin = 12;
-            this.text_view.left_margin = 12;
-            this.text_view.right_margin = 12;
+            this.text_view.left_margin = 16;
+            this.text_view.right_margin = 16;
 
             scrolled.set_child (this.text_view);
-            toolbar_view.set_content (scrolled);
-
             this.buffer = this.text_view.get_buffer ();
 
+            // 初始化已有历史
             var hist = this.tunnel_manager.log_history;
             if (hist.length > 0) {
                 var sb = new StringBuilder ();
@@ -56,19 +69,11 @@ namespace Sshuttle {
                 this.scroll_to_bottom ();
             }
 
-            this.log_handler_id = this.tunnel_manager.log_received.connect ((line) => {
+            this.tunnel_manager.log_received.connect ((line) => {
                 Gtk.TextIter end_iter;
                 this.buffer.get_end_iter (out end_iter);
                 this.buffer.insert (ref end_iter, line + "\n", -1);
                 this.scroll_to_bottom ();
-            });
-
-            this.close_request.connect (() => {
-                if (this.log_handler_id != 0) {
-                    this.tunnel_manager.disconnect (this.log_handler_id);
-                    this.log_handler_id = 0;
-                }
-                return false;
             });
         }
 

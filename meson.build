@@ -9,7 +9,7 @@ project(
   ]
 )
 
-app_id = 'io.giggle.SshuttleGUI'
+app_id = 'io.github.idi0t.SshuttleGUI'
 version = meson.project_version()
 
 gnome = import('gnome')
