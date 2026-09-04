@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=SShuttle
+Comment=VPN over SSH proxy manager
+Exec=sshuttle-gui
+Icon=network-vpn-symbolic
+Terminal=false
+Type=Application
+Categories=GNOME;GTK;Network;VPN;
+StartupNotify=true
+X-Purism-FormFactor=Workstation;Mobile;
