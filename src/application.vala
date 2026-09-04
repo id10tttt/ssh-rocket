@@ -3,6 +3,7 @@ namespace Sshuttle {
     public class Application : Adw.Application {
         private ConfigManager config_manager;
         private TunnelManager tunnel_manager;
+        private TrayManager tray_manager;
         private MainWindow? window = null;
 
         public Application () {
@@ -17,10 +18,21 @@ namespace Sshuttle {
 
             this.config_manager = new ConfigManager ();
             this.tunnel_manager = new TunnelManager (this.config_manager);
+            this.tray_manager = new TrayManager (this.config_manager, this.tunnel_manager);
+
+            this.tray_manager.show_window_requested.connect (() => {
+                if (this.window != null) {
+                    this.window.show_and_present ();
+                }
+            });
+
+            this.tray_manager.quit_requested.connect (() => {
+                this.handle_real_quit ();
+            });
 
             var quit_action = new GLib.SimpleAction ("quit", null);
             quit_action.activate.connect (() => {
-                this.quit ();
+                this.handle_real_quit ();
             });
             this.add_action (quit_action);
 
@@ -32,7 +44,13 @@ namespace Sshuttle {
 
             this.set_accels_for_action ("app.quit", { "<Control>q" });
             this.set_accels_for_action ("win.new-profile", { "<Control>n" });
-            this.set_accels_for_action ("win.show-logs", { "<Control>l" });
+        }
+
+        private void handle_real_quit () {
+            if (this.tunnel_manager != null) {
+                this.tunnel_manager.disconnect_tunnel ();
+            }
+            this.quit ();
         }
 
         public override void activate () {
@@ -41,7 +59,7 @@ namespace Sshuttle {
             if (this.window == null) {
                 this.window = new MainWindow (this, this.tunnel_manager);
             }
-            this.window.present ();
+            this.window.show_and_present ();
         }
 
         private void show_about () {

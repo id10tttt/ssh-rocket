@@ -6,6 +6,7 @@ sources = [
   'services/command-builder.vala',
   'services/config-manager.vala',
   'services/tunnel-manager.vala',
+  'services/tray-manager.vala',
   'ui/connection-card.vala',
   'ui/profile-editor.vala',
   'ui/rules-view.vala',
