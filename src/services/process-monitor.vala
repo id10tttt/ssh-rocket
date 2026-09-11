@@ -168,10 +168,13 @@ namespace Sshuttle {
                     for (int i = 0; i < data.length; i++) {
                         if (data[i] == 0) {
                             if (i > start) {
-                                string arg = ((string) data).substring (start, i - start);
-                                string base_name = GLib.Path.get_basename (arg).down ();
-                                if (this.target_execs.contains (base_name) || this.block_execs.contains (base_name)) {
-                                    return base_name;
+                                unowned string arg = (string) (&data[start]);
+                                string? base_name = GLib.Path.get_basename (arg);
+                                if (base_name != null && base_name != "") {
+                                    string lower = base_name.down ();
+                                    if (this.target_execs.contains (lower) || this.block_execs.contains (lower)) {
+                                        return lower;
+                                    }
                                 }
                             }
                             start = i + 1;

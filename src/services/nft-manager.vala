@@ -201,7 +201,11 @@ namespace Sshuttle {
                     out exit_status
                 );
                 if (exit_status != 0 && stderr_text != null && stderr_text.strip () != "") {
-                    warning ("nft command failed (code %d): %s | command: %s", exit_status, stderr_text.strip (), command);
+                    string err_msg = stderr_text.strip ();
+                    // 清理时若表原本就不存在，属于正常预期，不输出警告日志
+                    if (!("delete table" in command && "No such file or directory" in err_msg)) {
+                        warning ("nft command failed (code %d): %s | command: %s", exit_status, err_msg, command);
+                    }
                 }
                 return (exit_status == 0);
             } catch (GLib.Error e) {
