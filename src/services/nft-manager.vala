@@ -25,28 +25,27 @@ namespace Sshuttle {
             // 2. 清理旧规则以防重复
             this.remove_cgroup_filter (port, ipv6_enabled);
 
-            // 3. 在 output 链插入规则
-            // 首条：非选定软件数据包直接 return 放行
-            string cmd_bypass = @"nft insert rule inet $(table_v4) output socket cgroupv2 level 1 != \"sshuttle-proxy\" return";
-            if (!this.run_nft_command (cmd_bypass)) {
-                warning ("Failed to insert cgroup bypass rule");
-                success = false;
-            }
+            // 3. 在 output 链插入规则 (注意倒序插入以确保最终执行顺序)：
+            //   1) udp sport 15354 return (DnsProxy 自身上游查询放行，杜绝回环)
+            //   2) ip daddr @proxy_ips udp dport 443 reject (QUIC 快速 reject，促使浏览器秒级降级为 TCP)
+            //   3) udp dport 53 redirect to :15353 (全局 DNS 查询重定向至本地 DnsProxy)
+            this.run_nft_command (@"nft insert rule inet $(table_v4) output udp dport 53 redirect to :15353");
+            this.run_nft_command (@"nft insert rule inet $(table_v4) output ip daddr @proxy_ips udp dport 443 reject");
+            this.run_nft_command (@"nft insert rule inet $(table_v4) output udp sport 15354 return");
 
-            // 次条：仅被代理软件发起的 DNS (UDP 53) 查询重定向至本地 DnsProxy (15353)
-            string cmd_dns = @"nft add rule inet $(table_v4) output socket cgroupv2 level 1 \"sshuttle-proxy\" udp dport 53 redirect to :15353";
-            this.run_nft_command (cmd_dns);
-
-            // 4. 在 sshuttle 子链首部插入 IP Set 裁决规则
-            // 命中直连集合 -> 直接 return
-            string cmd_direct_set = @"nft insert rule inet $(table_v4) $(table_v4) ip daddr @direct_ips return";
-            this.run_nft_command (cmd_direct_set);
-
-            // 若默认策略为直连：未命中代理集合的 IP 直接 return
+            // 4. 在 sshuttle 子链首部插入分流与裁决规则 (倒序插入)：
+            // 最终期望执行顺序：
+            //   1) ip daddr @direct_ips return (直连域名/IP 优先放行)
+            //   2) ip daddr @proxy_ips meta l4proto tcp redirect to :$(port) (命中代理集合的 IP 无论哪个 App 访问均走代理)
+            //   3) socket cgroupv2 level 1 != "sshuttle-proxy" return (未勾选的应用默认直连放行)
+            //   4) [若 default_policy == direct]: ip daddr != @proxy_ips return (已勾选的应用若默认直连则放行未指定代理的 IP)
+            //   5) (sshuttle 默认规则) redirect to :$(port) (已勾选的应用走代理)
             if (default_policy == "direct") {
-                string cmd_default_direct = @"nft insert rule inet $(table_v4) $(table_v4) ip daddr != @proxy_ips return";
-                this.run_nft_command (cmd_default_direct);
+                this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr != @proxy_ips return");
             }
+            this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) socket cgroupv2 level 1 != \"sshuttle-proxy\" return");
+            this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr @proxy_ips meta l4proto tcp redirect to :$(port)");
+            this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr @direct_ips return");
 
             if (ipv6_enabled) {
                 string table_v6 = @"sshuttle-ipv6-$(port)";
@@ -75,9 +74,12 @@ namespace Sshuttle {
          * 移除 cgroup 过滤规则
          */
         public void remove_cgroup_filter (int port, bool ipv6_enabled) {
-            this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", "output", "sshuttle-proxy");
+            this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", "output", "15354");
+            this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", "output", "15353");
+            this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", "output", "@proxy_ips");
             this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", @"sshuttle-ipv4-$(port)", "@direct_ips");
             this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", @"sshuttle-ipv4-$(port)", "@proxy_ips");
+            this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", @"sshuttle-ipv4-$(port)", "sshuttle-proxy");
 
             if (ipv6_enabled) {
                 this.delete_matching_rules ("inet", @"sshuttle-ipv6-$(port)", "output", "sshuttle-proxy");

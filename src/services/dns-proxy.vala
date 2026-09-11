@@ -10,6 +10,8 @@ namespace Sshuttle {
      */
     public class DnsProxy : Object {
         public const uint16 DNS_PORT = 15353;
+        public const uint16 FORWARD_PORT = 15354;
+        public uint16 remote_dns_port { get; set; default = 0; }
         private ConfigManager config_manager;
         private NftManager nft_manager;
         private GLib.Socket? server_socket = null;
@@ -86,88 +88,120 @@ namespace Sshuttle {
             return null;
         }
 
+        private uint8[]? query_udp (string server_ip, uint16 server_port, uint8[] query_packet) {
+            try {
+                var s = new GLib.Socket (GLib.SocketFamily.IPV4, GLib.SocketType.DATAGRAM, GLib.SocketProtocol.UDP);
+                s.set_timeout (2);
+                var bind_addr = new GLib.InetSocketAddress (new GLib.InetAddress.from_string ("127.0.0.1"), FORWARD_PORT);
+                s.bind (bind_addr, true);
+
+                var target_addr = new GLib.InetSocketAddress (new GLib.InetAddress.from_string (server_ip), server_port);
+                s.send_to (target_addr, query_packet);
+
+                uint8 buf[2048];
+                GLib.SocketAddress src_addr;
+                ssize_t len = s.receive_from (out src_addr, buf);
+                s.close ();
+
+                if (len > 0) {
+                    uint8[] resp = new uint8[len];
+                    GLib.Memory.copy (resp, buf, len);
+                    return resp;
+                }
+            } catch (GLib.Error e) {
+            }
+            return null;
+        }
+
+        private uint8[]? query_tcp (string server_ip, uint16 server_port, uint8[] query_packet) {
+            try {
+                var s = new GLib.Socket (GLib.SocketFamily.IPV4, GLib.SocketType.STREAM, GLib.SocketProtocol.TCP);
+                s.set_timeout (3);
+                var target_addr = new GLib.InetSocketAddress (new GLib.InetAddress.from_string (server_ip), server_port);
+                s.connect (target_addr);
+
+                // RFC 1035: 2 字节大端长度前缀
+                uint16 len = (uint16) query_packet.length;
+                uint8 len_buf[2];
+                len_buf[0] = (uint8) ((len >> 8) & 0xff);
+                len_buf[1] = (uint8) (len & 0xff);
+
+                s.send (len_buf);
+                s.send (query_packet);
+
+                uint8 resp_len_buf[2];
+                ssize_t r1 = s.receive (resp_len_buf);
+                if (r1 < 2) {
+                    s.close ();
+                    return null;
+                }
+
+                uint16 resp_len = (uint16) ((resp_len_buf[0] << 8) | resp_len_buf[1]);
+                if (resp_len == 0 || resp_len > 4096) {
+                    s.close ();
+                    return null;
+                }
+
+                uint8[] resp = new uint8[resp_len];
+                size_t total = 0;
+                while (total < resp_len) {
+                    uint8 chunk[2048];
+                    ssize_t r = s.receive (chunk);
+                    if (r <= 0) {
+                        break;
+                    }
+                    for (int i = 0; i < r && total + i < resp_len; i++) {
+                        resp[total + i] = chunk[i];
+                    }
+                    total += r;
+                }
+                s.close ();
+
+                if (total == resp_len) {
+                    return resp;
+                }
+            } catch (GLib.Error e) {
+            }
+            return null;
+        }
+
         private void handle_dns_query (uint8[] query_packet, GLib.SocketAddress client_addr) {
             string? domain = parse_qname (query_packet);
             string action = this.resolve_action_for_domain (domain);
 
-            // 选择上游 DNS 服务器
-            string upstream_ip = (action == "proxy") ? "8.8.8.8" : "127.0.0.53";
+            uint8[]? resp_packet = null;
 
-            try {
-                var forward_socket = new GLib.Socket (
-                    GLib.SocketFamily.IPV4,
-                    GLib.SocketType.DATAGRAM,
-                    GLib.SocketProtocol.UDP
-                );
-                forward_socket.set_timeout (3);
-
-                var up_inet = new GLib.InetAddress.from_string (upstream_ip);
-                var up_addr = new GLib.InetSocketAddress (up_inet, 53);
-
-                forward_socket.send_to (up_addr, query_packet);
-
-                uint8 resp_buf[2048];
-                GLib.SocketAddress resp_src;
-                ssize_t resp_len = forward_socket.receive_from (out resp_src, resp_buf);
-
-                if (resp_len > 0) {
-                    uint8[] resp_packet = new uint8[resp_len];
-                    GLib.Memory.copy (resp_packet, resp_buf, resp_len);
-
-                    // 提取响应中的 IP 并加入 nftables 集合
-                    var ips = parse_answer_ips (resp_packet);
-                    foreach (var ip in ips) {
-                        this.nft_manager.add_ip_to_set (ip, action);
-                    }
-
-                    // 回发给客户端
-                    if (this.server_socket != null) {
-                        this.server_socket.send_to (client_addr, resp_packet);
-                    }
+            if (action == "proxy") {
+                // 1. 优先尝试 sshuttle 本地隧道 DNS (无污染高速解析)
+                if (this.remote_dns_port > 0) {
+                    resp_packet = this.query_udp ("127.0.0.1", this.remote_dns_port, query_packet);
                 }
-
-                forward_socket.close ();
-            } catch (GLib.Error e) {
-                // 如果本地 DNS 超时，尝试备用公共 DNS
-                if (upstream_ip == "127.0.0.53") {
-                    this.forward_fallback (query_packet, client_addr, "223.5.5.5", action);
+                // 2. 若隧道 DNS 尚未就绪，通过 TCP 向 8.8.8.8 查询 (TCP 自动走 sshuttle 隧道代理)
+                if (resp_packet == null) {
+                    resp_packet = this.query_tcp ("8.8.8.8", 53, query_packet);
+                }
+            } else {
+                // 直连域名：本地系统 DNS 优先
+                resp_packet = this.query_udp ("127.0.0.53", 53, query_packet);
+                if (resp_packet == null) {
+                    resp_packet = this.query_udp ("223.5.5.5", 53, query_packet);
                 }
             }
-        }
 
-        private void forward_fallback (uint8[] query_packet, GLib.SocketAddress client_addr, string fallback_ip, string action) {
-            try {
-                var forward_socket = new GLib.Socket (
-                    GLib.SocketFamily.IPV4,
-                    GLib.SocketType.DATAGRAM,
-                    GLib.SocketProtocol.UDP
-                );
-                forward_socket.set_timeout (3);
+            if (resp_packet != null) {
+                // 提取解析所得 IP 写入 nftables 对应集合
+                var ips = parse_answer_ips (resp_packet);
+                foreach (var ip in ips) {
+                    this.nft_manager.add_ip_to_set (ip, action);
+                }
 
-                var up_inet = new GLib.InetAddress.from_string (fallback_ip);
-                var up_addr = new GLib.InetSocketAddress (up_inet, 53);
-
-                forward_socket.send_to (up_addr, query_packet);
-
-                uint8 resp_buf[2048];
-                GLib.SocketAddress resp_src;
-                ssize_t resp_len = forward_socket.receive_from (out resp_src, resp_buf);
-
-                if (resp_len > 0) {
-                    uint8[] resp_packet = new uint8[resp_len];
-                    GLib.Memory.copy (resp_packet, resp_buf, resp_len);
-
-                    var ips = parse_answer_ips (resp_packet);
-                    foreach (var ip in ips) {
-                        this.nft_manager.add_ip_to_set (ip, action);
-                    }
-
-                    if (this.server_socket != null) {
+                // 回发客户端
+                if (this.server_socket != null) {
+                    try {
                         this.server_socket.send_to (client_addr, resp_packet);
+                    } catch (GLib.Error e) {
                     }
                 }
-                forward_socket.close ();
-            } catch (GLib.Error e) {
             }
         }
 

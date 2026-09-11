@@ -489,6 +489,32 @@ namespace Sshuttle {
             this.domain_rules_changed ();
         }
 
+        public void update_domain_rule (string old_pattern, string new_pattern, string new_action) {
+            string op = old_pattern.strip ().down ();
+            string np = new_pattern.strip ().down ();
+            string na = (new_action.strip ().down () == "proxy") ? "proxy" : "direct";
+            if (np == "") {
+                return;
+            }
+
+            bool found = false;
+            for (uint i = 0; i < this.domain_rules.length; i++) {
+                if (this.domain_rules[i].pattern == op) {
+                    this.domain_rules[i] = new DomainRule (np, na);
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                this.add_domain_rule (np, na);
+                return;
+            }
+
+            this.save_settings ();
+            this.domain_rules_changed ();
+        }
+
         public void remove_domain_rule (string pattern) {
             string p = pattern.strip ().down ();
             bool removed = false;

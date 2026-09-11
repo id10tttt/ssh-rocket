@@ -279,6 +279,24 @@ namespace Sshuttle {
         private void on_log_line (string line) {
             this.emit_proxy_log (line);
             string lower = line.down ();
+
+            if ("dns listening on" in lower) {
+                // 捕获 sshuttle 内部安全 DNS 端口 (例如 "c : DNS listening on ('127.0.0.1', 12299).")
+                int p_idx = line.index_of ("('127.0.0.1', ");
+                if (p_idx >= 0) {
+                    string sub = line.substring (p_idx + 14);
+                    int end_idx = sub.index_of (")");
+                    if (end_idx > 0) {
+                        string port_str = sub.substring (0, end_idx).strip ();
+                        uint16 port = (uint16) int.parse (port_str);
+                        if (port > 0) {
+                            this.dns_proxy.remote_dns_port = port;
+                            this.emit_log (@"Tunnel remote DNS ready on port $(port)");
+                        }
+                    }
+                }
+            }
+
             if ("connected to server" in lower || "c : connected" in lower || "tunnel ready" in lower || (lower.has_prefix ("connected") && !("not connected" in lower))) {
                 if (this.state == TunnelState.CONNECTING) {
                     if (this.connect_timeout_id != 0) {
@@ -396,6 +414,7 @@ namespace Sshuttle {
         public void cleanup_proxy_runtime () {
             this.stop_speed_monitor ();
             this.dns_proxy.stop ();
+            this.dns_proxy.remote_dns_port = 0;
             this.process_monitor.stop ();
             this.nft_manager.cleanup_all_sshuttle_tables (this.local_proxy_port);
             this.cgroup_manager.cleanup_and_destroy ();

@@ -27,10 +27,11 @@ namespace Sshuttle {
             argv.add ("--method");
             argv.add ("nft");
 
-            if (profile.verbosity == "verbose") {
-                argv.add ("-v");
-            } else if (profile.verbosity == "very_verbose") {
+            // 始终启用 -v 确保输出内部 DNS 监听端口供 DnsProxy 捕获
+            if (profile.verbosity == "very_verbose") {
                 argv.add ("-vv");
+            } else {
+                argv.add ("-v");
             }
 
             // 构造 SSH 命令，确保在后台非终端环境下能够自动接受新 Host Key，并支持读取当前普通用户的 known_hosts / agent
