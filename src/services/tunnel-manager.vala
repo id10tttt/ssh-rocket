@@ -12,6 +12,16 @@ namespace Sshuttle {
         }
     }
 
+    public class SocketTrafficEntry : Object {
+        public uint64 sent;
+        public uint64 rcv;
+
+        public SocketTrafficEntry (uint64 sent, uint64 rcv) {
+            this.sent = sent;
+            this.rcv = rcv;
+        }
+    }
+
     public class TunnelManager : Object {
         public signal void state_changed (TunnelState state);
         public signal void log_received (string line);
@@ -43,6 +53,10 @@ namespace Sshuttle {
         public string current_up_speed { get; private set; default = "0.0 kb/s"; }
         public string current_down_speed { get; private set; default = "0.0 kb/s"; }
 
+        private GLib.HashTable<string, SocketTrafficEntry> active_sockets;
+        private GLib.HashTable<string, string> proc_to_app_id;
+        private uint traffic_save_counter = 0;
+
         public signal void speed_updated (string up_speed, string down_speed);
 
         public GLib.GenericArray<AppLogEntry> app_logs { get; private set; }
@@ -62,6 +76,9 @@ namespace Sshuttle {
             this.log_history = new GLib.GenericArray<string> ();
             this.app_logs = new GLib.GenericArray<AppLogEntry> ();
             this.proxy_logs = new GLib.GenericArray<string> ();
+
+            this.active_sockets = new GLib.HashTable<string, SocketTrafficEntry> (GLib.str_hash, GLib.str_equal);
+            this.proc_to_app_id = new GLib.HashTable<string, string> (GLib.str_hash, GLib.str_equal);
 
             this.cgroup_manager = new CgroupManager ();
             this.nft_manager = new NftManager ();
@@ -436,6 +453,8 @@ namespace Sshuttle {
             this.process_monitor.stop ();
             this.nft_manager.cleanup_all_sshuttle_tables (this.local_proxy_port);
             this.cgroup_manager.cleanup_and_destroy ();
+            this.active_sockets.remove_all ();
+            this.config_manager.save_settings ();
         }
 
         private void start_speed_monitor () {
@@ -554,7 +573,165 @@ namespace Sshuttle {
             this.current_up_speed = format_speed (up_bytes_per_sec);
             this.current_down_speed = format_speed (down_bytes_per_sec);
 
+            this.update_app_traffic_stats ();
+
             this.speed_updated (this.current_up_speed, this.current_down_speed);
+        }
+
+        private void update_app_traffic_stats () {
+            string stdout_buf;
+            try {
+                string[] argv = { "ss", "-tipn", "--cgroup", "cgroup", "=", "sshuttle-proxy" };
+                int status;
+                GLib.Process.spawn_sync (null, argv, null, GLib.SpawnFlags.SEARCH_PATH, null, out stdout_buf, null, out status);
+            } catch (GLib.Error e) {
+                return;
+            }
+
+            if (stdout_buf == null || stdout_buf == "") {
+                return;
+            }
+
+            var seen_sockets = new GLib.HashTable<string, bool> (GLib.str_hash, GLib.str_equal);
+            string[] lines = stdout_buf.split ("\n");
+
+            string current_sock_key = "";
+            string current_app_id = "";
+
+            try {
+                var rx_user = new GLib.Regex ("users:\\(\\(\"([^\"]+)\"");
+                var rx_sent = new GLib.Regex ("bytes_sent:(\\d+)");
+                var rx_rcv = new GLib.Regex ("bytes_received:(\\d+)");
+
+                for (int i = 0; i < lines.length; i++) {
+                    string line = lines[i].strip ();
+                    if (line == "") {
+                        continue;
+                    }
+
+                    if (!line.has_prefix ("cubic") && !line.has_prefix ("bbr") && !line.has_prefix ("reno") && ("cgroup:" in line || "users:" in line)) {
+                        string[] tokens = line.split (" ");
+                        var non_empty = new GLib.GenericArray<string> ();
+                        foreach (var t in tokens) {
+                            if (t != "") {
+                                non_empty.add (t);
+                            }
+                        }
+
+                        if (non_empty.length >= 5) {
+                            string local_addr = non_empty[3];
+                            string peer_addr = non_empty[4];
+                            current_sock_key = @"$(local_addr)->$(peer_addr)";
+                            seen_sockets.insert (current_sock_key, true);
+
+                            string proc_name = "";
+                            GLib.MatchInfo info_user;
+                            if (rx_user.match (line, 0, out info_user)) {
+                                proc_name = info_user.fetch (1).strip ().down ();
+                            }
+
+                            current_app_id = this.resolve_app_id_for_process (proc_name);
+                        }
+                    } else if (current_sock_key != "" && current_app_id != "") {
+                        uint64 cur_sent = 0;
+                        uint64 cur_rcv = 0;
+
+                        GLib.MatchInfo info_sent;
+                        if (rx_sent.match (line, 0, out info_sent)) {
+                            cur_sent = uint64.parse (info_sent.fetch (1));
+                        }
+
+                        GLib.MatchInfo info_rcv;
+                        if (rx_rcv.match (line, 0, out info_rcv)) {
+                            cur_rcv = uint64.parse (info_rcv.fetch (1));
+                        }
+
+                        if (cur_sent > 0 || cur_rcv > 0) {
+                            var prev = this.active_sockets.lookup (current_sock_key);
+                            uint64 delta_up = 0;
+                            uint64 delta_down = 0;
+
+                            if (prev != null) {
+                                if (cur_sent >= prev.sent) {
+                                    delta_up = cur_sent - prev.sent;
+                                }
+                                if (cur_rcv >= prev.rcv) {
+                                    delta_down = cur_rcv - prev.rcv;
+                                }
+                                prev.sent = cur_sent;
+                                prev.rcv = cur_rcv;
+                            } else {
+                                delta_up = cur_sent;
+                                delta_down = cur_rcv;
+                                this.active_sockets.insert (current_sock_key, new SocketTrafficEntry (cur_sent, cur_rcv));
+                            }
+
+                            if (delta_up > 0 || delta_down > 0) {
+                                this.config_manager.add_app_traffic (current_app_id, delta_up, delta_down);
+                            }
+                        }
+
+                        current_sock_key = "";
+                        current_app_id = "";
+                    }
+                }
+            } catch (GLib.RegexError e) {
+            }
+
+            var closed_keys = new GLib.GenericArray<string> ();
+            this.active_sockets.foreach ((k, v) => {
+                if (!seen_sockets.contains (k)) {
+                    closed_keys.add (k);
+                }
+            });
+            for (uint i = 0; i < closed_keys.length; i++) {
+                this.active_sockets.remove (closed_keys[i]);
+            }
+
+            this.traffic_save_counter++;
+            if (this.traffic_save_counter >= 10) {
+                this.traffic_save_counter = 0;
+                this.config_manager.save_settings ();
+            }
+        }
+
+        private string resolve_app_id_for_process (string proc_name) {
+            string p = proc_name.strip ().down ();
+            if (p == "") {
+                return "other";
+            }
+
+            string? mapped = this.proc_to_app_id.lookup (p);
+            if (mapped != null && mapped != "") {
+                return mapped;
+            }
+
+            var apps = AppScanner.scan_apps ();
+            for (uint i = 0; i < apps.length; i++) {
+                var app = apps[i];
+                if (app.exec_name.down () == p || app.id.replace (".desktop", "").down () == p) {
+                    this.proc_to_app_id.insert (p, app.id);
+                    return app.id;
+                }
+            }
+
+            return p;
+        }
+
+        public static string format_bytes (uint64 bytes) {
+            double b = (double) bytes;
+            if (b < 1024.0) {
+                return @"$(bytes) B";
+            } else if (b < 1024.0 * 1024.0) {
+                double kb = b / 1024.0;
+                return "%.1f KB".printf (kb);
+            } else if (b < 1024.0 * 1024.0 * 1024.0) {
+                double mb = b / (1024.0 * 1024.0);
+                return "%.2f MB".printf (mb);
+            } else {
+                double gb = b / (1024.0 * 1024.0 * 1024.0);
+                return "%.2f GB".printf (gb);
+            }
         }
 
         public static string format_speed (uint64 bytes_per_sec) {
@@ -617,21 +794,32 @@ namespace Sshuttle {
                 for (uint j = 0; j < proxy_app_ids.length; j++) {
                     if (proxy_app_ids[j] == app.id || proxy_app_ids[j] == app.exec_name) {
                         target_execs.add (app.exec_name);
+                        this.proc_to_app_id.insert (app.exec_name.down (), app.id);
                         string app_id_clean = app.id.replace (".desktop", "").down ();
                         if (app_id_clean != "" && app_id_clean != app.exec_name) {
                             target_execs.add (app_id_clean);
+                            this.proc_to_app_id.insert (app_id_clean, app.id);
                         }
 
                         // 常见应用与浏览器二进制及 Flatpak 进程名别名补充
                         if (app.exec_name == "google-chrome-stable" || app.exec_name == "google-chrome" || "chrome" in app.id.down ()) {
                             target_execs.add ("chrome");
+                            this.proc_to_app_id.insert ("chrome", app.id);
+                            this.proc_to_app_id.insert ("google-chrome", app.id);
+                            this.proc_to_app_id.insert ("google-chrome-stable", app.id);
                         } else if (app.exec_name == "firefox" || "firefox" in app.id.down ()) {
                             target_execs.add ("firefox-bin");
+                            this.proc_to_app_id.insert ("firefox", app.id);
+                            this.proc_to_app_id.insert ("firefox-bin", app.id);
                         } else if (app.exec_name == "telegram" || "telegram" in app.id.down () || "telegram" in app.exec_name.down ()) {
                             target_execs.add ("telegram");
                             target_execs.add ("telegram-desktop");
                             target_execs.add ("telegramdesktop");
                             target_execs.add ("org.telegram.desktop");
+                            this.proc_to_app_id.insert ("telegram", app.id);
+                            this.proc_to_app_id.insert ("telegram-desktop", app.id);
+                            this.proc_to_app_id.insert ("telegramdesktop", app.id);
+                            this.proc_to_app_id.insert ("org.telegram.desktop", app.id);
                         }
                         break;
                     }

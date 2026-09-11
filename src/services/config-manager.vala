@@ -1,5 +1,17 @@
 namespace Sshuttle {
 
+    public class AppTrafficStats : Object {
+        public string app_id { get; set; }
+        public uint64 bytes_uploaded { get; set; default = 0; }
+        public uint64 bytes_downloaded { get; set; default = 0; }
+
+        public AppTrafficStats (string app_id, uint64 uploaded = 0, uint64 downloaded = 0) {
+            this.app_id = app_id;
+            this.bytes_uploaded = uploaded;
+            this.bytes_downloaded = downloaded;
+        }
+    }
+
     public class ConfigManager : Object {
         private string config_dir;
         private string profiles_path;
@@ -15,16 +27,19 @@ namespace Sshuttle {
         private GLib.GenericArray<string> blocked_processes;
         private GLib.GenericArray<DomainRule> domain_rules;
         private string domain_default_policy = "proxy";
+        private GLib.HashTable<string, AppTrafficStats> app_traffic;
 
         public signal void app_rules_changed ();
         public signal void domain_rules_changed ();
         public signal void blacklist_changed ();
+        public signal void traffic_stats_changed ();
 
         public ConfigManager () {
             this.proxy_apps = new GLib.GenericArray<string> ();
             this.blocked_apps = new GLib.GenericArray<string> ();
             this.blocked_processes = new GLib.GenericArray<string> ();
             this.domain_rules = new GLib.GenericArray<DomainRule> ();
+            this.app_traffic = new GLib.HashTable<string, AppTrafficStats> (GLib.str_hash, GLib.str_equal);
 
             string? env_dir = GLib.Environment.get_variable ("SSHUTTLE_CONFIG_DIR");
             string? sudo_user = GLib.Environment.get_variable ("SUDO_USER");
@@ -149,6 +164,19 @@ namespace Sshuttle {
                                     this.domain_rules.add (DomainRule.deserialize (element_node.get_object ()));
                                 }
                             });
+                        }
+                        if (obj.has_member ("app_traffic")) {
+                            this.app_traffic.remove_all ();
+                            var traffic_obj = obj.get_object_member ("app_traffic");
+                            var members = traffic_obj.get_members ();
+                            foreach (var member in members) {
+                                if (traffic_obj.has_member (member)) {
+                                    var item = traffic_obj.get_object_member (member);
+                                    uint64 up = (uint64) item.get_int_member ("uploaded");
+                                    uint64 down = (uint64) item.get_int_member ("downloaded");
+                                    this.app_traffic.insert (member, new AppTrafficStats (member, up, down));
+                                }
+                            }
                         }
                     }
                 } catch (GLib.Error e) {
@@ -303,6 +331,19 @@ namespace Sshuttle {
             }
             builder.end_array ();
 
+            builder.set_member_name ("app_traffic");
+            builder.begin_object ();
+            this.app_traffic.foreach ((k, v) => {
+                builder.set_member_name (k);
+                builder.begin_object ();
+                builder.set_member_name ("uploaded");
+                builder.add_int_value ((int64) v.bytes_uploaded);
+                builder.set_member_name ("downloaded");
+                builder.add_int_value ((int64) v.bytes_downloaded);
+                builder.end_object ();
+            });
+            builder.end_object ();
+
             builder.end_object ();
 
             var generator = new Json.Generator ();
@@ -314,6 +355,49 @@ namespace Sshuttle {
             } catch (GLib.Error e) {
                 // 忽略设置保存异常
             }
+        }
+
+        public void get_app_traffic (string app_id, out uint64 uploaded, out uint64 downloaded) {
+            var stats = this.app_traffic.lookup (app_id);
+            if (stats != null) {
+                uploaded = stats.bytes_uploaded;
+                downloaded = stats.bytes_downloaded;
+            } else {
+                uploaded = 0;
+                downloaded = 0;
+            }
+        }
+
+        public void add_app_traffic (string app_id, uint64 up_delta, uint64 down_delta) {
+            if (up_delta == 0 && down_delta == 0) {
+                return;
+            }
+            var stats = this.app_traffic.lookup (app_id);
+            if (stats == null) {
+                stats = new AppTrafficStats (app_id, up_delta, down_delta);
+                this.app_traffic.insert (app_id, stats);
+            } else {
+                stats.bytes_uploaded += up_delta;
+                stats.bytes_downloaded += down_delta;
+            }
+            this.traffic_stats_changed ();
+        }
+
+        public void get_total_traffic (out uint64 total_uploaded, out uint64 total_downloaded) {
+            uint64 up = 0;
+            uint64 down = 0;
+            this.app_traffic.foreach ((k, v) => {
+                up += v.bytes_uploaded;
+                down += v.bytes_downloaded;
+            });
+            total_uploaded = up;
+            total_downloaded = down;
+        }
+
+        public void reset_traffic_stats () {
+            this.app_traffic.remove_all ();
+            this.save_settings ();
+            this.traffic_stats_changed ();
         }
 
         public void set_window_size (int w, int h) {

@@ -44,7 +44,23 @@ namespace Sshuttle {
             });
 
             this.tunnel_manager.speed_updated.connect ((up_speed, down_speed) => {
-                this.speed_label.label = @"↑ $(up_speed)   ↓ $(down_speed)";
+                uint64 total_up, total_down;
+                this.config_manager.get_total_traffic (out total_up, out total_down);
+                if (total_up > 0 || total_down > 0) {
+                    this.speed_label.label = @"↑ $(up_speed) ($(TunnelManager.format_bytes (total_up)))   ↓ $(down_speed) ($(TunnelManager.format_bytes (total_down)))";
+                } else {
+                    this.speed_label.label = @"↑ $(up_speed)   ↓ $(down_speed)";
+                }
+            });
+
+            this.config_manager.traffic_stats_changed.connect (() => {
+                uint64 total_up, total_down;
+                this.config_manager.get_total_traffic (out total_up, out total_down);
+                if (total_up > 0 || total_down > 0) {
+                    this.speed_label.label = @"↑ $(this.tunnel_manager.current_up_speed) ($(TunnelManager.format_bytes (total_up)))   ↓ $(this.tunnel_manager.current_down_speed) ($(TunnelManager.format_bytes (total_down)))";
+                } else {
+                    this.speed_label.label = @"↑ $(this.tunnel_manager.current_up_speed)   ↓ $(this.tunnel_manager.current_down_speed)";
+                }
             });
 
             // 点击关闭按钮自动缩放到托盘，不销毁进程

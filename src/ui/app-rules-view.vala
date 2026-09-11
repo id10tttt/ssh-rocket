@@ -4,6 +4,7 @@ namespace Sshuttle {
         private ConfigManager config_manager;
         private TunnelManager tunnel_manager;
 
+        private Adw.ActionRow summary_row;
         private Adw.EntryRow search_row;
         private Gtk.Box apps_list_box;
         private GLib.GenericArray<Adw.ActionRow> app_rows;
@@ -18,6 +19,21 @@ namespace Sshuttle {
             this.title = "App Proxy Rules";
             this.description = GLib.Markup.escape_text ("Checked applications route through proxy. Domains configured under Domain & IP route according to their rules.");
 
+            // 流量统计总览卡片
+            this.summary_row = new Adw.ActionRow ();
+            this.summary_row.title = "Proxy Traffic Statistics";
+            this.summary_row.subtitle = "↑ 0 B   ↓ 0 B   (Total: 0 B)";
+
+            var reset_btn = new Gtk.Button.from_icon_name ("edit-clear-all-symbolic");
+            reset_btn.add_css_class ("flat");
+            reset_btn.valign = Gtk.Align.CENTER;
+            reset_btn.tooltip_text = "Reset Statistics";
+            reset_btn.clicked.connect (() => {
+                this.config_manager.reset_traffic_stats ();
+            });
+            this.summary_row.add_suffix (reset_btn);
+            this.add (this.summary_row);
+
             // 搜索框
             this.search_row = new Adw.EntryRow ();
             this.search_row.title = "Search Applications (e.g. WeChat, Firefox)";
@@ -27,6 +43,8 @@ namespace Sshuttle {
             this.apps_list_box = new Gtk.Box (Gtk.Orientation.VERTICAL, 4);
             this.apps_list_box.margin_top = 8;
             this.add (this.apps_list_box);
+
+            this.config_manager.traffic_stats_changed.connect (this.update_traffic_display);
 
             this.load_apps_async.begin ();
         }
@@ -78,6 +96,31 @@ namespace Sshuttle {
 
                 this.apps_list_box.append (row);
                 this.app_rows.add (row);
+            }
+
+            this.update_traffic_display ();
+        }
+
+        public void update_traffic_display () {
+            uint64 total_up, total_down;
+            this.config_manager.get_total_traffic (out total_up, out total_down);
+            this.summary_row.subtitle = @"↑ $(TunnelManager.format_bytes (total_up))   ↓ $(TunnelManager.format_bytes (total_down))   (Total: $(TunnelManager.format_bytes (total_up + total_down)))";
+
+            for (uint i = 0; i < this.apps.length; i++) {
+                if (i >= this.app_rows.length) {
+                    break;
+                }
+                var app = this.apps[i];
+                uint64 up, down;
+                this.config_manager.get_app_traffic (app.id, out up, out down);
+                if (up == 0 && down == 0) {
+                    this.config_manager.get_app_traffic (app.exec_name, out up, out down);
+                }
+                if (up > 0 || down > 0) {
+                    this.app_rows[i].subtitle = @"$(app.exec_name)  •  ↑ $(TunnelManager.format_bytes (up))   ↓ $(TunnelManager.format_bytes (down))";
+                } else {
+                    this.app_rows[i].subtitle = @"$(app.exec_name)  •  ↑ 0 B   ↓ 0 B";
+                }
             }
         }
 
