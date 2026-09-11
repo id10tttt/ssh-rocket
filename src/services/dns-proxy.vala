@@ -166,8 +166,30 @@ namespace Sshuttle {
         }
 
         private void handle_dns_query (uint8[] query_packet, GLib.SocketAddress client_addr) {
-            string? domain = parse_qname (query_packet);
+            uint16 qtype;
+            string? domain = parse_qname_and_type (query_packet, out qtype);
             string action = this.resolve_action_for_domain (domain);
+
+            // 检查当前节点是否启用了 IPv6 代理
+            bool ipv6_enabled = false;
+            var active_profile = this.config_manager.get_active_profile ();
+            if (active_profile != null) {
+                ipv6_enabled = active_profile.ipv6;
+            }
+
+            // 当域名走代理且查询为 AAAA (IPv6, 28) 时：
+            // 若未开启 IPv6 代理（远端 VPS 仅支持 IPv4），直接返回 NOERROR 空记录，
+            // 避免现代浏览器 (如 Chrome) 遵循 RFC 6724 优先直连海外不可达的 IPv6 导致连接超时挂起
+            if (action == "proxy" && qtype == 28 && !ipv6_enabled) {
+                var empty_resp = build_empty_noerror_response (query_packet);
+                if (this.server_socket != null) {
+                    try {
+                        this.server_socket.send_to (client_addr, empty_resp);
+                    } catch (GLib.Error e) {
+                    }
+                }
+                return;
+            }
 
             uint8[]? resp_packet = null;
 
@@ -221,6 +243,12 @@ namespace Sshuttle {
         }
 
         public static string? parse_qname (uint8[] data) {
+            uint16 qtype;
+            return parse_qname_and_type (data, out qtype);
+        }
+
+        public static string? parse_qname_and_type (uint8[] data, out uint16 qtype) {
+            qtype = 0;
             if (data.length < 13) {
                 return null;
             }
@@ -231,9 +259,11 @@ namespace Sshuttle {
             while (idx < data.length) {
                 uint8 len = data[idx];
                 if (len == 0) {
+                    idx++;
                     break;
                 }
                 if ((len & 0xC0) == 0xC0) {
+                    idx += 2;
                     break;
                 }
 
@@ -253,11 +283,46 @@ namespace Sshuttle {
                 return null;
             }
 
+            if (idx + 2 <= data.length) {
+                qtype = (uint16) ((data[idx] << 8) | data[idx + 1]);
+            }
+
             var arr = new string[parts.length];
             for (uint i = 0; i < parts.length; i++) {
                 arr[i] = parts[i];
             }
             return string.joinv (".", arr);
+        }
+
+        public static uint8[] build_empty_noerror_response (uint8[] query_packet) {
+            if (query_packet.length < 12) {
+                return query_packet;
+            }
+
+            uint8[] resp = new uint8[query_packet.length];
+            GLib.Memory.copy (resp, query_packet, query_packet.length);
+
+            // Flags: 0x8180 (Response, Opcode=0, AA=0, TC=0, RD=1, RA=1, RCODE=0 NOERROR)
+            resp[2] = 0x81;
+            resp[3] = 0x80;
+
+            // QDCOUNT: 1
+            resp[4] = 0x00;
+            resp[5] = 0x01;
+
+            // ANCOUNT: 0
+            resp[6] = 0x00;
+            resp[7] = 0x00;
+
+            // NSCOUNT: 0
+            resp[8] = 0x00;
+            resp[9] = 0x00;
+
+            // ARCOUNT: 0
+            resp[10] = 0x00;
+            resp[11] = 0x00;
+
+            return resp;
         }
 
         public static string[] parse_answer_ips (uint8[] data) {
