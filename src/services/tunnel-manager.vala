@@ -43,6 +43,7 @@ namespace Sshuttle {
                 this.log_history.remove_index (0);
             }
             this.log_received (text);
+            print ("%s\n", text);
         }
 
         public void clear_logs () {
@@ -99,10 +100,12 @@ namespace Sshuttle {
 
                 this.wait_process_async.begin ();
 
-                this.connect_timeout_id = GLib.Timeout.add_seconds (4, () => {
+                this.connect_timeout_id = GLib.Timeout.add_seconds (25, () => {
                     this.connect_timeout_id = 0;
-                    if (this.state == TunnelState.CONNECTING && this.process != null) {
-                        this.change_state (TunnelState.CONNECTED);
+                    if (this.state == TunnelState.CONNECTING) {
+                        this.emit_log ("Connection timed out after 25 seconds.");
+                        this.disconnect_tunnel ();
+                        this.change_state (TunnelState.ERROR);
                     }
                     return false;
                 });
@@ -127,7 +130,7 @@ namespace Sshuttle {
         private async void read_stream_async (GLib.InputStream stream) {
             var data_stream = new GLib.DataInputStream (stream);
             try {
-                while (this.cancellable != null && !this.cancellable.is_cancelled ()) {
+                while (true) {
                     size_t length;
                     string? line = yield data_stream.read_line_utf8_async (
                         GLib.Priority.DEFAULT,
@@ -147,7 +150,7 @@ namespace Sshuttle {
         private void on_log_line (string line) {
             this.emit_log (line);
             string lower = line.down ();
-            if ("connected" in lower || "tunnel ready" in lower || "c : connected" in lower) {
+            if ("connected to server" in lower || "c : connected" in lower || "tunnel ready" in lower || (lower.has_prefix ("connected") && !("not connected" in lower))) {
                 if (this.state == TunnelState.CONNECTING) {
                     if (this.connect_timeout_id != 0) {
                         GLib.Source.remove (this.connect_timeout_id);
@@ -166,6 +169,10 @@ namespace Sshuttle {
             if (this.connect_timeout_id != 0) {
                 GLib.Source.remove (this.connect_timeout_id);
                 this.connect_timeout_id = 0;
+            }
+
+            if (this.cancellable != null) {
+                this.cancellable.cancel ();
             }
 
             this.change_state (TunnelState.DISCONNECTING);
@@ -188,11 +195,6 @@ namespace Sshuttle {
             if (this.connect_timeout_id != 0) {
                 GLib.Source.remove (this.connect_timeout_id);
                 this.connect_timeout_id = 0;
-            }
-
-            if (this.cancellable != null) {
-                this.cancellable.cancel ();
-                this.cancellable = null;
             }
 
             int exit_status = 0;
