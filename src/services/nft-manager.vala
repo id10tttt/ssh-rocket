@@ -57,17 +57,42 @@ namespace Sshuttle {
         }
 
         /**
-         * 动态将解析出的 IP 添加到指定集合中
+         * 动态将解析出的多个 IP 批量添加到指定集合中
          */
-        public void add_ip_to_set (string ip, string action) {
-            if (this.active_port <= 0 || ip == "") {
+        public void add_ips_to_set (string[] ips, string action) {
+            if (this.active_port <= 0 || ips.length == 0) {
                 return;
             }
 
+            var elements = new GLib.GenericArray<string> ();
+            foreach (var ip in ips) {
+                string trimmed = ip.strip ();
+                if (trimmed != "") {
+                    elements.add (@"$(trimmed) timeout 300s");
+                }
+            }
+
+            if (elements.length == 0) {
+                return;
+            }
+
+            var arr = new string[elements.length];
+            for (uint i = 0; i < elements.length; i++) {
+                arr[i] = elements[i];
+            }
+
+            string joined = string.joinv (", ", arr);
             string table_v4 = @"sshuttle-ipv4-$(this.active_port)";
             string set_name = (action == "proxy") ? "proxy_ips" : "direct_ips";
-            string cmd = @"nft add element inet $(table_v4) $(set_name) '{ $(ip) timeout 300s }'";
+            string cmd = @"nft add element inet $(table_v4) $(set_name) '{ $(joined) }'";
             this.run_nft_command (cmd);
+        }
+
+        /**
+         * 动态将解析出的 IP 添加到指定集合中
+         */
+        public void add_ip_to_set (string ip, string action) {
+            this.add_ips_to_set ({ ip }, action);
         }
 
         /**

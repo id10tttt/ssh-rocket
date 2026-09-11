@@ -96,37 +96,43 @@ namespace Sshuttle {
         }
 
         public void emit_app_log (string app_name, string message) {
-            var now = new GLib.DateTime.now_local ();
-            string time_str = now.format ("%H:%M:%S");
-            var entry = new AppLogEntry (time_str, app_name, message);
-            this.app_logs.add (entry);
-            if (this.app_logs.length > MAX_LOGS) {
-                this.app_logs.remove_index (0);
-            }
-            this.app_log_received (entry);
+            GLib.Idle.add (() => {
+                var now = new GLib.DateTime.now_local ();
+                string time_str = now.format ("%H:%M:%S");
+                var entry = new AppLogEntry (time_str, app_name, message);
+                this.app_logs.add (entry);
+                if (this.app_logs.length > MAX_LOGS) {
+                    this.app_logs.remove_index (0);
+                }
+                this.app_log_received (entry);
 
-            string text = @"[$time_str] [$app_name] $message";
-            this.log_history.add (text);
-            if (this.log_history.length > MAX_LOGS) {
-                this.log_history.remove_index (0);
-            }
-            this.log_received (text);
-            print ("%s\n", text);
+                string text = @"[$time_str] [$app_name] $message";
+                this.log_history.add (text);
+                if (this.log_history.length > MAX_LOGS) {
+                    this.log_history.remove_index (0);
+                }
+                this.log_received (text);
+                print ("%s\n", text);
+                return GLib.Source.REMOVE;
+            });
         }
 
         public void emit_proxy_log (string line) {
-            this.proxy_logs.add (line);
-            if (this.proxy_logs.length > MAX_LOGS) {
-                this.proxy_logs.remove_index (0);
-            }
-            this.proxy_log_received (line);
+            GLib.Idle.add (() => {
+                this.proxy_logs.add (line);
+                if (this.proxy_logs.length > MAX_LOGS) {
+                    this.proxy_logs.remove_index (0);
+                }
+                this.proxy_log_received (line);
 
-            this.log_history.add (line);
-            if (this.log_history.length > MAX_LOGS) {
-                this.log_history.remove_index (0);
-            }
-            this.log_received (line);
-            print ("%s\n", line);
+                this.log_history.add (line);
+                if (this.log_history.length > MAX_LOGS) {
+                    this.log_history.remove_index (0);
+                }
+                this.log_received (line);
+                print ("%s\n", line);
+                return GLib.Source.REMOVE;
+            });
         }
 
         private void emit_log (string text) {

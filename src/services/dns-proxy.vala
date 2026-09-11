@@ -212,14 +212,20 @@ namespace Sshuttle {
             }
 
             if (resp_packet != null) {
-                // 提取解析所得 IP 写入 nftables 对应集合
+                // 提取解析所得 IP 批量写入 nftables 对应集合
                 var ips = parse_answer_ips (resp_packet);
-                foreach (var ip in ips) {
-                    this.nft_manager.add_ip_to_set (ip, action);
+                if (ips.length > 0) {
+                    this.nft_manager.add_ips_to_set (ips, action);
                 }
 
                 if (domain != null && domain != "") {
-                    this.dns_resolved (domain, action, ips);
+                    string d = domain;
+                    string a = action;
+                    string[] ips_copy = ips;
+                    GLib.Idle.add (() => {
+                        this.dns_resolved (d, a, ips_copy);
+                        return GLib.Source.REMOVE;
+                    });
                 }
 
                 // 回发客户端
