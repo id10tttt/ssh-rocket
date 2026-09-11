@@ -10,6 +10,9 @@ namespace Sshuttle {
         private Gtk.Stack content_stack;
         private GLib.GenericArray<ConnectionCard> cards;
 
+        private Gtk.Label status_label;
+        private Gtk.Label speed_label;
+
         public MainWindow (Adw.Application app, TunnelManager tunnel_manager) {
             Object (application: app);
             this.tunnel_manager = tunnel_manager;
@@ -32,10 +35,16 @@ namespace Sshuttle {
 
             this.tunnel_manager.state_changed.connect (() => {
                 this.update_cards_state ();
+                this.update_status_display ();
             });
 
             this.tunnel_manager.profile_changed.connect (() => {
                 this.update_cards_state ();
+                this.update_status_display ();
+            });
+
+            this.tunnel_manager.speed_updated.connect ((up_speed, down_speed) => {
+                this.speed_label.label = @"↑ $(up_speed)   ↓ $(down_speed)";
             });
 
             // 点击关闭按钮时保存尺寸并完整退出，彻底释放网络与端口资源
@@ -121,7 +130,57 @@ namespace Sshuttle {
             log_vs_page.title = "Log";
             log_vs_page.icon_name = "utilities-terminal-symbolic";
 
+            // 底部状态栏 (Bottom Status Bar)
+            var bottom_bar = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 12);
+            bottom_bar.margin_start = 16;
+            bottom_bar.margin_end = 16;
+            bottom_bar.margin_top = 8;
+            bottom_bar.margin_bottom = 8;
+
+            this.status_label = new Gtk.Label ("Disconnected");
+            this.status_label.add_css_class ("dim-label");
+            this.status_label.halign = Gtk.Align.START;
+            this.status_label.hexpand = true;
+            bottom_bar.append (this.status_label);
+
+            this.speed_label = new Gtk.Label ("↑ 0.0 kb/s   ↓ 0.0 kb/s");
+            this.speed_label.add_css_class ("dim-label");
+            this.speed_label.halign = Gtk.Align.END;
+            bottom_bar.append (this.speed_label);
+
+            toolbar_view.add_bottom_bar (bottom_bar);
+
             this.refresh_connections ();
+            this.update_status_display ();
+        }
+
+        private void update_status_display () {
+            if (this.status_label == null) {
+                return;
+            }
+
+            if (this.tunnel_manager.state == TunnelState.CONNECTED) {
+                var p = this.tunnel_manager.active_profile;
+                string name = (p != null) ? p.name : "Connected";
+                this.status_label.label = @"Connected: $(name)";
+                this.status_label.remove_css_class ("dim-label");
+                this.status_label.add_css_class ("success");
+            } else if (this.tunnel_manager.state == TunnelState.CONNECTING) {
+                this.status_label.label = "Connecting...";
+                this.status_label.remove_css_class ("success");
+                this.status_label.add_css_class ("dim-label");
+            } else if (this.tunnel_manager.state == TunnelState.ERROR) {
+                this.status_label.label = "Connection Error (Auto-reconnecting in 1s...)";
+                this.status_label.remove_css_class ("success");
+                this.status_label.add_css_class ("dim-label");
+            } else {
+                this.status_label.label = "Disconnected";
+                this.status_label.remove_css_class ("success");
+                this.status_label.add_css_class ("dim-label");
+                if (this.speed_label != null) {
+                    this.speed_label.label = "↑ 0.0 kb/s   ↓ 0.0 kb/s";
+                }
+            }
         }
 
         private Gtk.Widget build_connect_page () {

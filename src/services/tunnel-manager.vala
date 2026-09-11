@@ -25,6 +25,14 @@ namespace Sshuttle {
         private uint connect_timeout_id = 0;
         private const uint MAX_LOGS = 1000;
 
+        private uint speed_timer_id = 0;
+        private uint64 prev_bytes_sent = 0;
+        private uint64 prev_bytes_rcv = 0;
+        public string current_up_speed { get; private set; default = "0.0 kb/s"; }
+        public string current_down_speed { get; private set; default = "0.0 kb/s"; }
+
+        public signal void speed_updated (string up_speed, string down_speed);
+
         public Profile? active_profile {
             owned get {
                 return this.config_manager.get_active_profile ();
@@ -226,6 +234,7 @@ namespace Sshuttle {
                     this.nft_manager.apply_cgroup_filter (this.local_proxy_port, ipv6, this.config_manager.get_domain_default_policy ());
                     this.sync_process_monitor_targets ();
                     this.process_monitor.start ();
+                    this.start_speed_monitor ();
                     this.emit_log ("Per-app proxy active: only checked applications are routed through proxy.");
                 }
             }
@@ -300,11 +309,8 @@ namespace Sshuttle {
             }
 
             this.reconnect_attempt++;
-            // 指数退避：2s, 4s, 8s, 16s, 30s, 30s...
-            uint delay = (uint) int.min (
-                (int) (BASE_RECONNECT_DELAY * (1 << int.min (this.reconnect_attempt - 1, 4))),
-                (int) MAX_RECONNECT_DELAY
-            );
+            // 用户明确要求：重连需要迅速，1s内重连
+            uint delay = 1;
 
             this.emit_log (@"Connection dropped. Auto-reconnecting in $(delay)s (attempt #$(this.reconnect_attempt), infinite retry)...");
 
@@ -326,10 +332,141 @@ namespace Sshuttle {
         }
 
         public void cleanup_proxy_runtime () {
+            this.stop_speed_monitor ();
             this.dns_proxy.stop ();
             this.process_monitor.stop ();
             this.nft_manager.cleanup_all_sshuttle_tables (this.local_proxy_port);
             this.cgroup_manager.cleanup_and_destroy ();
+        }
+
+        private void start_speed_monitor () {
+            this.stop_speed_monitor ();
+            this.prev_bytes_sent = 0;
+            this.prev_bytes_rcv = 0;
+
+            this.speed_timer_id = GLib.Timeout.add_seconds (1, () => {
+                if (this.state != TunnelState.CONNECTED) {
+                    this.speed_timer_id = 0;
+                    return false;
+                }
+
+                this.update_traffic_speed ();
+                return true;
+            });
+        }
+
+        private void stop_speed_monitor () {
+            if (this.speed_timer_id != 0) {
+                GLib.Source.remove (this.speed_timer_id);
+                this.speed_timer_id = 0;
+            }
+            this.prev_bytes_sent = 0;
+            this.prev_bytes_rcv = 0;
+            this.current_up_speed = "0.0 kb/s";
+            this.current_down_speed = "0.0 kb/s";
+            this.speed_updated (this.current_up_speed, this.current_down_speed);
+        }
+
+        private void update_traffic_speed () {
+            string output = "";
+            bool is_peer = false;
+
+            var p = this.active_profile;
+            if (p != null && p.host != "") {
+                try {
+                    string[] argv = { "ss", "-tin", "dst", p.host };
+                    int status;
+                    string stdout_buf;
+                    GLib.Process.spawn_sync (null, argv, null, GLib.SpawnFlags.SEARCH_PATH, null, out stdout_buf, null, out status);
+                    if ("bytes_sent:" in stdout_buf || "bytes_received:" in stdout_buf) {
+                        output = stdout_buf;
+                        is_peer = true;
+                    }
+                } catch (GLib.Error e) {
+                }
+            }
+
+            if (output == "") {
+                try {
+                    string[] argv = { "ss", "-tin", "sport", "=", this.local_proxy_port.to_string () };
+                    int status;
+                    string stdout_buf;
+                    GLib.Process.spawn_sync (null, argv, null, GLib.SpawnFlags.SEARCH_PATH, null, out stdout_buf, null, out status);
+                    output = stdout_buf;
+                    is_peer = false;
+                } catch (GLib.Error e) {
+                }
+            }
+
+            if (output == "") {
+                return;
+            }
+
+            uint64 total_sent = 0;
+            uint64 total_rcv = 0;
+
+            try {
+                var regex_sent = new GLib.Regex ("bytes_sent:(\\d+)");
+                GLib.MatchInfo info_sent;
+                if (regex_sent.match (output, 0, out info_sent)) {
+                    while (info_sent.matches ()) {
+                        string val = info_sent.fetch (1);
+                        total_sent += uint64.parse (val);
+                        info_sent.next ();
+                    }
+                }
+
+                var regex_rcv = new GLib.Regex ("bytes_received:(\\d+)");
+                GLib.MatchInfo info_rcv;
+                if (regex_rcv.match (output, 0, out info_rcv)) {
+                    while (info_rcv.matches ()) {
+                        string val = info_rcv.fetch (1);
+                        total_rcv += uint64.parse (val);
+                        info_rcv.next ();
+                    }
+                }
+            } catch (GLib.Error e) {
+            }
+
+            uint64 cur_up = 0;
+            uint64 cur_down = 0;
+
+            if (is_peer) {
+                cur_up = total_sent;
+                cur_down = total_rcv;
+            } else {
+                cur_up = total_rcv;
+                cur_down = total_sent;
+            }
+
+            uint64 up_bytes_per_sec = 0;
+            uint64 down_bytes_per_sec = 0;
+
+            if (this.prev_bytes_sent > 0 && cur_up >= this.prev_bytes_sent) {
+                up_bytes_per_sec = cur_up - this.prev_bytes_sent;
+            }
+            if (this.prev_bytes_rcv > 0 && cur_down >= this.prev_bytes_rcv) {
+                down_bytes_per_sec = cur_down - this.prev_bytes_rcv;
+            }
+
+            this.prev_bytes_sent = cur_up;
+            this.prev_bytes_rcv = cur_down;
+
+            this.current_up_speed = format_speed (up_bytes_per_sec);
+            this.current_down_speed = format_speed (down_bytes_per_sec);
+
+            this.speed_updated (this.current_up_speed, this.current_down_speed);
+        }
+
+        public static string format_speed (uint64 bytes_per_sec) {
+            double b = (double) bytes_per_sec;
+            if (b < 1024.0 * 1024.0) {
+                double kb = b / 1024.0;
+                return "%.1f kb/s".printf (kb);
+            } else {
+                double mb = b / (1024.0 * 1024.0);
+                return "%.2f mb/s".printf (mb);
+            }
         }
 
         private void on_app_rules_changed () {
