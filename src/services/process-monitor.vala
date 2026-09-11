@@ -134,16 +134,22 @@ namespace Sshuttle {
             } catch (GLib.Error e) {
             }
 
-            // 检查 /proc/<pid>/cmdline 首个参数
+            // 检查 /proc/<pid>/cmdline 首个参数（以 \0 分隔）
             string cmdline_path = @"/proc/$(pid)/cmdline";
             try {
-                string cmdline;
-                GLib.FileUtils.get_contents (cmdline_path, out cmdline);
-                if (cmdline != null && cmdline.length > 0) {
-                    string first_arg = cmdline.split ("\0")[0];
-                    string base_name = GLib.Path.get_basename (first_arg).down ();
-                    if (this.target_execs.contains (base_name)) {
-                        return base_name;
+                uint8[] data;
+                GLib.FileUtils.get_data (cmdline_path, out data);
+                if (data != null && data.length > 0) {
+                    int end_idx = 0;
+                    while (end_idx < data.length && data[end_idx] != 0) {
+                        end_idx++;
+                    }
+                    if (end_idx > 0) {
+                        string first_arg = ((string) data).substring (0, end_idx);
+                        string base_name = GLib.Path.get_basename (first_arg).down ();
+                        if (this.target_execs.contains (base_name)) {
+                            return base_name;
+                        }
                     }
                 }
             } catch (GLib.Error e) {

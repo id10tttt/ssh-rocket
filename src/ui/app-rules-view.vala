@@ -4,7 +4,6 @@ namespace Sshuttle {
         private ConfigManager config_manager;
         private TunnelManager tunnel_manager;
 
-        private Adw.SwitchRow master_switch;
         private Adw.EntryRow search_row;
         private Gtk.Box apps_list_box;
         private GLib.GenericArray<Adw.ActionRow> app_rows;
@@ -16,18 +15,8 @@ namespace Sshuttle {
             this.app_rows = new GLib.GenericArray<Adw.ActionRow> ();
             this.apps = new GLib.GenericArray<AppInfo> ();
 
-            this.title = "App Proxy Rules (Per-Application Proxy)";
-            this.description = "Route only selected applications through proxy using cgroup v2 & nftables";
-
-            // 主开关
-            this.master_switch = new Adw.SwitchRow ();
-            this.master_switch.title = "Enable Per-App Proxy";
-            this.master_switch.subtitle = "When turned off, all network traffic is proxied";
-            this.master_switch.active = this.config_manager.get_app_proxy_enabled ();
-            this.master_switch.notify["active"].connect (() => {
-                this.config_manager.set_app_proxy_enabled (this.master_switch.active);
-            });
-            this.add (this.master_switch);
+            this.title = "App Proxy Rules";
+            this.description = GLib.Markup.escape_text ("Only checked applications will route through proxy. Unchecked applications connect directly.");
 
             // 搜索框
             this.search_row = new Adw.EntryRow ();
@@ -49,8 +38,8 @@ namespace Sshuttle {
             for (uint i = 0; i < this.apps.length; i++) {
                 var app = this.apps[i];
                 var row = new Adw.ActionRow ();
-                row.title = app.name;
-                row.subtitle = app.exec_name;
+                row.title = GLib.Markup.escape_text (app.name);
+                row.subtitle = GLib.Markup.escape_text (app.exec_name);
 
                 // 设置应用图标
                 if (app.icon_name != "") {
@@ -73,7 +62,7 @@ namespace Sshuttle {
                     }
                 }
 
-                // 勾选切换开关
+                // 勾选切换开关：默认未勾选（不走代理）；勾选后走代理
                 var sw = new Gtk.Switch ();
                 sw.valign = Gtk.Align.CENTER;
                 bool is_checked = this.config_manager.is_app_proxied (app.id) || this.config_manager.is_app_proxied (app.exec_name);

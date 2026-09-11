@@ -17,7 +17,7 @@ namespace Sshuttle {
             bool success = true;
 
             string table_v4 = @"sshuttle-ipv4-$(port)";
-            string cmd_v4 = @"nft insert rule ip $(table_v4) output socket cgroupv2 level 1 != \"sshuttle-proxy\" return";
+            string cmd_v4 = @"nft insert rule inet $(table_v4) output socket cgroupv2 level 1 != \"sshuttle-proxy\" return";
             if (!this.run_nft_command (cmd_v4)) {
                 warning ("Failed to insert IPv4 cgroup filter rule");
                 success = false;
@@ -25,7 +25,7 @@ namespace Sshuttle {
 
             if (ipv6_enabled) {
                 string table_v6 = @"sshuttle-ipv6-$(port)";
-                string cmd_v6 = @"nft insert rule ip6 $(table_v6) output socket cgroupv2 level 1 != \"sshuttle-proxy\" return";
+                string cmd_v6 = @"nft insert rule inet $(table_v6) output socket cgroupv2 level 1 != \"sshuttle-proxy\" return";
                 if (!this.run_nft_command (cmd_v6)) {
                     warning ("Failed to insert IPv6 cgroup filter rule");
                 }
@@ -38,9 +38,9 @@ namespace Sshuttle {
          * 移除 cgroup 过滤规则（在运行时动态恢复为全局代理）
          */
         public void remove_cgroup_filter (int port, bool ipv6_enabled) {
-            this.delete_cgroup_rule_from_table ("ip", @"sshuttle-ipv4-$(port)");
+            this.delete_cgroup_rule_from_table ("inet", @"sshuttle-ipv4-$(port)");
             if (ipv6_enabled) {
-                this.delete_cgroup_rule_from_table ("ip6", @"sshuttle-ipv6-$(port)");
+                this.delete_cgroup_rule_from_table ("inet", @"sshuttle-ipv6-$(port)");
             }
         }
 
@@ -74,8 +74,8 @@ namespace Sshuttle {
          */
         public void cleanup_all_sshuttle_tables (int port = 0) {
             if (port > 0) {
-                this.run_nft_command (@"nft delete table ip sshuttle-ipv4-$(port)");
-                this.run_nft_command (@"nft delete table ip6 sshuttle-ipv6-$(port)");
+                this.run_nft_command (@"nft delete table inet sshuttle-ipv4-$(port)");
+                this.run_nft_command (@"nft delete table inet sshuttle-ipv6-$(port)");
             }
 
             // 扫描所有残留的 sshuttle 表并清除

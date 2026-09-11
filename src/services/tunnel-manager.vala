@@ -97,11 +97,9 @@ namespace Sshuttle {
             this.change_state (TunnelState.CONNECTING);
 
             try {
-                // 如果开启了按软件代理，先准备 cgroup 并启动进程监控
-                if (this.config_manager.get_app_proxy_enabled ()) {
-                    this.sync_process_monitor_targets ();
-                    this.process_monitor.start ();
-                }
+                // 启动按软件代理监控
+                this.sync_process_monitor_targets ();
+                this.process_monitor.start ();
 
                 string[] argv = CommandBuilder.build_argv (profile, this.local_proxy_port);
 
@@ -189,13 +187,13 @@ namespace Sshuttle {
                     this.reconnect_attempt = 0;
                     this.change_state (TunnelState.CONNECTED);
 
-                    // 成功连上后，如果启用了按应用代理，向 nftables 插入 cgroup 过滤规则
-                    if (this.config_manager.get_app_proxy_enabled ()) {
-                        var p = this.active_profile;
-                        bool ipv6 = (p != null) ? p.ipv6 : false;
-                        this.nft_manager.apply_cgroup_filter (this.local_proxy_port, ipv6);
-                        this.emit_log ("Per-app proxy rules active: only selected applications are routed through tunnel.");
-                    }
+                    // 成功连上后，向 nftables 插入 cgroup 过滤规则：只有勾选的软件走代理，其余全部直连
+                    var p = this.active_profile;
+                    bool ipv6 = (p != null) ? p.ipv6 : false;
+                    this.nft_manager.apply_cgroup_filter (this.local_proxy_port, ipv6);
+                    this.sync_process_monitor_targets ();
+                    this.process_monitor.start ();
+                    this.emit_log ("Per-app proxy active: only checked applications are routed through proxy.");
                 }
             }
         }
@@ -305,24 +303,12 @@ namespace Sshuttle {
             if (this.state == TunnelState.CONNECTED) {
                 var p = this.active_profile;
                 bool ipv6 = (p != null) ? p.ipv6 : false;
-                if (this.config_manager.get_app_proxy_enabled ()) {
-                    this.nft_manager.apply_cgroup_filter (this.local_proxy_port, ipv6);
-                    this.process_monitor.start ();
-                    this.emit_log ("App proxy rules updated: filter enabled for selected apps.");
-                } else {
-                    this.nft_manager.remove_cgroup_filter (this.local_proxy_port, ipv6);
-                    this.process_monitor.stop ();
-                    this.emit_log ("App proxy rules updated: global proxy enabled.");
-                }
+                this.nft_manager.apply_cgroup_filter (this.local_proxy_port, ipv6);
+                this.process_monitor.start ();
             }
         }
 
         private void sync_process_monitor_targets () {
-            if (!this.config_manager.get_app_proxy_enabled ()) {
-                this.process_monitor.set_targets (new string[0]);
-                return;
-            }
-
             string[] proxy_app_ids = this.config_manager.get_proxy_apps ();
             var apps = AppScanner.scan_apps ();
             var target_execs = new GLib.GenericArray<string> ();
@@ -342,6 +328,7 @@ namespace Sshuttle {
                 arr[i] = target_execs[i];
             }
             this.process_monitor.set_targets (arr);
+            this.emit_log (@"Proxied apps updated: $(target_execs.length) app(s) checked for proxy.");
         }
     }
 }
