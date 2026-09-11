@@ -617,11 +617,21 @@ namespace Sshuttle {
                 for (uint j = 0; j < proxy_app_ids.length; j++) {
                     if (proxy_app_ids[j] == app.id || proxy_app_ids[j] == app.exec_name) {
                         target_execs.add (app.exec_name);
-                        // 常见浏览器启动包装脚本真实二进制进程名补充
-                        if (app.exec_name == "google-chrome-stable" || app.exec_name == "google-chrome" || "chrome" in app.id) {
+                        string app_id_clean = app.id.replace (".desktop", "").down ();
+                        if (app_id_clean != "" && app_id_clean != app.exec_name) {
+                            target_execs.add (app_id_clean);
+                        }
+
+                        // 常见应用与浏览器二进制及 Flatpak 进程名别名补充
+                        if (app.exec_name == "google-chrome-stable" || app.exec_name == "google-chrome" || "chrome" in app.id.down ()) {
                             target_execs.add ("chrome");
-                        } else if (app.exec_name == "firefox") {
+                        } else if (app.exec_name == "firefox" || "firefox" in app.id.down ()) {
                             target_execs.add ("firefox-bin");
+                        } else if (app.exec_name == "telegram" || "telegram" in app.id.down () || "telegram" in app.exec_name.down ()) {
+                            target_execs.add ("telegram");
+                            target_execs.add ("telegram-desktop");
+                            target_execs.add ("telegramdesktop");
+                            target_execs.add ("org.telegram.desktop");
                         }
                         break;
                     }
@@ -634,6 +644,10 @@ namespace Sshuttle {
                 for (uint j = 0; j < block_app_ids.length; j++) {
                     if (block_app_ids[j] == app.id || block_app_ids[j] == app.exec_name) {
                         block_execs.add (app.exec_name);
+                        string app_id_clean = app.id.replace (".desktop", "").down ();
+                        if (app_id_clean != "" && app_id_clean != app.exec_name) {
+                            block_execs.add (app_id_clean);
+                        }
                         break;
                     }
                 }

@@ -153,8 +153,42 @@ namespace Sshuttle {
                 }
 
                 if (idx < argv.length) {
-                    string token = argv[idx];
-                    return GLib.Path.get_basename (token).down ();
+                    string base_cmd = GLib.Path.get_basename (argv[idx]).down ();
+                    // 特殊处理 Flatpak 包装器
+                    if (base_cmd == "flatpak" || base_cmd.has_prefix ("flatpak")) {
+                        // 1. 检查是否指定了 --command=<cmd>
+                        for (int i = idx + 1; i < argv.length; i++) {
+                            string arg = argv[i];
+                            if (arg.has_prefix ("--command=")) {
+                                string cmd = arg.substring (10);
+                                return GLib.Path.get_basename (cmd).down ();
+                            } else if (arg == "--command" && i + 1 < argv.length) {
+                                return GLib.Path.get_basename (argv[i + 1]).down ();
+                            }
+                        }
+                        // 2. 若无 --command，寻找首个非选项参数（即 Flatpak App ID）
+                        for (int i = idx + 1; i < argv.length; i++) {
+                            string arg = argv[i];
+                            if (arg == "run") {
+                                continue;
+                            }
+                            if (arg.has_prefix ("-")) {
+                                continue;
+                            }
+                            // 命中类似 org.telegram.desktop 或 com.spotify.Client
+                            string[] parts = arg.split (".");
+                            if (parts.length >= 2) {
+                                string last = parts[parts.length - 1].down ();
+                                if (last == "desktop" || last == "client" || last == "app") {
+                                    return parts[parts.length - 2].down ();
+                                }
+                                return last;
+                            }
+                            return GLib.Path.get_basename (arg).down ();
+                        }
+                    }
+
+                    return base_cmd;
                 }
             } catch (GLib.Error e) {
                 // 如果参数解析失败，采用基础分割

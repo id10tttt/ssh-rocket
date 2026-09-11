@@ -163,15 +163,42 @@ namespace Sshuttle {
                 uint8[] data;
                 GLib.FileUtils.get_data (cmdline_path, out data);
                 if (data != null && data.length > 0) {
-                    int end_idx = 0;
-                    while (end_idx < data.length && data[end_idx] != 0) {
-                        end_idx++;
+                    // cmdline 中以 \0 分隔各个参数，遍历所有参数寻找目标可执行文件名
+                    int start = 0;
+                    for (int i = 0; i < data.length; i++) {
+                        if (data[i] == 0) {
+                            if (i > start) {
+                                string arg = ((string) data).substring (start, i - start);
+                                string base_name = GLib.Path.get_basename (arg).down ();
+                                if (this.target_execs.contains (base_name) || this.block_execs.contains (base_name)) {
+                                    return base_name;
+                                }
+                            }
+                            start = i + 1;
+                        }
                     }
-                    if (end_idx > 0) {
-                        string first_arg = ((string) data).substring (0, end_idx);
-                        string base_name = GLib.Path.get_basename (first_arg).down ();
-                        if (this.target_execs.contains (base_name) || this.block_execs.contains (base_name)) {
-                            return base_name;
+                }
+            } catch (GLib.Error e) {
+            }
+
+            // 针对 Flatpak / 沙盒应用，检查 /proc/$(pid)/cgroup 中的应用标识
+            string cgroup_path = @"/proc/$(pid)/cgroup";
+            try {
+                string cgroup_content;
+                GLib.FileUtils.get_contents (cgroup_path, out cgroup_content);
+                string cgroup_lower = cgroup_content.down ();
+                if ("app-flatpak-" in cgroup_lower || "flatpak" in cgroup_lower) {
+                    var iter = GLib.HashTableIter<string, bool> (this.target_execs);
+                    string key;
+                    while (iter.next (out key, null)) {
+                        if (key.length >= 3 && key in cgroup_lower) {
+                            return key;
+                        }
+                    }
+                    var biter = GLib.HashTableIter<string, bool> (this.block_execs);
+                    while (biter.next (out key, null)) {
+                        if (key.length >= 3 && key in cgroup_lower) {
+                            return key;
                         }
                     }
                 }

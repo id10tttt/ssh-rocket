@@ -33,16 +33,13 @@ namespace Sshuttle {
 
             // 4. 在 sshuttle 子链首部插入分流与裁决规则 (倒序插入)：
             // 最终期望执行顺序：
-            //   1) ip daddr @direct_ips return (直连域名/IP 优先放行)
-            //   2) ip daddr @proxy_ips meta l4proto tcp redirect to :$(port) (命中代理集合的 IP 无论哪个 App 访问均走代理)
-            //   3) socket cgroupv2 level 1 != "sshuttle-proxy" return (未勾选的应用默认直连放行)
-            //   4) [若 default_policy == direct]: ip daddr != @proxy_ips return (已勾选的应用若默认直连则放行未指定代理的 IP)
-            //   5) (sshuttle 默认规则) redirect to :$(port) (已勾选的应用走代理)
-            if (default_policy == "direct") {
-                this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr != @proxy_ips return");
-            }
+            //   1) ip daddr @direct_ips return (直连域名/IP 集合优先放行，无论哪个 App 访问均直连)
+            //   2) socket cgroupv2 level 1 "sshuttle-proxy" meta l4proto tcp redirect to :$(port) (勾选应用的所有其他 TCP 流量全量走代理，包括硬编码 IP / 视频流)
+            //   3) ip daddr @proxy_ips meta l4proto tcp redirect to :$(port) (未勾选应用命中代理域名 IP 集合时走代理)
+            //   4) socket cgroupv2 level 1 != "sshuttle-proxy" return (未勾选应用其余普通流量直接直连放行，不走代理)
             this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) socket cgroupv2 level 1 != \"sshuttle-proxy\" return");
             this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr @proxy_ips meta l4proto tcp redirect to :$(port)");
+            this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) socket cgroupv2 level 1 \"sshuttle-proxy\" meta l4proto tcp redirect to :$(port)");
             this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr @direct_ips return");
 
             if (ipv6_enabled) {
