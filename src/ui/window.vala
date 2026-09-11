@@ -47,16 +47,13 @@ namespace Sshuttle {
                 this.speed_label.label = @"↑ $(up_speed)   ↓ $(down_speed)";
             });
 
-            // 点击关闭按钮时保存尺寸并完整退出，彻底释放网络与端口资源
+            // 点击关闭按钮自动缩放到托盘，不销毁进程
             this.close_request.connect (() => {
                 int cur_w, cur_h;
                 this.get_default_size (out cur_w, out cur_h);
                 this.config_manager.set_window_size (cur_w, cur_h);
-                var sshuttle_app = this.application as Application;
-                if (sshuttle_app != null) {
-                    sshuttle_app.handle_real_quit ();
-                }
-                return false;
+                this.set_visible (false);
+                return true;
             });
         }
 

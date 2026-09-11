@@ -75,6 +75,12 @@ namespace Sshuttle {
             this.config_manager.domain_rules_changed.connect (this.on_domain_rules_changed);
             this.config_manager.blacklist_changed.connect (this.on_blacklist_changed);
             this.process_monitor.process_migrated.connect (this.on_process_migrated);
+            this.dns_proxy.dns_resolved.connect (this.on_dns_resolved);
+        }
+
+        private void on_dns_resolved (string domain, string action, string[] ips) {
+            string ip_str = (ips.length > 0) ? string.joinv (", ", ips) : "no IP";
+            this.emit_app_log ("DNS", @"$(domain) -> $(action) [$(ip_str)]");
         }
 
         public void set_active_profile (string id) {
@@ -277,8 +283,14 @@ namespace Sshuttle {
         }
 
         private void on_log_line (string line) {
-            this.emit_proxy_log (line);
             string lower = line.down ();
+
+            // 过滤无意义的底层 DNS 调试日志
+            if ("dns request from" in lower) {
+                return;
+            }
+
+            this.emit_proxy_log (line);
 
             if ("dns listening on" in lower) {
                 // 捕获 sshuttle 内部安全 DNS 端口 (例如 "c : DNS listening on ('127.0.0.1', 12299).")
@@ -599,6 +611,12 @@ namespace Sshuttle {
                 for (uint j = 0; j < proxy_app_ids.length; j++) {
                     if (proxy_app_ids[j] == app.id || proxy_app_ids[j] == app.exec_name) {
                         target_execs.add (app.exec_name);
+                        // 常见浏览器启动包装脚本真实二进制进程名补充
+                        if (app.exec_name == "google-chrome-stable" || app.exec_name == "google-chrome" || "chrome" in app.id) {
+                            target_execs.add ("chrome");
+                        } else if (app.exec_name == "firefox") {
+                            target_execs.add ("firefox-bin");
+                        }
                         break;
                     }
                 }

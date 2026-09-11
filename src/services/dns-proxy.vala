@@ -12,6 +12,7 @@ namespace Sshuttle {
         public const uint16 DNS_PORT = 15353;
         public const uint16 FORWARD_PORT = 15354;
         public uint16 remote_dns_port { get; set; default = 0; }
+        public signal void dns_resolved (string domain, string action, string[] ips);
         private ConfigManager config_manager;
         private NftManager nft_manager;
         private GLib.Socket? server_socket = null;
@@ -177,10 +178,10 @@ namespace Sshuttle {
                 ipv6_enabled = active_profile.ipv6;
             }
 
-            // 当域名走代理且查询为 AAAA (IPv6, 28) 时：
-            // 若未开启 IPv6 代理（远端 VPS 仅支持 IPv4），直接返回 NOERROR 空记录，
-            // 避免现代浏览器 (如 Chrome) 遵循 RFC 6724 优先直连海外不可达的 IPv6 导致连接超时挂起
-            if (action == "proxy" && qtype == 28 && !ipv6_enabled) {
+            // 当域名走代理时，过滤 AAAA (IPv6, 28) 与 HTTPS (Type 65, RFC 9460)：
+            // 1) AAAA: 若未开启 IPv6 代理，返回 NOERROR 空响应，促使浏览器秒级切换 IPv4
+            // 2) HTTPS RR (65): 过滤返回空响应，防止现代 Chrome 尝试 ECH (加密 SNI) 或 QUIC 导致 ERR_FAILED
+            if (action == "proxy" && ((qtype == 28 && !ipv6_enabled) || qtype == 65)) {
                 var empty_resp = build_empty_noerror_response (query_packet);
                 if (this.server_socket != null) {
                     try {
@@ -215,6 +216,10 @@ namespace Sshuttle {
                 var ips = parse_answer_ips (resp_packet);
                 foreach (var ip in ips) {
                     this.nft_manager.add_ip_to_set (ip, action);
+                }
+
+                if (domain != null && domain != "") {
+                    this.dns_resolved (domain, action, ips);
                 }
 
                 // 回发客户端
