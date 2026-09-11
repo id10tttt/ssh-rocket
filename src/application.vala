@@ -56,7 +56,7 @@ namespace Sshuttle {
             });
         }
 
-        private void handle_real_quit () {
+        public void handle_real_quit () {
             if (this.tunnel_manager != null) {
                 this.tunnel_manager.disconnect_tunnel ();
                 this.tunnel_manager.cleanup_proxy_runtime ();

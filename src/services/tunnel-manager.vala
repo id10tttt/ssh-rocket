@@ -89,6 +89,24 @@ namespace Sshuttle {
             this.start_tunnel (profile);
         }
 
+        /**
+         * 探测 127.0.0.1 上的可用端口（从 start_port 开始向上顺延查找），防止端口冲突
+         */
+        private int find_available_local_port (int start_port = 12300) {
+            for (int port = start_port; port < start_port + 100; port++) {
+                try {
+                    var s = new GLib.Socket (GLib.SocketFamily.IPV4, GLib.SocketType.STREAM, GLib.SocketProtocol.TCP);
+                    var addr = new GLib.InetSocketAddress (new GLib.InetAddress.from_string ("127.0.0.1"), (uint16) port);
+                    s.bind (addr, false);
+                    s.close ();
+                    return port;
+                } catch (GLib.Error e) {
+                    // 当前端口已被占用，继续探测下一个端口
+                }
+            }
+            return start_port;
+        }
+
         public void start_tunnel (Profile profile) {
             if (this.state == TunnelState.CONNECTING || this.state == TunnelState.CONNECTED) {
                 return;
@@ -100,6 +118,16 @@ namespace Sshuttle {
             this.change_state (TunnelState.CONNECTING);
 
             try {
+                // 清理可能残留的孤儿 sshuttle 进程
+                try {
+                    GLib.Process.spawn_command_line_sync ("pkill -9 -f 'sshuttle.*127.0.0.1'");
+                } catch (GLib.Error e) {
+                    // 忽略无匹配进程报错
+                }
+
+                // 探测空闲端口，避免与已有服务冲突
+                this.local_proxy_port = this.find_available_local_port (12300);
+
                 // 启动按软件代理监控与 DNS 分流器
                 this.sync_process_monitor_targets ();
                 this.process_monitor.start ();

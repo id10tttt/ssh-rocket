@@ -13,7 +13,7 @@ namespace Sshuttle {
             this.config_manager = config_manager;
             this.tunnel_manager = tunnel_manager;
 
-            this.title = "Domain Routing & Exceptions (Zero Omega Compatible)";
+            this.title = "Domain Routing and Exceptions (Zero Omega Compatible)";
             this.description = GLib.Markup.escape_text ("Route specific domains via Direct exception or Proxy. Supports wildcards (*.google.com).");
 
             // 1. 默认兜底策略
