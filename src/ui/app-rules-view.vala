@@ -16,7 +16,7 @@ namespace Sshuttle {
             this.apps = new GLib.GenericArray<AppInfo> ();
 
             this.title = "App Proxy Rules";
-            this.description = GLib.Markup.escape_text ("Only checked applications will route through proxy. Unchecked applications connect directly.");
+            this.description = GLib.Markup.escape_text ("Only checked applications will route through proxy. Domain & IP rules in the other tab apply as exceptions.");
 
             // 搜索框
             this.search_row = new Adw.EntryRow ();

@@ -4,6 +4,7 @@ namespace Sshuttle {
         private ConfigManager config_manager;
         private TunnelManager tunnel_manager;
 
+        private Adw.ViewStack sub_stack;
         private Gtk.Box exclude_list_box;
         private Adw.EntryRow new_cidr_row;
         private GLib.GenericArray<string> global_excludes;
@@ -16,30 +17,61 @@ namespace Sshuttle {
 
             this.load_excludes ();
 
-            var scrolled = new Gtk.ScrolledWindow ();
-            scrolled.vexpand = true;
-            this.append (scrolled);
+            // Tab 切换栏 (ViewSwitcher)
+            var switcher_box = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 0);
+            switcher_box.halign = Gtk.Align.CENTER;
+            switcher_box.margin_top = 8;
+            switcher_box.margin_bottom = 8;
 
-            var clamp = new Adw.Clamp ();
-            clamp.maximum_size = 620;
-            clamp.tightening_threshold = 400;
-            scrolled.set_child (clamp);
+            this.sub_stack = new Adw.ViewStack ();
+            this.sub_stack.vexpand = true;
 
-            var page = new Adw.PreferencesPage ();
-            clamp.set_child (page);
+            var switcher = new Adw.ViewSwitcher ();
+            switcher.stack = this.sub_stack;
+            switcher.policy = Adw.ViewSwitcherPolicy.WIDE;
+            switcher_box.append (switcher);
+            this.append (switcher_box);
+            this.append (this.sub_stack);
 
-            // 按软件代理规则 (Per-App Proxy)
+            // Tab 1: 按软件规则 (Applications)
+            var app_scrolled = new Gtk.ScrolledWindow ();
+            app_scrolled.vexpand = true;
+
+            var app_clamp = new Adw.Clamp ();
+            app_clamp.maximum_size = 620;
+            app_clamp.tightening_threshold = 400;
+            app_scrolled.set_child (app_clamp);
+
+            var app_page = new Adw.PreferencesPage ();
+            app_clamp.set_child (app_page);
+
             var app_rules_group = new AppRulesView (this.config_manager, this.tunnel_manager);
-            page.add (app_rules_group);
+            app_page.add (app_rules_group);
+
+            var app_vs_page = this.sub_stack.add_named (app_scrolled, "apps");
+            app_vs_page.title = "Applications";
+            app_vs_page.icon_name = "application-x-executable-symbolic";
+
+            // Tab 2: 域名与IP规则 (Domain & IP)
+            var routing_scrolled = new Gtk.ScrolledWindow ();
+            routing_scrolled.vexpand = true;
+
+            var routing_clamp = new Adw.Clamp ();
+            routing_clamp.maximum_size = 620;
+            routing_clamp.tightening_threshold = 400;
+            routing_scrolled.set_child (routing_clamp);
+
+            var routing_page = new Adw.PreferencesPage ();
+            routing_clamp.set_child (routing_page);
 
             // 域名通配符规则 (Domain Wildcards / Zero Omega)
             var domain_rules_group = new DomainRulesView (this.config_manager, this.tunnel_manager);
-            page.add (domain_rules_group);
+            routing_page.add (domain_rules_group);
 
             // 常用预设网段分组
             var presets_group = new Adw.PreferencesGroup ();
             presets_group.title = "Common Private Networks";
-            page.add (presets_group);
+            routing_page.add (presets_group);
 
             this.add_preset_row (presets_group, "192.168.0.0/16", "Local Class C");
             this.add_preset_row (presets_group, "10.0.0.0/8", "Local Class A");
@@ -49,7 +81,7 @@ namespace Sshuttle {
             // 自定义直连排除网络 (Exclude Networks)
             var exclude_group = new Adw.PreferencesGroup ();
             exclude_group.title = "Active Exclude Networks (Bypass Proxy)";
-            page.add (exclude_group);
+            routing_page.add (exclude_group);
 
             this.exclude_list_box = new Gtk.Box (Gtk.Orientation.VERTICAL, 6);
             exclude_group.add (this.exclude_list_box);
@@ -63,6 +95,10 @@ namespace Sshuttle {
             this.new_cidr_row.add_suffix (add_btn);
             this.new_cidr_row.entry_activated.connect (this.on_add_cidr);
             exclude_group.add (this.new_cidr_row);
+
+            var routing_vs_page = this.sub_stack.add_named (routing_scrolled, "routing");
+            routing_vs_page.title = "Domain & IP";
+            routing_vs_page.icon_name = "network-server-symbolic";
 
             this.refresh_excludes ();
         }

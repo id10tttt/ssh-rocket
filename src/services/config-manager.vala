@@ -12,7 +12,7 @@ namespace Sshuttle {
         private bool app_proxy_enabled = false;
         private GLib.GenericArray<string> proxy_apps;
         private GLib.GenericArray<DomainRule> domain_rules;
-        private string domain_default_policy = "direct";
+        private string domain_default_policy = "proxy";
 
         public signal void app_rules_changed ();
         public signal void domain_rules_changed ();

@@ -13,13 +13,13 @@ namespace Sshuttle {
             this.config_manager = config_manager;
             this.tunnel_manager = tunnel_manager;
 
-            this.title = "Domain Routing Rules (Zero Omega Compatible)";
-            this.description = GLib.Markup.escape_text ("Route specific domains via Proxy or Direct. Supports wildcards (*.google.com).");
+            this.title = "Domain Routing & Exceptions (Zero Omega Compatible)";
+            this.description = GLib.Markup.escape_text ("Route specific domains via Direct exception or Proxy. Supports wildcards (*.google.com).");
 
             // 1. 默认兜底策略
             this.default_policy_row = new Adw.ComboRow ();
-            this.default_policy_row.title = "Default Fallback Policy";
-            this.default_policy_row.subtitle = "Strategy for domains not matching any rules below";
+            this.default_policy_row.title = "Default Policy for Proxied Apps";
+            this.default_policy_row.subtitle = "Strategy for unlisted domains in proxied apps (Proxy recommended)";
             string[] policies = { "Direct (直连)", "Proxy (走代理)" };
             this.default_policy_row.model = new Gtk.StringList (policies);
 
@@ -55,8 +55,9 @@ namespace Sshuttle {
             this.new_pattern_row = new Adw.EntryRow ();
             this.new_pattern_row.title = "New Domain Pattern (e.g. *.google.com)";
 
-            string[] action_labels = { "Proxy (代理)", "Direct (直连)" };
+            string[] action_labels = { "Direct (直连例外)", "Proxy (走代理)" };
             this.action_dropdown = new Gtk.DropDown.from_strings (action_labels);
+            this.action_dropdown.selected = 0;
             this.action_dropdown.valign = Gtk.Align.CENTER;
             this.new_pattern_row.add_suffix (this.action_dropdown);
 
@@ -84,7 +85,7 @@ namespace Sshuttle {
                 return;
             }
 
-            string action = (this.action_dropdown.selected == 1) ? "direct" : "proxy";
+            string action = (this.action_dropdown.selected == 0) ? "direct" : "proxy";
             this.config_manager.add_domain_rule (pattern, action);
             this.new_pattern_row.text = "";
         }
@@ -149,7 +150,7 @@ namespace Sshuttle {
                 } else {
                     icon.icon_name = "network-wired-symbolic";
                     icon.add_css_class ("dim-label");
-                    row.subtitle = "Connect Direct";
+                    row.subtitle = "Connect Direct (例外直连)";
                 }
                 row.add_prefix (icon);
 
