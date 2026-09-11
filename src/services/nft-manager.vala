@@ -27,10 +27,8 @@ namespace Sshuttle {
 
             // 3. 在 output 链插入规则 (注意倒序插入以确保最终执行顺序)：
             //   1) udp sport 15354 return (DnsProxy 自身上游查询放行，杜绝回环)
-            //   2) ip daddr @proxy_ips udp dport 443 reject (QUIC 快速 reject，促使浏览器秒级降级为 TCP)
-            //   3) udp dport 53 redirect to :15353 (全局 DNS 查询重定向至本地 DnsProxy)
+            //   2) udp dport 53 redirect to :15353 (全局 DNS 查询重定向至本地 DnsProxy)
             this.run_nft_command (@"nft insert rule inet $(table_v4) output udp dport 53 redirect to :15353");
-            this.run_nft_command (@"nft insert rule inet $(table_v4) output ip daddr @proxy_ips udp dport 443 reject");
             this.run_nft_command (@"nft insert rule inet $(table_v4) output udp sport 15354 return");
 
             // 4. 在 sshuttle 子链首部插入分流与裁决规则 (倒序插入)：
@@ -142,6 +140,8 @@ namespace Sshuttle {
             this.run_nft_command ("nft add table inet sshuttle-firewall");
             this.run_nft_command ("nft 'add chain inet sshuttle-firewall output { type filter hook output priority -100; policy accept; }'");
             this.run_nft_command ("nft 'add rule inet sshuttle-firewall output socket cgroupv2 level 1 \"sshuttle-block\" drop'");
+            // 被代理的应用 (如 Chrome) 遇到 UDP 443 (QUIC) 立即在 filter 链 reject，促使浏览器秒级降级为 TCP 走代理
+            this.run_nft_command ("nft 'add rule inet sshuttle-firewall output socket cgroupv2 level 1 \"sshuttle-proxy\" udp dport 443 reject'");
         }
 
         public void cleanup_blacklist_filter () {
@@ -203,8 +203,12 @@ namespace Sshuttle {
                     out stderr_text,
                     out exit_status
                 );
+                if (exit_status != 0 && stderr_text != null && stderr_text.strip () != "") {
+                    warning ("nft command failed (code %d): %s | command: %s", exit_status, stderr_text.strip (), command);
+                }
                 return (exit_status == 0);
             } catch (GLib.Error e) {
+                warning ("nft spawn failed: %s | command: %s", e.message, command);
                 return false;
             }
         }

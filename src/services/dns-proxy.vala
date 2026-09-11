@@ -90,9 +90,10 @@ namespace Sshuttle {
         }
 
         private uint8[]? query_udp (string server_ip, uint16 server_port, uint8[] query_packet) {
+            GLib.Socket? s = null;
             try {
-                var s = new GLib.Socket (GLib.SocketFamily.IPV4, GLib.SocketType.DATAGRAM, GLib.SocketProtocol.UDP);
-                s.set_timeout (2);
+                s = new GLib.Socket (GLib.SocketFamily.IPV4, GLib.SocketType.DATAGRAM, GLib.SocketProtocol.UDP);
+                s.set_timeout (5);
                 var bind_addr = new GLib.InetSocketAddress (new GLib.InetAddress.from_string ("127.0.0.1"), FORWARD_PORT);
                 s.bind (bind_addr, true);
 
@@ -110,58 +111,12 @@ namespace Sshuttle {
                     return resp;
                 }
             } catch (GLib.Error e) {
-            }
-            return null;
-        }
-
-        private uint8[]? query_tcp (string server_ip, uint16 server_port, uint8[] query_packet) {
-            try {
-                var s = new GLib.Socket (GLib.SocketFamily.IPV4, GLib.SocketType.STREAM, GLib.SocketProtocol.TCP);
-                s.set_timeout (3);
-                var target_addr = new GLib.InetSocketAddress (new GLib.InetAddress.from_string (server_ip), server_port);
-                s.connect (target_addr);
-
-                // RFC 1035: 2 字节大端长度前缀
-                uint16 len = (uint16) query_packet.length;
-                uint8 len_buf[2];
-                len_buf[0] = (uint8) ((len >> 8) & 0xff);
-                len_buf[1] = (uint8) (len & 0xff);
-
-                s.send (len_buf);
-                s.send (query_packet);
-
-                uint8 resp_len_buf[2];
-                ssize_t r1 = s.receive (resp_len_buf);
-                if (r1 < 2) {
-                    s.close ();
-                    return null;
-                }
-
-                uint16 resp_len = (uint16) ((resp_len_buf[0] << 8) | resp_len_buf[1]);
-                if (resp_len == 0 || resp_len > 4096) {
-                    s.close ();
-                    return null;
-                }
-
-                uint8[] resp = new uint8[resp_len];
-                size_t total = 0;
-                while (total < resp_len) {
-                    uint8 chunk[2048];
-                    ssize_t r = s.receive (chunk);
-                    if (r <= 0) {
-                        break;
+                if (s != null) {
+                    try {
+                        s.close ();
+                    } catch (GLib.Error e2) {
                     }
-                    for (int i = 0; i < r && total + i < resp_len; i++) {
-                        resp[total + i] = chunk[i];
-                    }
-                    total += r;
                 }
-                s.close ();
-
-                if (total == resp_len) {
-                    return resp;
-                }
-            } catch (GLib.Error e) {
             }
             return null;
         }
@@ -199,9 +154,12 @@ namespace Sshuttle {
                 if (this.remote_dns_port > 0) {
                     resp_packet = this.query_udp ("127.0.0.1", this.remote_dns_port, query_packet);
                 }
-                // 2. 若隧道 DNS 尚未就绪，通过 TCP 向 8.8.8.8 查询 (TCP 自动走 sshuttle 隧道代理)
+                // 2. 若隧道 DNS 尚未就绪或查询超时，尝试通过本地系统 DNS 解析保底
                 if (resp_packet == null) {
-                    resp_packet = this.query_tcp ("8.8.8.8", 53, query_packet);
+                    resp_packet = this.query_udp ("127.0.0.53", 53, query_packet);
+                }
+                if (resp_packet == null) {
+                    resp_packet = this.query_udp ("223.5.5.5", 53, query_packet);
                 }
             } else {
                 // 直连域名：本地系统 DNS 优先
@@ -310,8 +268,25 @@ namespace Sshuttle {
                 return query_packet;
             }
 
-            uint8[] resp = new uint8[query_packet.length];
-            GLib.Memory.copy (resp, query_packet, query_packet.length);
+            // 计算 Question 节的精确结束位置，截掉 OPT (EDNS0) 等额外数据，避免响应报文畸形 (FORMERR)
+            int idx = 12;
+            while (idx < query_packet.length && query_packet[idx] != 0) {
+                if ((query_packet[idx] & 0xC0) == 0xC0) {
+                    idx += 2;
+                    break;
+                }
+                idx += query_packet[idx] + 1;
+            }
+            if (idx < query_packet.length && query_packet[idx] == 0) {
+                idx++;
+            }
+            idx += 4; // QTYPE (2) + QCLASS (2)
+            if (idx > query_packet.length) {
+                idx = query_packet.length;
+            }
+
+            uint8[] resp = new uint8[idx];
+            GLib.Memory.copy (resp, query_packet, idx);
 
             // Flags: 0x8180 (Response, Opcode=0, AA=0, TC=0, RD=1, RA=1, RCODE=0 NOERROR)
             resp[2] = 0x81;
@@ -367,16 +342,18 @@ namespace Sshuttle {
                     break;
                 }
 
-                // 处理名称
-                if ((data[idx] & 0xC0) == 0xC0) {
-                    idx += 2;
-                } else {
-                    while (idx < data.length && data[idx] != 0) {
-                        idx += data[idx] + 1;
-                    }
-                    if (idx < data.length) {
+                // 规范跳过域名 (支持无压缩、纯指针 0xC0 或标签后接指针)
+                while (idx < data.length) {
+                    uint8 len = data[idx];
+                    if (len == 0) {
                         idx++;
+                        break;
                     }
+                    if ((len & 0xC0) == 0xC0) {
+                        idx += 2;
+                        break;
+                    }
+                    idx += len + 1;
                 }
 
                 if (idx + 10 > data.length) {

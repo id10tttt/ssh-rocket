@@ -300,18 +300,18 @@ namespace Sshuttle {
 
             if ("dns listening on" in lower) {
                 // 捕获 sshuttle 内部安全 DNS 端口 (例如 "c : DNS listening on ('127.0.0.1', 12299).")
-                int p_idx = line.index_of ("('127.0.0.1', ");
-                if (p_idx >= 0) {
-                    string sub = line.substring (p_idx + 14);
-                    int end_idx = sub.index_of (")");
-                    if (end_idx > 0) {
-                        string port_str = sub.substring (0, end_idx).strip ();
+                try {
+                    var r = new GLib.Regex ("dns listening on \\([^,]+,\\s*(\\d+)\\)", GLib.RegexCompileFlags.CASELESS);
+                    GLib.MatchInfo info;
+                    if (r.match (line, 0, out info)) {
+                        string port_str = info.fetch (1);
                         uint16 port = (uint16) int.parse (port_str);
                         if (port > 0) {
                             this.dns_proxy.remote_dns_port = port;
                             this.emit_log (@"Tunnel remote DNS ready on port $(port)");
                         }
                     }
+                } catch (GLib.RegexError e) {
                 }
             }
 

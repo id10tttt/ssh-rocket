@@ -88,25 +88,41 @@ namespace Sshuttle {
             argv.add ("-r");
             argv.add (profile.get_ssh_target ());
 
+            var exclude_set = new GLib.HashTable<string, bool> (GLib.str_hash, GLib.str_equal);
+
             // 自动排除目标服务器自身 IP / 域名，防止全局转发规则切断 SSH 连接自身
-            bool host_excluded = false;
             string host_trimmed = profile.host.strip ();
-            foreach (var exc in profile.exclude) {
-                if (exc.strip () == host_trimmed) {
-                    host_excluded = true;
-                    break;
-                }
-            }
-            if (!host_excluded && host_trimmed != "") {
+            if (host_trimmed != "") {
                 argv.add ("-x");
                 argv.add (host_trimmed);
+                exclude_set.insert (host_trimmed, true);
             }
 
             foreach (var exc in profile.exclude) {
                 string exc_trimmed = exc.strip ();
-                if (exc_trimmed != "" && exc_trimmed != host_trimmed) {
+                if (exc_trimmed != "" && !exclude_set.contains (exc_trimmed)) {
                     argv.add ("-x");
                     argv.add (exc_trimmed);
+                    exclude_set.insert (exc_trimmed, true);
+                }
+            }
+
+            // 当包含全局 0.0.0.0/0 路由时，默认排除回环与局域网私有网段，确保本地服务与内网访问通畅
+            bool has_global_route = (profile.routes.length == 0);
+            foreach (var r in profile.routes) {
+                if (r.strip () == "0.0.0.0/0") {
+                    has_global_route = true;
+                    break;
+                }
+            }
+            if (has_global_route) {
+                string[] default_subnets = { "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16" };
+                foreach (var net in default_subnets) {
+                    if (!exclude_set.contains (net)) {
+                        argv.add ("-x");
+                        argv.add (net);
+                        exclude_set.insert (net, true);
+                    }
                 }
             }
 
