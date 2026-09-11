@@ -9,6 +9,16 @@ namespace Sshuttle {
         public TunnelState state { get; private set; default = TunnelState.DISCONNECTED; }
         public GLib.GenericArray<string> log_history { get; private set; }
 
+        public CgroupManager cgroup_manager { get; private set; }
+        public NftManager nft_manager { get; private set; }
+        public ProcessMonitor process_monitor { get; private set; }
+        public int local_proxy_port { get; set; default = 12300; }
+
+        public int reconnect_attempt { get; private set; default = 0; }
+        private uint reconnect_timeout_id = 0;
+        private const uint BASE_RECONNECT_DELAY = 2;
+        private const uint MAX_RECONNECT_DELAY = 30;
+
         private GLib.Subprocess? process = null;
         private GLib.Cancellable? cancellable = null;
         private uint connect_timeout_id = 0;
@@ -23,6 +33,15 @@ namespace Sshuttle {
         public TunnelManager (ConfigManager config_manager) {
             this.config_manager = config_manager;
             this.log_history = new GLib.GenericArray<string> ();
+
+            this.cgroup_manager = new CgroupManager ();
+            this.nft_manager = new NftManager ();
+            this.process_monitor = new ProcessMonitor (this.cgroup_manager);
+
+            // 启动时主动清除任何可能的上次异常残留（确保纯运行时无残余）
+            this.cleanup_proxy_runtime ();
+
+            this.config_manager.app_rules_changed.connect (this.on_app_rules_changed);
         }
 
         public void set_active_profile (string id) {
@@ -72,11 +91,19 @@ namespace Sshuttle {
                 return;
             }
 
+            // 取消正在等待的自动重连倒计时
+            this.cancel_reconnect ();
+
             this.change_state (TunnelState.CONNECTING);
 
             try {
-                bool use_pkexec = (Posix.geteuid () != 0);
-                string[] argv = CommandBuilder.build_argv (profile, use_pkexec);
+                // 如果开启了按软件代理，先准备 cgroup 并启动进程监控
+                if (this.config_manager.get_app_proxy_enabled ()) {
+                    this.sync_process_monitor_targets ();
+                    this.process_monitor.start ();
+                }
+
+                string[] argv = CommandBuilder.build_argv (profile, this.local_proxy_port);
 
                 string cmd_str = string.joinv (" ", argv);
                 this.emit_log (@"Starting tunnel: $(cmd_str)");
@@ -106,13 +133,16 @@ namespace Sshuttle {
                         this.emit_log ("Connection timed out after 25 seconds.");
                         this.disconnect_tunnel ();
                         this.change_state (TunnelState.ERROR);
+                        this.schedule_auto_reconnect ();
                     }
                     return false;
                 });
 
             } catch (GLib.Error e) {
                 this.emit_log (@"Failed to spawn sshuttle: $(e.message)");
+                this.cleanup_proxy_runtime ();
                 this.change_state (TunnelState.ERROR);
+                this.schedule_auto_reconnect ();
             }
         }
 
@@ -156,7 +186,16 @@ namespace Sshuttle {
                         GLib.Source.remove (this.connect_timeout_id);
                         this.connect_timeout_id = 0;
                     }
+                    this.reconnect_attempt = 0;
                     this.change_state (TunnelState.CONNECTED);
+
+                    // 成功连上后，如果启用了按应用代理，向 nftables 插入 cgroup 过滤规则
+                    if (this.config_manager.get_app_proxy_enabled ()) {
+                        var p = this.active_profile;
+                        bool ipv6 = (p != null) ? p.ipv6 : false;
+                        this.nft_manager.apply_cgroup_filter (this.local_proxy_port, ipv6);
+                        this.emit_log ("Per-app proxy rules active: only selected applications are routed through tunnel.");
+                    }
                 }
             }
         }
@@ -165,6 +204,10 @@ namespace Sshuttle {
             if (this.state == TunnelState.DISCONNECTED || this.state == TunnelState.DISCONNECTING) {
                 return;
             }
+
+            // 用户手动断开，重置重试计数并取消重连
+            this.cancel_reconnect ();
+            this.reconnect_attempt = 0;
 
             if (this.connect_timeout_id != 0) {
                 GLib.Source.remove (this.connect_timeout_id);
@@ -177,6 +220,9 @@ namespace Sshuttle {
 
             this.change_state (TunnelState.DISCONNECTING);
             this.emit_log ("Disconnecting tunnel...");
+
+            // 彻底清理运行时防火墙规则与 cgroup
+            this.cleanup_proxy_runtime ();
 
             if (this.process != null) {
                 this.process.send_signal (Posix.Signal.INT);
@@ -206,10 +252,96 @@ namespace Sshuttle {
             this.process = null;
 
             if (this.state == TunnelState.DISCONNECTING) {
+                this.cleanup_proxy_runtime ();
                 this.change_state (TunnelState.DISCONNECTED);
+                this.reconnect_attempt = 0;
             } else if (this.state != TunnelState.DISCONNECTED) {
+                // 异常掉线：清理当前规则后触发无限自动重连
+                this.cleanup_proxy_runtime ();
                 this.change_state (TunnelState.ERROR);
+                this.schedule_auto_reconnect ();
             }
+        }
+
+        private void schedule_auto_reconnect () {
+            if (this.reconnect_timeout_id != 0) {
+                return;
+            }
+
+            this.reconnect_attempt++;
+            // 指数退避：2s, 4s, 8s, 16s, 30s, 30s...
+            uint delay = (uint) int.min (
+                (int) (BASE_RECONNECT_DELAY * (1 << int.min (this.reconnect_attempt - 1, 4))),
+                (int) MAX_RECONNECT_DELAY
+            );
+
+            this.emit_log (@"Connection dropped. Auto-reconnecting in $(delay)s (attempt #$(this.reconnect_attempt), infinite retry)...");
+
+            this.reconnect_timeout_id = GLib.Timeout.add_seconds (delay, () => {
+                this.reconnect_timeout_id = 0;
+                if (this.state == TunnelState.ERROR || this.state == TunnelState.DISCONNECTED) {
+                    this.emit_log (@"Auto-reconnecting now (attempt #$(this.reconnect_attempt))...");
+                    this.connect_active ();
+                }
+                return false;
+            });
+        }
+
+        public void cancel_reconnect () {
+            if (this.reconnect_timeout_id != 0) {
+                GLib.Source.remove (this.reconnect_timeout_id);
+                this.reconnect_timeout_id = 0;
+            }
+        }
+
+        public void cleanup_proxy_runtime () {
+            this.process_monitor.stop ();
+            this.nft_manager.cleanup_all_sshuttle_tables (this.local_proxy_port);
+            this.cgroup_manager.cleanup_and_destroy ();
+        }
+
+        private void on_app_rules_changed () {
+            this.sync_process_monitor_targets ();
+            if (this.state == TunnelState.CONNECTED) {
+                var p = this.active_profile;
+                bool ipv6 = (p != null) ? p.ipv6 : false;
+                if (this.config_manager.get_app_proxy_enabled ()) {
+                    this.nft_manager.apply_cgroup_filter (this.local_proxy_port, ipv6);
+                    this.process_monitor.start ();
+                    this.emit_log ("App proxy rules updated: filter enabled for selected apps.");
+                } else {
+                    this.nft_manager.remove_cgroup_filter (this.local_proxy_port, ipv6);
+                    this.process_monitor.stop ();
+                    this.emit_log ("App proxy rules updated: global proxy enabled.");
+                }
+            }
+        }
+
+        private void sync_process_monitor_targets () {
+            if (!this.config_manager.get_app_proxy_enabled ()) {
+                this.process_monitor.set_targets (new string[0]);
+                return;
+            }
+
+            string[] proxy_app_ids = this.config_manager.get_proxy_apps ();
+            var apps = AppScanner.scan_apps ();
+            var target_execs = new GLib.GenericArray<string> ();
+
+            for (uint i = 0; i < apps.length; i++) {
+                var app = apps[i];
+                for (uint j = 0; j < proxy_app_ids.length; j++) {
+                    if (proxy_app_ids[j] == app.id || proxy_app_ids[j] == app.exec_name) {
+                        target_execs.add (app.exec_name);
+                        break;
+                    }
+                }
+            }
+
+            var arr = new string[target_execs.length];
+            for (uint i = 0; i < target_execs.length; i++) {
+                arr[i] = target_execs[i];
+            }
+            this.process_monitor.set_targets (arr);
         }
     }
 }

@@ -188,14 +188,25 @@ namespace Sshuttle {
                         break;
 
                     case TunnelState.ERROR:
-                        this.btn_label.label = "Reconnect";
-                        this.action_btn.add_css_class ("suggested-action");
-                        this.action_btn.sensitive = true;
-                        this.spinner.visible = false;
-                        this.spinner.stop ();
-                        this.status_icon.icon_name = "dialog-error-symbolic";
-                        this.status_icon.add_css_class ("error");
-                        this.status_label.label = "Error";
+                        if (this.tunnel_manager.reconnect_attempt > 0) {
+                            this.btn_label.label = "Stop Retry";
+                            this.action_btn.add_css_class ("destructive-action");
+                            this.action_btn.sensitive = true;
+                            this.spinner.visible = true;
+                            this.spinner.start ();
+                            this.status_icon.icon_name = "network-vpn-acquiring-symbolic";
+                            this.status_icon.add_css_class ("warning");
+                            this.status_label.label = @"Reconnecting (#$(this.tunnel_manager.reconnect_attempt))…";
+                        } else {
+                            this.btn_label.label = "Reconnect";
+                            this.action_btn.add_css_class ("suggested-action");
+                            this.action_btn.sensitive = true;
+                            this.spinner.visible = false;
+                            this.spinner.stop ();
+                            this.status_icon.icon_name = "dialog-error-symbolic";
+                            this.status_icon.add_css_class ("error");
+                            this.status_label.label = "Error";
+                        }
                         break;
 
                     default: // DISCONNECTED
@@ -226,7 +237,7 @@ namespace Sshuttle {
             bool is_active = (active_p != null && active_p.id == this.profile.id);
             var state = this.tunnel_manager.state;
 
-            if (is_active && (state == TunnelState.CONNECTED || state == TunnelState.CONNECTING)) {
+            if (is_active && (state == TunnelState.CONNECTED || state == TunnelState.CONNECTING || (state == TunnelState.ERROR && this.tunnel_manager.reconnect_attempt > 0))) {
                 this.disconnect_requested ();
             } else {
                 this.connect_requested (this.profile);

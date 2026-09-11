@@ -2,18 +2,18 @@ namespace Sshuttle {
 
     public class CommandBuilder : Object {
 
-        public static string[] build_argv (Profile profile, bool use_pkexec = false) throws GLib.Error {
+        public static string[] build_argv (Profile profile, int local_port = 12300) throws GLib.Error {
             if (profile.host.strip () == "") {
                 throw new GLib.IOError.INVALID_ARGUMENT ("Host cannot be empty");
             }
 
             var argv = new GLib.GenericArray<string> ();
 
-            if (use_pkexec) {
-                argv.add ("pkexec");
-            }
-
             argv.add ("sshuttle");
+
+            // 指定监听端口，便于精准管理对应 nftables 表 (sshuttle-ipv4-<port>)
+            argv.add ("-l");
+            argv.add (@"127.0.0.1:$(local_port)");
 
             if (profile.dns) {
                 argv.add ("--dns");
@@ -23,10 +23,9 @@ namespace Sshuttle {
                 argv.add ("--ipv6");
             }
 
-            if (profile.method != "" && profile.method != "auto") {
-                argv.add ("--method");
-                argv.add (profile.method);
-            }
+            // 强制采用 nftables 模式，支持内核级 cgroup v2 应用过滤
+            argv.add ("--method");
+            argv.add ("nft");
 
             if (profile.verbosity == "verbose") {
                 argv.add ("-v");
@@ -51,7 +50,11 @@ namespace Sshuttle {
 
             ssh_parts.add ("-o StrictHostKeyChecking=accept-new");
 
-            string home_dir = GLib.Environment.get_home_dir ();
+            string? sudo_user = GLib.Environment.get_variable ("SUDO_USER");
+            string home_dir = (sudo_user != null && sudo_user != "")
+                ? @"/home/$(sudo_user)"
+                : GLib.Environment.get_home_dir ();
+
             string known_hosts = GLib.Path.build_filename (home_dir, ".ssh", "known_hosts");
             if (GLib.FileUtils.test (known_hosts, GLib.FileTest.EXISTS)) {
                 ssh_parts.add (@"-o UserKnownHostsFile=$(known_hosts)");

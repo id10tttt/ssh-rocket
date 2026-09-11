@@ -28,6 +28,10 @@ namespace Sshuttle {
             var page = new Adw.PreferencesPage ();
             clamp.set_child (page);
 
+            // 按软件代理规则 (Per-App Proxy)
+            var app_rules_group = new AppRulesView (this.config_manager, this.tunnel_manager);
+            page.add (app_rules_group);
+
             // 常用预设网段分组
             var presets_group = new Adw.PreferencesGroup ();
             presets_group.title = "Common Private Networks";

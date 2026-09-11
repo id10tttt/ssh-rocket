@@ -44,11 +44,22 @@ namespace Sshuttle {
 
             this.set_accels_for_action ("app.quit", { "<Control>q" });
             this.set_accels_for_action ("win.new-profile", { "<Control>n" });
+
+            // 注册系统退出信号，确保异常中断时彻底清理防火墙与 cgroup，无系统残余
+            GLib.Unix.signal_add (Posix.Signal.INT, () => {
+                this.handle_real_quit ();
+                return GLib.Source.REMOVE;
+            });
+            GLib.Unix.signal_add (Posix.Signal.TERM, () => {
+                this.handle_real_quit ();
+                return GLib.Source.REMOVE;
+            });
         }
 
         private void handle_real_quit () {
             if (this.tunnel_manager != null) {
                 this.tunnel_manager.disconnect_tunnel ();
+                this.tunnel_manager.cleanup_proxy_runtime ();
             }
             this.quit ();
         }

@@ -9,11 +9,26 @@ namespace Sshuttle {
         private string? active_profile_id = null;
         private int window_width = 460;
         private int window_height = 680;
+        private bool app_proxy_enabled = false;
+        private GLib.GenericArray<string> proxy_apps;
+
+        public signal void app_rules_changed ();
 
         public ConfigManager () {
+            this.proxy_apps = new GLib.GenericArray<string> ();
+
             string? env_dir = GLib.Environment.get_variable ("SSHUTTLE_CONFIG_DIR");
+            string? sudo_user = GLib.Environment.get_variable ("SUDO_USER");
+
             if (env_dir != null && env_dir != "") {
                 this.config_dir = env_dir;
+            } else if (sudo_user != null && sudo_user != "") {
+                this.config_dir = GLib.Path.build_filename (
+                    "/home",
+                    sudo_user,
+                    ".config",
+                    "sshuttle-gui"
+                );
             } else {
                 this.config_dir = GLib.Path.build_filename (
                     GLib.Environment.get_user_config_dir (),
@@ -90,6 +105,16 @@ namespace Sshuttle {
                         if (obj.has_member ("window_height")) {
                             this.window_height = (int) obj.get_int_member ("window_height");
                         }
+                        if (obj.has_member ("app_proxy_enabled")) {
+                            this.app_proxy_enabled = obj.get_boolean_member ("app_proxy_enabled");
+                        }
+                        if (obj.has_member ("proxy_apps")) {
+                            this.proxy_apps.remove_range (0, this.proxy_apps.length);
+                            var arr = obj.get_array_member ("proxy_apps");
+                            arr.foreach_element ((array, index, element_node) => {
+                                this.proxy_apps.add (element_node.get_string ());
+                            });
+                        }
                     }
                 } catch (GLib.Error e) {
                     // 忽略设置读取异常
@@ -125,6 +150,7 @@ namespace Sshuttle {
 
             try {
                 generator.to_file (this.profiles_path);
+                this.fix_ownership (this.profiles_path);
             } catch (GLib.Error e) {
                 warning ("Failed to save profiles: %s", e.message);
             }
@@ -197,24 +223,108 @@ namespace Sshuttle {
             return this.window_height;
         }
 
-        public void set_window_size (int w, int h) {
-            this.window_width = w;
-            this.window_height = h;
-
+        public void save_settings () {
+            this.ensure_dir ();
             var builder = new Json.Builder ();
             builder.begin_object ();
+
             builder.set_member_name ("window_width");
-            builder.add_int_value (w);
+            builder.add_int_value (this.window_width);
+
             builder.set_member_name ("window_height");
-            builder.add_int_value (h);
+            builder.add_int_value (this.window_height);
+
+            builder.set_member_name ("app_proxy_enabled");
+            builder.add_boolean_value (this.app_proxy_enabled);
+
+            builder.set_member_name ("proxy_apps");
+            builder.begin_array ();
+            for (uint i = 0; i < this.proxy_apps.length; i++) {
+                builder.add_string_value (this.proxy_apps[i]);
+            }
+            builder.end_array ();
+
             builder.end_object ();
 
             var generator = new Json.Generator ();
             generator.set_root (builder.get_root ());
+            generator.set_pretty (true);
             try {
                 generator.to_file (this.settings_path);
+                this.fix_ownership (this.settings_path);
             } catch (GLib.Error e) {
                 // 忽略设置保存异常
+            }
+        }
+
+        public void set_window_size (int w, int h) {
+            this.window_width = w;
+            this.window_height = h;
+            this.save_settings ();
+        }
+
+        public bool get_app_proxy_enabled () {
+            return this.app_proxy_enabled;
+        }
+
+        public void set_app_proxy_enabled (bool enabled) {
+            if (this.app_proxy_enabled != enabled) {
+                this.app_proxy_enabled = enabled;
+                this.save_settings ();
+                this.app_rules_changed ();
+            }
+        }
+
+        public string[] get_proxy_apps () {
+            var arr = new string[this.proxy_apps.length];
+            for (uint i = 0; i < this.proxy_apps.length; i++) {
+                arr[i] = this.proxy_apps[i];
+            }
+            return arr;
+        }
+
+        public bool is_app_proxied (string app_id) {
+            for (uint i = 0; i < this.proxy_apps.length; i++) {
+                if (this.proxy_apps[i] == app_id) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        public void set_app_proxied (string app_id, bool proxied) {
+            bool changed = false;
+            if (proxied) {
+                if (!this.is_app_proxied (app_id)) {
+                    this.proxy_apps.add (app_id);
+                    changed = true;
+                }
+            } else {
+                for (uint i = 0; i < this.proxy_apps.length; i++) {
+                    if (this.proxy_apps[i] == app_id) {
+                        this.proxy_apps.remove_index (i);
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+
+            if (changed) {
+                this.save_settings ();
+                this.app_rules_changed ();
+            }
+        }
+
+        private void fix_ownership (string file_path) {
+            string? sudo_uid_str = GLib.Environment.get_variable ("SUDO_UID");
+            string? sudo_gid_str = GLib.Environment.get_variable ("SUDO_GID");
+            if (sudo_uid_str != null && sudo_gid_str != null) {
+                int uid = int.parse (sudo_uid_str);
+                int gid = int.parse (sudo_gid_str);
+                if (uid > 0) {
+                    Posix.chown (file_path, (Posix.uid_t) uid, (Posix.gid_t) gid);
+                    Posix.chown (this.config_dir, (Posix.uid_t) uid, (Posix.gid_t) gid);
+                }
             }
         }
     }
