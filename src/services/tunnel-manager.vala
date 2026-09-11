@@ -1,5 +1,17 @@
 namespace Sshuttle {
 
+    public class AppLogEntry : Object {
+        public string timestamp { get; set; }
+        public string app_name { get; set; }
+        public string message { get; set; }
+
+        public AppLogEntry (string timestamp, string app_name, string message) {
+            this.timestamp = timestamp;
+            this.app_name = app_name;
+            this.message = message;
+        }
+    }
+
     public class TunnelManager : Object {
         public signal void state_changed (TunnelState state);
         public signal void log_received (string line);
@@ -33,6 +45,12 @@ namespace Sshuttle {
 
         public signal void speed_updated (string up_speed, string down_speed);
 
+        public GLib.GenericArray<AppLogEntry> app_logs { get; private set; }
+        public GLib.GenericArray<string> proxy_logs { get; private set; }
+
+        public signal void app_log_received (AppLogEntry entry);
+        public signal void proxy_log_received (string line);
+
         public Profile? active_profile {
             owned get {
                 return this.config_manager.get_active_profile ();
@@ -42,6 +60,8 @@ namespace Sshuttle {
         public TunnelManager (ConfigManager config_manager) {
             this.config_manager = config_manager;
             this.log_history = new GLib.GenericArray<string> ();
+            this.app_logs = new GLib.GenericArray<AppLogEntry> ();
+            this.proxy_logs = new GLib.GenericArray<string> ();
 
             this.cgroup_manager = new CgroupManager ();
             this.nft_manager = new NftManager ();
@@ -53,6 +73,8 @@ namespace Sshuttle {
 
             this.config_manager.app_rules_changed.connect (this.on_app_rules_changed);
             this.config_manager.domain_rules_changed.connect (this.on_domain_rules_changed);
+            this.config_manager.blacklist_changed.connect (this.on_blacklist_changed);
+            this.process_monitor.process_migrated.connect (this.on_process_migrated);
         }
 
         public void set_active_profile (string id) {
@@ -67,7 +89,17 @@ namespace Sshuttle {
             }
         }
 
-        private void emit_log (string text) {
+        public void emit_app_log (string app_name, string message) {
+            var now = new GLib.DateTime.now_local ();
+            string time_str = now.format ("%H:%M:%S");
+            var entry = new AppLogEntry (time_str, app_name, message);
+            this.app_logs.add (entry);
+            if (this.app_logs.length > MAX_LOGS) {
+                this.app_logs.remove_index (0);
+            }
+            this.app_log_received (entry);
+
+            string text = @"[$time_str] [$app_name] $message";
             this.log_history.add (text);
             if (this.log_history.length > MAX_LOGS) {
                 this.log_history.remove_index (0);
@@ -76,8 +108,37 @@ namespace Sshuttle {
             print ("%s\n", text);
         }
 
+        public void emit_proxy_log (string line) {
+            this.proxy_logs.add (line);
+            if (this.proxy_logs.length > MAX_LOGS) {
+                this.proxy_logs.remove_index (0);
+            }
+            this.proxy_log_received (line);
+
+            this.log_history.add (line);
+            if (this.log_history.length > MAX_LOGS) {
+                this.log_history.remove_index (0);
+            }
+            this.log_received (line);
+            print ("%s\n", line);
+        }
+
+        private void emit_log (string text) {
+            this.emit_app_log ("System", text);
+        }
+
         public void clear_logs () {
             this.log_history.remove_range (0, this.log_history.length);
+            this.app_logs.remove_range (0, this.app_logs.length);
+            this.proxy_logs.remove_range (0, this.proxy_logs.length);
+        }
+
+        public void clear_app_logs () {
+            this.app_logs.remove_range (0, this.app_logs.length);
+        }
+
+        public void clear_proxy_logs () {
+            this.proxy_logs.remove_range (0, this.proxy_logs.length);
         }
 
         public void toggle_connection () {
@@ -216,7 +277,7 @@ namespace Sshuttle {
         }
 
         private void on_log_line (string line) {
-            this.emit_log (line);
+            this.emit_proxy_log (line);
             string lower = line.down ();
             if ("connected to server" in lower || "c : connected" in lower || "tunnel ready" in lower || (lower.has_prefix ("connected") && !("not connected" in lower))) {
                 if (this.state == TunnelState.CONNECTING) {
@@ -227,15 +288,16 @@ namespace Sshuttle {
                     this.reconnect_attempt = 0;
                     this.change_state (TunnelState.CONNECTED);
 
-                    // 成功连上后，向 nftables 插入 cgroup 过滤规则：只有勾选的软件走代理，其余全部直连
+                    // 成功连上后，向 nftables 插入 cgroup 过滤规则与黑名单规则
                     var p = this.active_profile;
                     bool ipv6 = (p != null) ? p.ipv6 : false;
                     this.dns_proxy.start ();
                     this.nft_manager.apply_cgroup_filter (this.local_proxy_port, ipv6, this.config_manager.get_domain_default_policy ());
+                    this.nft_manager.apply_blacklist_filter ();
                     this.sync_process_monitor_targets ();
                     this.process_monitor.start ();
                     this.start_speed_monitor ();
-                    this.emit_log ("Per-app proxy active: only checked applications are routed through proxy.");
+                    this.emit_log ("Per-app proxy and blacklist active.");
                 }
             }
         }
@@ -487,11 +549,32 @@ namespace Sshuttle {
             }
         }
 
+        private void on_blacklist_changed () {
+            this.sync_process_monitor_targets ();
+            if (this.state == TunnelState.CONNECTED) {
+                this.nft_manager.apply_blacklist_filter ();
+                this.process_monitor.start ();
+            }
+        }
+
+        private void on_process_migrated (string app_name, int pid, string cgroup_type) {
+            if (cgroup_type == "block") {
+                this.emit_app_log (app_name, @"Blocked from network (PID: $(pid))");
+            } else {
+                this.emit_app_log (app_name, @"Routed through proxy (PID: $(pid))");
+            }
+        }
+
         private void sync_process_monitor_targets () {
             string[] proxy_app_ids = this.config_manager.get_proxy_apps ();
+            string[] block_app_ids = this.config_manager.get_blocked_apps ();
+            string[] block_procs = this.config_manager.get_blocked_processes ();
             var apps = AppScanner.scan_apps ();
-            var target_execs = new GLib.GenericArray<string> ();
 
+            var target_execs = new GLib.GenericArray<string> ();
+            var block_execs = new GLib.GenericArray<string> ();
+
+            // App rules for proxy
             for (uint i = 0; i < apps.length; i++) {
                 var app = apps[i];
                 for (uint j = 0; j < proxy_app_ids.length; j++) {
@@ -502,12 +585,38 @@ namespace Sshuttle {
                 }
             }
 
-            var arr = new string[target_execs.length];
-            for (uint i = 0; i < target_execs.length; i++) {
-                arr[i] = target_execs[i];
+            // App rules for blacklist
+            for (uint i = 0; i < apps.length; i++) {
+                var app = apps[i];
+                for (uint j = 0; j < block_app_ids.length; j++) {
+                    if (block_app_ids[j] == app.id || block_app_ids[j] == app.exec_name) {
+                        block_execs.add (app.exec_name);
+                        break;
+                    }
+                }
             }
-            this.process_monitor.set_targets (arr);
-            this.emit_log (@"Proxied apps updated: $(target_execs.length) app(s) checked for proxy.");
+
+            // Process rules for blacklist
+            for (uint i = 0; i < block_procs.length; i++) {
+                string proc = block_procs[i].strip ();
+                if (proc != "") {
+                    block_execs.add (proc);
+                }
+            }
+
+            var arr_targets = new string[target_execs.length];
+            for (uint i = 0; i < target_execs.length; i++) {
+                arr_targets[i] = target_execs[i];
+            }
+            this.process_monitor.set_targets (arr_targets);
+
+            var arr_blocks = new string[block_execs.length];
+            for (uint i = 0; i < block_execs.length; i++) {
+                arr_blocks[i] = block_execs[i];
+            }
+            this.process_monitor.set_block_targets (arr_blocks);
+
+            this.emit_app_log ("System", @"Rules updated: $(target_execs.length) proxied app(s), $(block_execs.length) blacklisted target(s).");
         }
     }
 }

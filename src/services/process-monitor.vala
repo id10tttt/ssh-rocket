@@ -9,12 +9,16 @@ namespace Sshuttle {
     public class ProcessMonitor : Object {
         private CgroupManager cgroup_manager;
         private GLib.HashTable<string, bool> target_execs;
+        private GLib.HashTable<string, bool> block_execs;
         private uint monitor_timer_id = 0;
         private const uint MONITOR_INTERVAL_SEC = 2;
+
+        public signal void process_migrated (string app_name, int pid, string cgroup_type);
 
         public ProcessMonitor (CgroupManager cgroup_manager) {
             this.cgroup_manager = cgroup_manager;
             this.target_execs = new GLib.HashTable<string, bool> (GLib.str_hash, GLib.str_equal);
+            this.block_execs = new GLib.HashTable<string, bool> (GLib.str_hash, GLib.str_equal);
         }
 
         public void set_targets (string[] exec_names) {
@@ -25,7 +29,17 @@ namespace Sshuttle {
                     this.target_execs.insert (trimmed, true);
                 }
             }
-            // 立即同步一次
+            this.scan_and_migrate ();
+        }
+
+        public void set_block_targets (string[] block_names) {
+            this.block_execs.remove_all ();
+            foreach (var name in block_names) {
+                string trimmed = name.strip ().down ();
+                if (trimmed != "") {
+                    this.block_execs.insert (trimmed, true);
+                }
+            }
             this.scan_and_migrate ();
         }
 
@@ -54,14 +68,16 @@ namespace Sshuttle {
         }
 
         private void scan_and_migrate () {
-            if (this.target_execs.size () == 0) {
-                // 如果没有任何目标应用，清空代理 cgroup 中的进程
+            if (this.target_execs.size () == 0 && this.block_execs.size () == 0) {
                 this.cgroup_manager.cleanup_and_destroy ();
                 return;
             }
 
-            if (!this.cgroup_manager.ensure_proxy_cgroup ()) {
-                return;
+            if (this.target_execs.size () > 0) {
+                this.cgroup_manager.ensure_proxy_cgroup ();
+            }
+            if (this.block_execs.size () > 0) {
+                this.cgroup_manager.ensure_block_cgroup ();
             }
 
             int[] current_proxy_pids = this.cgroup_manager.get_proxy_pids ();
@@ -70,11 +86,16 @@ namespace Sshuttle {
                 proxy_pids_set.insert (p, true);
             }
 
+            int[] current_block_pids = this.cgroup_manager.get_block_pids ();
+            var block_pids_set = new GLib.HashTable<int, bool> (GLib.direct_hash, GLib.direct_equal);
+            foreach (var p in current_block_pids) {
+                block_pids_set.insert (p, true);
+            }
+
             try {
                 var proc_dir = GLib.Dir.open ("/proc");
                 string? name = null;
                 while ((name = proc_dir.read_name ()) != null) {
-                    // 仅检测数字目录 (PID)
                     if (name.length == 0 || !name[0].isdigit ()) {
                         continue;
                     }
@@ -89,52 +110,54 @@ namespace Sshuttle {
                         continue;
                     }
 
+                    bool should_block = this.block_execs.contains (proc_exec);
                     bool should_proxy = this.target_execs.contains (proc_exec);
 
-                    if (should_proxy) {
+                    // 黑名单优先级最高：若被黑名单则移入 block cgroup
+                    if (should_block) {
+                        if (!block_pids_set.contains (pid)) {
+                            this.cgroup_manager.move_pid_to_block (pid);
+                            this.process_migrated (proc_exec, pid, "block");
+                        }
+                    } else if (should_proxy) {
                         if (!proxy_pids_set.contains (pid)) {
                             this.cgroup_manager.move_pid_to_proxy (pid);
+                            this.process_migrated (proc_exec, pid, "proxy");
                         }
                     } else {
-                        // 如果之前在代理里，但目标列表已取消该应用，迁回根 cgroup
-                        if (proxy_pids_set.contains (pid)) {
+                        if (proxy_pids_set.contains (pid) || block_pids_set.contains (pid)) {
                             this.cgroup_manager.move_pid_to_default (pid);
                         }
                     }
                 }
             } catch (GLib.Error e) {
-                // 读取 /proc 异常
             }
         }
 
         private string get_process_name (int pid) {
-            // 优先读取 /proc/<pid>/comm (准确短名称)
             string comm_path = @"/proc/$(pid)/comm";
             try {
                 string comm;
                 GLib.FileUtils.get_contents (comm_path, out comm);
                 string trimmed = comm.strip ().down ();
                 if (trimmed != "") {
-                    // 检查是否匹配
-                    if (this.target_execs.contains (trimmed)) {
+                    if (this.target_execs.contains (trimmed) || this.block_execs.contains (trimmed)) {
                         return trimmed;
                     }
                 }
             } catch (GLib.Error e) {
             }
 
-            // 检查 /proc/<pid>/exe 软链接指向的文件名
             string exe_path = @"/proc/$(pid)/exe";
             try {
                 string link_target = GLib.FileUtils.read_link (exe_path);
                 string base_name = GLib.Path.get_basename (link_target).down ();
-                if (this.target_execs.contains (base_name)) {
+                if (this.target_execs.contains (base_name) || this.block_execs.contains (base_name)) {
                     return base_name;
                 }
             } catch (GLib.Error e) {
             }
 
-            // 检查 /proc/<pid>/cmdline 首个参数（以 \0 分隔）
             string cmdline_path = @"/proc/$(pid)/cmdline";
             try {
                 uint8[] data;
@@ -147,7 +170,7 @@ namespace Sshuttle {
                     if (end_idx > 0) {
                         string first_arg = ((string) data).substring (0, end_idx);
                         string base_name = GLib.Path.get_basename (first_arg).down ();
-                        if (this.target_execs.contains (base_name)) {
+                        if (this.target_execs.contains (base_name) || this.block_execs.contains (base_name)) {
                             return base_name;
                         }
                     }

@@ -109,9 +109,24 @@ namespace Sshuttle {
         }
 
         /**
+         * 启用黑名单内核阻断规则：凡是在 sshuttle-block cgroup 的进程，所有外出网络在优先级 -100 直接 drop
+         */
+        public void apply_blacklist_filter () {
+            this.run_nft_command ("nft add table inet sshuttle-firewall");
+            this.run_nft_command ("nft 'add chain inet sshuttle-firewall output { type filter hook output priority -100; policy accept; }'");
+            this.run_nft_command ("nft 'add rule inet sshuttle-firewall output socket cgroupv2 level 1 \"sshuttle-block\" drop'");
+        }
+
+        public void cleanup_blacklist_filter () {
+            this.run_nft_command ("nft delete table inet sshuttle-firewall");
+        }
+
+        /**
          * 彻底清理指定端口或所有残留的 sshuttle nftables 表
          */
         public void cleanup_all_sshuttle_tables (int port = 0) {
+            this.cleanup_blacklist_filter ();
+
             if (port > 0) {
                 this.run_nft_command (@"nft delete table inet sshuttle-ipv4-$(port)");
                 this.run_nft_command (@"nft delete table inet sshuttle-ipv6-$(port)");
@@ -133,7 +148,7 @@ namespace Sshuttle {
                             if (tokens.length >= 3) {
                                 string family = tokens[1];
                                 string tbl = tokens[2];
-                                if (tbl.has_prefix ("sshuttle-ipv4-") || tbl.has_prefix ("sshuttle-ipv6-")) {
+                                if (tbl.has_prefix ("sshuttle-ipv4-") || tbl.has_prefix ("sshuttle-ipv6-") || tbl == "sshuttle-firewall") {
                                     this.run_nft_command (@"nft delete table $(family) $(tbl)");
                                 }
                             }

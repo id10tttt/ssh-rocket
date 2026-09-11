@@ -11,14 +11,19 @@ namespace Sshuttle {
         private int window_height = 680;
         private bool app_proxy_enabled = false;
         private GLib.GenericArray<string> proxy_apps;
+        private GLib.GenericArray<string> blocked_apps;
+        private GLib.GenericArray<string> blocked_processes;
         private GLib.GenericArray<DomainRule> domain_rules;
         private string domain_default_policy = "proxy";
 
         public signal void app_rules_changed ();
         public signal void domain_rules_changed ();
+        public signal void blacklist_changed ();
 
         public ConfigManager () {
             this.proxy_apps = new GLib.GenericArray<string> ();
+            this.blocked_apps = new GLib.GenericArray<string> ();
+            this.blocked_processes = new GLib.GenericArray<string> ();
             this.domain_rules = new GLib.GenericArray<DomainRule> ();
 
             string? env_dir = GLib.Environment.get_variable ("SSHUTTLE_CONFIG_DIR");
@@ -117,6 +122,20 @@ namespace Sshuttle {
                             var arr = obj.get_array_member ("proxy_apps");
                             arr.foreach_element ((array, index, element_node) => {
                                 this.proxy_apps.add (element_node.get_string ());
+                            });
+                        }
+                        if (obj.has_member ("blocked_apps")) {
+                            this.blocked_apps.remove_range (0, this.blocked_apps.length);
+                            var arr = obj.get_array_member ("blocked_apps");
+                            arr.foreach_element ((array, index, element_node) => {
+                                this.blocked_apps.add (element_node.get_string ());
+                            });
+                        }
+                        if (obj.has_member ("blocked_processes")) {
+                            this.blocked_processes.remove_range (0, this.blocked_processes.length);
+                            var arr = obj.get_array_member ("blocked_processes");
+                            arr.foreach_element ((array, index, element_node) => {
+                                this.blocked_processes.add (element_node.get_string ());
                             });
                         }
                         if (obj.has_member ("domain_default_policy")) {
@@ -260,6 +279,20 @@ namespace Sshuttle {
             }
             builder.end_array ();
 
+            builder.set_member_name ("blocked_apps");
+            builder.begin_array ();
+            for (uint i = 0; i < this.blocked_apps.length; i++) {
+                builder.add_string_value (this.blocked_apps[i]);
+            }
+            builder.end_array ();
+
+            builder.set_member_name ("blocked_processes");
+            builder.begin_array ();
+            for (uint i = 0; i < this.blocked_processes.length; i++) {
+                builder.add_string_value (this.blocked_processes[i]);
+            }
+            builder.end_array ();
+
             builder.set_member_name ("domain_default_policy");
             builder.add_string_value (this.domain_default_policy);
 
@@ -338,6 +371,86 @@ namespace Sshuttle {
             if (changed) {
                 this.save_settings ();
                 this.app_rules_changed ();
+            }
+        }
+
+        public string[] get_blocked_apps () {
+            var arr = new string[this.blocked_apps.length];
+            for (uint i = 0; i < this.blocked_apps.length; i++) {
+                arr[i] = this.blocked_apps[i];
+            }
+            return arr;
+        }
+
+        public bool is_app_blocked (string app_id) {
+            for (uint i = 0; i < this.blocked_apps.length; i++) {
+                if (this.blocked_apps[i] == app_id) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        public void set_app_blocked (string app_id, bool blocked) {
+            bool changed = false;
+            if (blocked) {
+                if (!this.is_app_blocked (app_id)) {
+                    this.blocked_apps.add (app_id);
+                    changed = true;
+                }
+            } else {
+                for (uint i = 0; i < this.blocked_apps.length; i++) {
+                    if (this.blocked_apps[i] == app_id) {
+                        this.blocked_apps.remove_index (i);
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+
+            if (changed) {
+                this.save_settings ();
+                this.blacklist_changed ();
+            }
+        }
+
+        public string[] get_blocked_processes () {
+            var arr = new string[this.blocked_processes.length];
+            for (uint i = 0; i < this.blocked_processes.length; i++) {
+                arr[i] = this.blocked_processes[i];
+            }
+            return arr;
+        }
+
+        public bool is_process_blocked (string proc_name) {
+            string p = proc_name.strip ().down ();
+            for (uint i = 0; i < this.blocked_processes.length; i++) {
+                if (this.blocked_processes[i] == p) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        public void add_blocked_process (string proc_name) {
+            string p = proc_name.strip ().down ();
+            if (p == "") return;
+            if (!this.is_process_blocked (p)) {
+                this.blocked_processes.add (p);
+                this.save_settings ();
+                this.blacklist_changed ();
+            }
+        }
+
+        public void remove_blocked_process (string proc_name) {
+            string p = proc_name.strip ().down ();
+            for (uint i = 0; i < this.blocked_processes.length; i++) {
+                if (this.blocked_processes[i] == p) {
+                    this.blocked_processes.remove_index (i);
+                    this.save_settings ();
+                    this.blacklist_changed ();
+                    break;
+                }
             }
         }
 

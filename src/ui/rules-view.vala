@@ -100,6 +100,25 @@ namespace Sshuttle {
             routing_vs_page.title = "Domain & IP";
             routing_vs_page.icon_name = "network-server-symbolic";
 
+            // Tab 3: 黑名单规则 (Blacklist)
+            var blacklist_scrolled = new Gtk.ScrolledWindow ();
+            blacklist_scrolled.vexpand = true;
+
+            var blacklist_clamp = new Adw.Clamp ();
+            blacklist_clamp.maximum_size = 620;
+            blacklist_clamp.tightening_threshold = 400;
+            blacklist_scrolled.set_child (blacklist_clamp);
+
+            var blacklist_page = new Adw.PreferencesPage ();
+            blacklist_clamp.set_child (blacklist_page);
+
+            var blacklist_rules_group = new BlacklistRulesView (this.config_manager, this.tunnel_manager);
+            blacklist_page.add (blacklist_rules_group);
+
+            var blacklist_vs_page = this.sub_stack.add_named (blacklist_scrolled, "blacklist");
+            blacklist_vs_page.title = "Blacklist";
+            blacklist_vs_page.icon_name = "network-offline-symbolic";
+
             this.refresh_excludes ();
         }
 

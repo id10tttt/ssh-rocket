@@ -19,6 +19,7 @@ sources = [
   'ui/rules-view.vala',
   'ui/app-rules-view.vala',
   'ui/domain-rules-view.vala',
+  'ui/blacklist-rules-view.vala',
   'ui/log-view.vala',
   'ui/window.vala',
 ]
