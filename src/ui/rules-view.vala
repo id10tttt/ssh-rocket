@@ -32,6 +32,10 @@ namespace Sshuttle {
             var app_rules_group = new AppRulesView (this.config_manager, this.tunnel_manager);
             page.add (app_rules_group);
 
+            // 域名通配符规则 (Domain Wildcards / Zero Omega)
+            var domain_rules_group = new DomainRulesView (this.config_manager, this.tunnel_manager);
+            page.add (domain_rules_group);
+
             // 常用预设网段分组
             var presets_group = new Adw.PreferencesGroup ();
             presets_group.title = "Common Private Networks";

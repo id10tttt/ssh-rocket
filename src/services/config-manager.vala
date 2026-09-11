@@ -11,11 +11,15 @@ namespace Sshuttle {
         private int window_height = 680;
         private bool app_proxy_enabled = false;
         private GLib.GenericArray<string> proxy_apps;
+        private GLib.GenericArray<DomainRule> domain_rules;
+        private string domain_default_policy = "direct";
 
         public signal void app_rules_changed ();
+        public signal void domain_rules_changed ();
 
         public ConfigManager () {
             this.proxy_apps = new GLib.GenericArray<string> ();
+            this.domain_rules = new GLib.GenericArray<DomainRule> ();
 
             string? env_dir = GLib.Environment.get_variable ("SSHUTTLE_CONFIG_DIR");
             string? sudo_user = GLib.Environment.get_variable ("SUDO_USER");
@@ -113,6 +117,18 @@ namespace Sshuttle {
                             var arr = obj.get_array_member ("proxy_apps");
                             arr.foreach_element ((array, index, element_node) => {
                                 this.proxy_apps.add (element_node.get_string ());
+                            });
+                        }
+                        if (obj.has_member ("domain_default_policy")) {
+                            this.domain_default_policy = obj.get_string_member ("domain_default_policy");
+                        }
+                        if (obj.has_member ("domain_rules")) {
+                            this.domain_rules.remove_range (0, this.domain_rules.length);
+                            var arr = obj.get_array_member ("domain_rules");
+                            arr.foreach_element ((array, index, element_node) => {
+                                if (element_node.get_node_type () == Json.NodeType.OBJECT) {
+                                    this.domain_rules.add (DomainRule.deserialize (element_node.get_object ()));
+                                }
                             });
                         }
                     }
@@ -244,6 +260,16 @@ namespace Sshuttle {
             }
             builder.end_array ();
 
+            builder.set_member_name ("domain_default_policy");
+            builder.add_string_value (this.domain_default_policy);
+
+            builder.set_member_name ("domain_rules");
+            builder.begin_array ();
+            for (uint i = 0; i < this.domain_rules.length; i++) {
+                builder.add_value (this.domain_rules[i].serialize ());
+            }
+            builder.end_array ();
+
             builder.end_object ();
 
             var generator = new Json.Generator ();
@@ -313,6 +339,75 @@ namespace Sshuttle {
                 this.save_settings ();
                 this.app_rules_changed ();
             }
+        }
+
+        public string get_domain_default_policy () {
+            return this.domain_default_policy;
+        }
+
+        public void set_domain_default_policy (string policy) {
+            string p = (policy.down () == "proxy") ? "proxy" : "direct";
+            if (this.domain_default_policy != p) {
+                this.domain_default_policy = p;
+                this.save_settings ();
+                this.domain_rules_changed ();
+            }
+        }
+
+        public DomainRule[] get_domain_rules () {
+            var arr = new DomainRule[this.domain_rules.length];
+            for (uint i = 0; i < this.domain_rules.length; i++) {
+                arr[i] = this.domain_rules[i];
+            }
+            return arr;
+        }
+
+        public void add_domain_rule (string pattern, string action = "proxy") {
+            string p = pattern.strip ().down ();
+            if (p == "") {
+                return;
+            }
+
+            // 如果已有相同模式，先移除旧的
+            this.remove_domain_rule (p);
+
+            this.domain_rules.add (new DomainRule (p, action));
+            this.save_settings ();
+            this.domain_rules_changed ();
+        }
+
+        public void remove_domain_rule (string pattern) {
+            string p = pattern.strip ().down ();
+            bool removed = false;
+            for (uint i = 0; i < this.domain_rules.length; i++) {
+                if (this.domain_rules[i].pattern == p) {
+                    this.domain_rules.remove_index (i);
+                    removed = true;
+                    break;
+                }
+            }
+            if (removed) {
+                this.save_settings ();
+                this.domain_rules_changed ();
+            }
+        }
+
+        public void set_domain_rules (DomainRule[] rules, string default_policy = "") {
+            this.domain_rules.remove_range (0, this.domain_rules.length);
+            foreach (var r in rules) {
+                this.domain_rules.add (r);
+            }
+            if (default_policy != "") {
+                this.domain_default_policy = (default_policy.down () == "proxy") ? "proxy" : "direct";
+            }
+            this.save_settings ();
+            this.domain_rules_changed ();
+        }
+
+        public void clear_domain_rules () {
+            this.domain_rules.remove_range (0, this.domain_rules.length);
+            this.save_settings ();
+            this.domain_rules_changed ();
         }
 
         private void fix_ownership (string file_path) {

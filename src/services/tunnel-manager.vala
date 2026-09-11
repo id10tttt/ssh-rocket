@@ -12,6 +12,7 @@ namespace Sshuttle {
         public CgroupManager cgroup_manager { get; private set; }
         public NftManager nft_manager { get; private set; }
         public ProcessMonitor process_monitor { get; private set; }
+        public DnsProxy dns_proxy { get; private set; }
         public int local_proxy_port { get; set; default = 12300; }
 
         public int reconnect_attempt { get; private set; default = 0; }
@@ -37,11 +38,13 @@ namespace Sshuttle {
             this.cgroup_manager = new CgroupManager ();
             this.nft_manager = new NftManager ();
             this.process_monitor = new ProcessMonitor (this.cgroup_manager);
+            this.dns_proxy = new DnsProxy (this.config_manager, this.nft_manager);
 
             // 启动时主动清除任何可能的上次异常残留（确保纯运行时无残余）
             this.cleanup_proxy_runtime ();
 
             this.config_manager.app_rules_changed.connect (this.on_app_rules_changed);
+            this.config_manager.domain_rules_changed.connect (this.on_domain_rules_changed);
         }
 
         public void set_active_profile (string id) {
@@ -97,9 +100,10 @@ namespace Sshuttle {
             this.change_state (TunnelState.CONNECTING);
 
             try {
-                // 启动按软件代理监控
+                // 启动按软件代理监控与 DNS 分流器
                 this.sync_process_monitor_targets ();
                 this.process_monitor.start ();
+                this.dns_proxy.start ();
 
                 string[] argv = CommandBuilder.build_argv (profile, this.local_proxy_port);
 
@@ -190,7 +194,8 @@ namespace Sshuttle {
                     // 成功连上后，向 nftables 插入 cgroup 过滤规则：只有勾选的软件走代理，其余全部直连
                     var p = this.active_profile;
                     bool ipv6 = (p != null) ? p.ipv6 : false;
-                    this.nft_manager.apply_cgroup_filter (this.local_proxy_port, ipv6);
+                    this.dns_proxy.start ();
+                    this.nft_manager.apply_cgroup_filter (this.local_proxy_port, ipv6, this.config_manager.get_domain_default_policy ());
                     this.sync_process_monitor_targets ();
                     this.process_monitor.start ();
                     this.emit_log ("Per-app proxy active: only checked applications are routed through proxy.");
@@ -293,6 +298,7 @@ namespace Sshuttle {
         }
 
         public void cleanup_proxy_runtime () {
+            this.dns_proxy.stop ();
             this.process_monitor.stop ();
             this.nft_manager.cleanup_all_sshuttle_tables (this.local_proxy_port);
             this.cgroup_manager.cleanup_and_destroy ();
@@ -303,8 +309,16 @@ namespace Sshuttle {
             if (this.state == TunnelState.CONNECTED) {
                 var p = this.active_profile;
                 bool ipv6 = (p != null) ? p.ipv6 : false;
-                this.nft_manager.apply_cgroup_filter (this.local_proxy_port, ipv6);
+                this.nft_manager.apply_cgroup_filter (this.local_proxy_port, ipv6, this.config_manager.get_domain_default_policy ());
                 this.process_monitor.start ();
+            }
+        }
+
+        private void on_domain_rules_changed () {
+            if (this.state == TunnelState.CONNECTED) {
+                var p = this.active_profile;
+                bool ipv6 = (p != null) ? p.ipv6 : false;
+                this.nft_manager.apply_cgroup_filter (this.local_proxy_port, ipv6, this.config_manager.get_domain_default_policy ());
             }
         }
 
