@@ -342,10 +342,10 @@ namespace Sshuttle {
                     this.change_state (TunnelState.CONNECTED);
 
                     // 成功连上后，向 nftables 插入 cgroup 过滤规则与黑名单规则
-                    var p = this.active_profile;
-                    bool ipv6 = (p != null) ? p.ipv6 : false;
                     this.dns_proxy.start ();
-                    this.nft_manager.apply_cgroup_filter (this.local_proxy_port, ipv6, this.config_manager.get_domain_default_policy ());
+                    if (!this.refresh_proxy_rules ()) {
+                        return;
+                    }
                     this.nft_manager.apply_blacklist_filter ();
                     this.sync_process_monitor_targets ();
                     this.process_monitor.start ();
@@ -745,21 +745,35 @@ namespace Sshuttle {
             }
         }
 
+        private bool refresh_proxy_rules () {
+            var p = this.active_profile;
+            bool ipv6 = (p != null) ? p.ipv6 : false;
+            bool filter_ready = this.nft_manager.apply_cgroup_filter (
+                this.local_proxy_port,
+                ipv6,
+                this.config_manager.get_domain_default_policy ()
+            );
+            if (!filter_ready) {
+                this.emit_log ("Failed to install per-app proxy rules. Disconnecting tunnel.");
+                this.disconnect_tunnel ();
+                return false;
+            }
+            return true;
+        }
+
         private void on_app_rules_changed () {
             this.sync_process_monitor_targets ();
             if (this.state == TunnelState.CONNECTED) {
-                var p = this.active_profile;
-                bool ipv6 = (p != null) ? p.ipv6 : false;
-                this.nft_manager.apply_cgroup_filter (this.local_proxy_port, ipv6, this.config_manager.get_domain_default_policy ());
+                if (!this.refresh_proxy_rules ()) {
+                    return;
+                }
                 this.process_monitor.start ();
             }
         }
 
         private void on_domain_rules_changed () {
             if (this.state == TunnelState.CONNECTED) {
-                var p = this.active_profile;
-                bool ipv6 = (p != null) ? p.ipv6 : false;
-                this.nft_manager.apply_cgroup_filter (this.local_proxy_port, ipv6, this.config_manager.get_domain_default_policy ());
+                this.refresh_proxy_rules ();
             }
         }
 

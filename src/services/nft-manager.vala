@@ -19,8 +19,8 @@ namespace Sshuttle {
             string table_v4 = @"sshuttle-ipv4-$(port)";
 
             // 1. 创建用于动态域名 IP 分流的 set (带 300 秒超时)
-            this.run_nft_command (@"nft add set inet $(table_v4) proxy_ips '{ type ipv4_addr; flags timeout; }'");
-            this.run_nft_command (@"nft add set inet $(table_v4) direct_ips '{ type ipv4_addr; flags timeout; }'");
+            success = this.run_nft_command (@"nft add set inet $(table_v4) proxy_ips '{ type ipv4_addr; flags timeout; }'") && success;
+            success = this.run_nft_command (@"nft add set inet $(table_v4) direct_ips '{ type ipv4_addr; flags timeout; }'") && success;
 
             // 2. 清理旧规则以防重复
             this.remove_cgroup_filter (port, ipv6_enabled);
@@ -28,24 +28,29 @@ namespace Sshuttle {
             // 3. 在 output 链插入规则 (注意倒序插入以确保最终执行顺序)：
             //   1) udp sport 15354 return (DnsProxy 自身上游查询放行，杜绝回环)
             //   2) udp dport 53 redirect to :15353 (全局 DNS 查询重定向至本地 DnsProxy)
-            this.run_nft_command (@"nft insert rule inet $(table_v4) output udp dport 53 redirect to :15353");
-            this.run_nft_command (@"nft insert rule inet $(table_v4) output udp sport 15354 return");
+            success = this.run_nft_command (@"nft insert rule inet $(table_v4) output udp dport 53 redirect to :15353") && success;
+            success = this.run_nft_command (@"nft insert rule inet $(table_v4) output udp sport 15354 return") && success;
 
             // 4. 在 sshuttle 子链首部插入分流与裁决规则 (倒序插入)：
             // 最终期望执行顺序：
             //   1) ip daddr @direct_ips return (直连域名/IP 集合优先放行，无论哪个 App 访问均直连)
-            //   2) socket cgroupv2 level 1 "sshuttle-proxy" meta l4proto tcp redirect to :$(port) (勾选应用的所有其他 TCP 流量全量走代理，包括硬编码 IP / 视频流)
-            //   3) ip daddr @proxy_ips meta l4proto tcp redirect to :$(port) (未勾选应用命中代理域名 IP 集合时走代理)
-            //   4) socket cgroupv2 level 1 != "sshuttle-proxy" return (未勾选应用其余普通流量直接直连放行，不走代理)
-            this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) socket cgroupv2 level 1 != \"sshuttle-proxy\" return");
-            this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr @proxy_ips meta l4proto tcp redirect to :$(port)");
-            this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) socket cgroupv2 level 1 \"sshuttle-proxy\" meta l4proto tcp redirect to :$(port)");
-            this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr @direct_ips return");
+            //   2) ip daddr @proxy_ips meta l4proto tcp redirect to :$(port) (显式代理规则)
+            //   3) socket cgroupv2 level 1 "sshuttle-proxy" meta l4proto tcp redirect to :$(port) (勾选应用未命中显式规则时全量走代理)
+            //   4) [默认 direct] socket cgroupv2 level 1 != "sshuttle-proxy" return (未勾选应用未命中规则时直连)
+            //   5) [默认 proxy] 继续执行 sshuttle 原有规则，使未勾选应用的其余 TCP 流量也走代理
+            if (default_policy == "direct") {
+                success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) socket cgroupv2 level 1 != \"sshuttle-proxy\" return") && success;
+            }
+            success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) socket cgroupv2 level 1 \"sshuttle-proxy\" meta l4proto tcp redirect to :$(port)") && success;
+            success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr @proxy_ips meta l4proto tcp redirect to :$(port)") && success;
+            success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr @direct_ips return") && success;
 
             if (ipv6_enabled) {
                 string table_v6 = @"sshuttle-ipv6-$(port)";
-                string cmd_v6 = @"nft insert rule inet $(table_v6) output socket cgroupv2 level 1 != \"sshuttle-proxy\" return";
-                this.run_nft_command (cmd_v6);
+                if (default_policy == "direct") {
+                    string cmd_v6 = @"nft insert rule inet $(table_v6) output socket cgroupv2 level 1 != \"sshuttle-proxy\" return";
+                    success = this.run_nft_command (cmd_v6) && success;
+                }
             }
 
             return success;
@@ -202,6 +207,9 @@ namespace Sshuttle {
                 );
                 if (exit_status != 0 && stderr_text != null && stderr_text.strip () != "") {
                     string err_msg = stderr_text.strip ();
+                    if ("add set" in command && "File exists" in err_msg) {
+                        return true;
+                    }
                     // 清理时若表原本就不存在，属于正常预期，不输出警告日志
                     if (!("delete table" in command && "No such file or directory" in err_msg)) {
                         warning ("nft command failed (code %d): %s | command: %s", exit_status, err_msg, command);
