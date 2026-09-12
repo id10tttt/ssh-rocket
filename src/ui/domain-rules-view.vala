@@ -24,8 +24,8 @@ namespace Sshuttle {
 
             // 1. 默认兜底策略
             this.default_policy_row = new Adw.ComboRow ();
-            this.default_policy_row.title = "Default Policy for Proxied Apps";
-            this.default_policy_row.subtitle = "Strategy for unlisted domains in proxied apps";
+            this.default_policy_row.title = "Default Policy for Unmatched Domains";
+            this.default_policy_row.subtitle = "Strategy for unlisted domains";
             string[] policies = { "direct", "proxy" };
             this.default_policy_row.model = new Gtk.StringList (policies);
 

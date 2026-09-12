@@ -124,7 +124,8 @@ namespace Sshuttle {
         private void handle_dns_query (uint8[] query_packet, GLib.SocketAddress client_addr) {
             uint16 qtype;
             string? domain = parse_qname_and_type (query_packet, out qtype);
-            string action = this.resolve_action_for_domain (domain);
+            bool matched = false;
+            string action = this.resolve_action_for_domain (domain, out matched);
 
             // 检查当前节点是否启用了 IPv6 代理
             bool ipv6_enabled = false;
@@ -173,7 +174,17 @@ namespace Sshuttle {
                 // 提取解析所得 IP 批量写入 nftables 对应集合
                 var ips = parse_answer_ips (resp_packet);
                 if (ips.length > 0) {
-                    this.nft_manager.add_ips_to_set (ips, action);
+                    if (matched) {
+                        // 显式匹配规则：direct 为直连白名单例外（优先放行），proxy 为显式定向代理（未勾选应用也走代理）
+                        this.nft_manager.add_ips_to_set (ips, action);
+                    } else if (action == "proxy") {
+                        // 未匹配规则且全局默认策略为 proxy：
+                        // 将未列出域名 IP 写入 proxy_ips，实现全局默认代理
+                        this.nft_manager.add_ips_to_set (ips, "proxy");
+                    }
+                    // 注：若未匹配规则且全局默认策略为 direct，切勿将 IP 加入 direct_ips 集合。
+                    // 否则 direct_ips 在 nftables 首部优先放行，会导致已勾选 App 的未匹配域名被错误放行走直连。
+                    // 不加入 direct_ips 时，已勾选 App 命中 sshuttle-proxy 规则全量代理，未勾选 App 命中 != sshuttle-proxy 直连放行。
                 }
 
                 if (domain != null && domain != "") {
@@ -196,7 +207,8 @@ namespace Sshuttle {
             }
         }
 
-        public string resolve_action_for_domain (string? domain) {
+        public string resolve_action_for_domain (string? domain, out bool matched = null) {
+            matched = false;
             if (domain == null || domain == "") {
                 return this.config_manager.get_domain_default_policy ();
             }
@@ -204,6 +216,7 @@ namespace Sshuttle {
             var rules = this.config_manager.get_domain_rules ();
             foreach (var rule in rules) {
                 if (rule.matches (domain)) {
+                    matched = true;
                     return rule.action;
                 }
             }
