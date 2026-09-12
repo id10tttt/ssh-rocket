@@ -143,6 +143,10 @@ namespace Sshuttle {
             log_vs_page.title = "Log";
             log_vs_page.icon_name = "utilities-terminal-symbolic";
 
+            this.view_stack.notify["visible-child-name"].connect (() => {
+                add_btn.visible = (this.view_stack.visible_child_name == "connect");
+            });
+
             // 底部状态栏 (Bottom Status Bar)
             var bottom_bar = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 12);
             bottom_bar.margin_start = 16;

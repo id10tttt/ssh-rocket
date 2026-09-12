@@ -28,7 +28,7 @@ namespace Sshuttle {
 
             var switcher = new Adw.ViewSwitcher ();
             switcher.stack = this.sub_stack;
-            switcher.policy = Adw.ViewSwitcherPolicy.WIDE;
+            switcher.policy = Adw.ViewSwitcherPolicy.NARROW;
             switcher_box.append (switcher);
             this.append (switcher_box);
             this.append (this.sub_stack);
@@ -38,8 +38,8 @@ namespace Sshuttle {
             app_scrolled.vexpand = true;
 
             var app_clamp = new Adw.Clamp ();
-            app_clamp.maximum_size = 620;
-            app_clamp.tightening_threshold = 400;
+            app_clamp.maximum_size = 780;
+            app_clamp.tightening_threshold = 560;
             app_scrolled.set_child (app_clamp);
 
             var app_page = new Adw.PreferencesPage ();
@@ -57,8 +57,8 @@ namespace Sshuttle {
             routing_scrolled.vexpand = true;
 
             var routing_clamp = new Adw.Clamp ();
-            routing_clamp.maximum_size = 620;
-            routing_clamp.tightening_threshold = 400;
+            routing_clamp.maximum_size = 780;
+            routing_clamp.tightening_threshold = 560;
             routing_scrolled.set_child (routing_clamp);
 
             var routing_page = new Adw.PreferencesPage ();
@@ -105,8 +105,8 @@ namespace Sshuttle {
             blacklist_scrolled.vexpand = true;
 
             var blacklist_clamp = new Adw.Clamp ();
-            blacklist_clamp.maximum_size = 620;
-            blacklist_clamp.tightening_threshold = 400;
+            blacklist_clamp.maximum_size = 780;
+            blacklist_clamp.tightening_threshold = 560;
             blacklist_scrolled.set_child (blacklist_clamp);
 
             var blacklist_page = new Adw.PreferencesPage ();
