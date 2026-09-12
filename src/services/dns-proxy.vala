@@ -1,5 +1,17 @@
 namespace Sshuttle {
 
+    public class DnsResolutionEntry : Object {
+        public string domain { get; private set; }
+        public string[] ips { get; private set; }
+        public int64 resolved_at { get; private set; }
+
+        public DnsResolutionEntry (string domain, string[] ips) {
+            this.domain = domain;
+            this.ips = ips;
+            this.resolved_at = GLib.get_monotonic_time ();
+        }
+    }
+
     /**
      * DnsProxy
      * 轻量 DNS 分流器，仅处理被代理 cgroup 进程的 DNS 查询。
@@ -11,17 +23,24 @@ namespace Sshuttle {
     public class DnsProxy : Object {
         public const uint16 DNS_PORT = 15353;
         public const uint16 FORWARD_PORT = 15354;
+        public const uint16 APP_DNS_PORT = 15355;
+        public const uint16 APP_FORWARD_PORT = 15356;
         public uint16 remote_dns_port { get; set; default = 0; }
         public signal void dns_resolved (string domain, string action, string[] ips);
         private ConfigManager config_manager;
         private NftManager nft_manager;
         private GLib.Socket? server_socket = null;
+        private GLib.Socket? app_server_socket = null;
         private bool running = false;
         private GLib.Thread<void*>? worker_thread = null;
+        private GLib.Thread<void*>? app_worker_thread = null;
+        private GLib.HashTable<string, DnsResolutionEntry> resolution_cache;
+        private GLib.Mutex resolution_cache_mutex;
 
         public DnsProxy (ConfigManager config_manager, NftManager nft_manager) {
             this.config_manager = config_manager;
             this.nft_manager = nft_manager;
+            this.resolution_cache = new GLib.HashTable<string, DnsResolutionEntry> (GLib.str_hash, GLib.str_equal);
         }
 
         public bool start () {
@@ -41,12 +60,40 @@ namespace Sshuttle {
                 this.server_socket.bind (sockaddr, true);
                 this.server_socket.set_timeout (1); // 1秒超时，便于循环退出
 
+                this.app_server_socket = new GLib.Socket (
+                    GLib.SocketFamily.IPV4,
+                    GLib.SocketType.DATAGRAM,
+                    GLib.SocketProtocol.UDP
+                );
+                var app_sockaddr = new GLib.InetSocketAddress (inet_addr, APP_DNS_PORT);
+                this.app_server_socket.bind (app_sockaddr, true);
+                this.app_server_socket.set_timeout (1);
+
                 this.running = true;
-                this.worker_thread = new GLib.Thread<void*> ("dns-worker", this.run_loop);
+                this.worker_thread = new GLib.Thread<void*> ("dns-worker", () => {
+                    return this.run_loop (this.server_socket, false, FORWARD_PORT);
+                });
+                this.app_worker_thread = new GLib.Thread<void*> ("dns-app-worker", () => {
+                    return this.run_loop (this.app_server_socket, true, APP_FORWARD_PORT);
+                });
                 return true;
             } catch (GLib.Error e) {
                 warning ("Failed to start DnsProxy on port %u: %s", DNS_PORT, e.message);
                 this.running = false;
+                if (this.server_socket != null) {
+                    try {
+                        this.server_socket.close ();
+                    } catch (GLib.Error close_error) {
+                    }
+                    this.server_socket = null;
+                }
+                if (this.app_server_socket != null) {
+                    try {
+                        this.app_server_socket.close ();
+                    } catch (GLib.Error close_error) {
+                    }
+                    this.app_server_socket = null;
+                }
                 return false;
             }
         }
@@ -64,23 +111,63 @@ namespace Sshuttle {
                 }
                 this.server_socket = null;
             }
+            if (this.app_server_socket != null) {
+                try {
+                    this.app_server_socket.close ();
+                } catch (GLib.Error e) {
+                }
+                this.app_server_socket = null;
+            }
 
             if (this.worker_thread != null) {
                 this.worker_thread.join ();
                 this.worker_thread = null;
             }
+            if (this.app_worker_thread != null) {
+                this.app_worker_thread.join ();
+                this.app_worker_thread = null;
+            }
+            this.resolution_cache_mutex.lock ();
+            this.resolution_cache.remove_all ();
+            this.resolution_cache_mutex.unlock ();
         }
 
-        private void* run_loop () {
+        public void rebuild_routing_sets () {
+            var expired_domains = new GLib.GenericArray<string> ();
+            int64 now = GLib.get_monotonic_time ();
+
+            this.resolution_cache_mutex.lock ();
+            this.nft_manager.flush_ip_sets ();
+            this.resolution_cache.foreach ((domain, entry) => {
+                if (now - entry.resolved_at <= 300 * GLib.TimeSpan.SECOND) {
+                    bool matched;
+                    string action = this.resolve_action_for_domain (entry.domain, out matched);
+                    if (matched) {
+                        this.nft_manager.add_ips_to_set (entry.ips, action);
+                    }
+                } else {
+                    expired_domains.add (domain);
+                }
+            });
+            for (uint i = 0; i < expired_domains.length; i++) {
+                this.resolution_cache.remove (expired_domains[i]);
+            }
+            this.resolution_cache_mutex.unlock ();
+        }
+
+        private void* run_loop (GLib.Socket? source_socket, bool app_proxy_default, uint16 forward_port) {
+            if (source_socket == null) {
+                return null;
+            }
             uint8 buffer[2048];
-            while (this.running && this.server_socket != null) {
+            while (this.running) {
                 try {
                     GLib.SocketAddress client_addr;
-                    ssize_t size = this.server_socket.receive_from (out client_addr, buffer);
+                    ssize_t size = source_socket.receive_from (out client_addr, buffer);
                     if (size > 0 && this.running) {
                         uint8[] packet = new uint8[size];
                         GLib.Memory.copy (packet, buffer, size);
-                        this.handle_dns_query (packet, client_addr);
+                        this.handle_dns_query (packet, client_addr, source_socket, app_proxy_default, forward_port);
                     }
                 } catch (GLib.Error e) {
                     // 超时或关闭，正常循环检测
@@ -89,12 +176,12 @@ namespace Sshuttle {
             return null;
         }
 
-        private uint8[]? query_udp (string server_ip, uint16 server_port, uint8[] query_packet) {
+        private uint8[]? query_udp (string server_ip, uint16 server_port, uint8[] query_packet, uint16 forward_port) {
             GLib.Socket? s = null;
             try {
                 s = new GLib.Socket (GLib.SocketFamily.IPV4, GLib.SocketType.DATAGRAM, GLib.SocketProtocol.UDP);
                 s.set_timeout (5);
-                var bind_addr = new GLib.InetSocketAddress (new GLib.InetAddress.from_string ("127.0.0.1"), FORWARD_PORT);
+                var bind_addr = new GLib.InetSocketAddress (new GLib.InetAddress.from_string ("127.0.0.1"), forward_port);
                 s.bind (bind_addr, true);
 
                 var target_addr = new GLib.InetSocketAddress (new GLib.InetAddress.from_string (server_ip), server_port);
@@ -121,11 +208,20 @@ namespace Sshuttle {
             return null;
         }
 
-        private void handle_dns_query (uint8[] query_packet, GLib.SocketAddress client_addr) {
+        private void handle_dns_query (
+            uint8[] query_packet,
+            GLib.SocketAddress client_addr,
+            GLib.Socket response_socket,
+            bool app_proxy_default,
+            uint16 forward_port
+        ) {
             uint16 qtype;
             string? domain = parse_qname_and_type (query_packet, out qtype);
             bool matched = false;
             string action = this.resolve_action_for_domain (domain, out matched);
+            if (!matched && app_proxy_default) {
+                action = "proxy";
+            }
 
             // 检查当前节点是否启用了 IPv6 代理
             bool ipv6_enabled = false;
@@ -139,11 +235,9 @@ namespace Sshuttle {
             // 2) HTTPS RR (65): 过滤返回空响应，防止现代 Chrome 尝试 ECH (加密 SNI) 或 QUIC 导致 ERR_FAILED
             if (action == "proxy" && ((qtype == 28 && !ipv6_enabled) || qtype == 65)) {
                 var empty_resp = build_empty_noerror_response (query_packet);
-                if (this.server_socket != null) {
-                    try {
-                        this.server_socket.send_to (client_addr, empty_resp);
-                    } catch (GLib.Error e) {
-                    }
+                try {
+                    response_socket.send_to (client_addr, empty_resp);
+                } catch (GLib.Error e) {
                 }
                 return;
             }
@@ -151,22 +245,21 @@ namespace Sshuttle {
             uint8[]? resp_packet = null;
 
             if (action == "proxy") {
-                // 1. 优先尝试 sshuttle 本地隧道 DNS (无污染高速解析)
+                // 代理规则只允许经 sshuttle 的远端 DNS 查询，避免失败时泄漏到本地网络。
                 if (this.remote_dns_port > 0) {
-                    resp_packet = this.query_udp ("127.0.0.1", this.remote_dns_port, query_packet);
-                }
-                // 2. 若隧道 DNS 尚未就绪或查询超时，尝试通过本地系统 DNS 解析保底
-                if (resp_packet == null) {
-                    resp_packet = this.query_udp ("127.0.0.53", 53, query_packet);
-                }
-                if (resp_packet == null) {
-                    resp_packet = this.query_udp ("223.5.5.5", 53, query_packet);
+                    resp_packet = this.query_udp ("127.0.0.1", this.remote_dns_port, query_packet, forward_port);
+                } else if (active_profile != null && !active_profile.dns) {
+                    // 配置明确关闭远端 DNS 时保留本地解析，否则域名规则与应用联网均无法工作。
+                    resp_packet = this.query_udp ("127.0.0.53", 53, query_packet, forward_port);
+                    if (resp_packet == null) {
+                        resp_packet = this.query_udp ("223.5.5.5", 53, query_packet, forward_port);
+                    }
                 }
             } else {
                 // 直连域名：本地系统 DNS 优先
-                resp_packet = this.query_udp ("127.0.0.53", 53, query_packet);
+                resp_packet = this.query_udp ("127.0.0.53", 53, query_packet, forward_port);
                 if (resp_packet == null) {
-                    resp_packet = this.query_udp ("223.5.5.5", 53, query_packet);
+                    resp_packet = this.query_udp ("223.5.5.5", 53, query_packet, forward_port);
                 }
             }
 
@@ -174,13 +267,14 @@ namespace Sshuttle {
                 // 提取解析所得 IP 批量写入 nftables 对应集合
                 var ips = parse_answer_ips (resp_packet);
                 if (ips.length > 0) {
-                    if (matched) {
-                        // 显式匹配规则：direct 为直连白名单例外（优先放行），proxy 为显式定向代理（未勾选应用也走代理）
-                        this.nft_manager.add_ips_to_set (ips, action);
-                    } else if (action == "proxy") {
-                        // 未匹配规则且全局默认策略为 proxy：
-                        // 将未列出域名 IP 写入 proxy_ips，实现全局默认代理
-                        this.nft_manager.add_ips_to_set (ips, "proxy");
+                    if (domain != null && domain != "") {
+                        this.resolution_cache_mutex.lock ();
+                        this.resolution_cache.insert (domain, new DnsResolutionEntry (domain, ips));
+                        if (matched) {
+                            // 显式匹配规则：direct 为直连白名单例外（优先放行），proxy 为显式定向代理（未勾选应用也走代理）
+                            this.nft_manager.add_ips_to_set (ips, action);
+                        }
+                        this.resolution_cache_mutex.unlock ();
                     }
                     // 注：若未匹配规则且全局默认策略为 direct，切勿将 IP 加入 direct_ips 集合。
                     // 否则 direct_ips 在 nftables 首部优先放行，会导致已勾选 App 的未匹配域名被错误放行走直连。
@@ -198,11 +292,9 @@ namespace Sshuttle {
                 }
 
                 // 回发客户端
-                if (this.server_socket != null) {
-                    try {
-                        this.server_socket.send_to (client_addr, resp_packet);
-                    } catch (GLib.Error e) {
-                    }
+                try {
+                    response_socket.send_to (client_addr, resp_packet);
+                } catch (GLib.Error e) {
                 }
             }
         }
@@ -381,6 +473,11 @@ namespace Sshuttle {
                 if (atype == 1 && rdlen == 4 && idx + 4 <= data.length) {
                     string ip = @"$(data[idx]).$(data[idx + 1]).$(data[idx + 2]).$(data[idx + 3])";
                     ips.add (ip);
+                } else if (atype == 28 && rdlen == 16 && idx + 16 <= data.length) {
+                    uint8[] address_bytes = new uint8[16];
+                    GLib.Memory.copy (address_bytes, ((uint8*) data) + idx, 16);
+                    var address = new GLib.InetAddress.from_bytes (address_bytes, GLib.SocketFamily.IPV6);
+                    ips.add (address.to_string ());
                 }
 
                 idx += rdlen;

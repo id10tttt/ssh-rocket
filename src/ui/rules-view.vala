@@ -212,6 +212,7 @@ namespace Sshuttle {
                 }
                 active_p.exclude = arr;
                 this.config_manager.save_profile (active_p);
+                this.tunnel_manager.refresh_routing_configuration ();
             }
         }
     }

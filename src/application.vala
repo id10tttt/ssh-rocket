@@ -5,6 +5,7 @@ namespace Sshuttle {
         private TunnelManager tunnel_manager;
         private TrayManager tray_manager;
         private MainWindow? window = null;
+        private bool cleanup_completed = false;
 
         public Application () {
             Object (
@@ -57,11 +58,24 @@ namespace Sshuttle {
         }
 
         public void handle_real_quit () {
+            this.cleanup_runtime ();
+            this.quit ();
+        }
+
+        public override void shutdown () {
+            this.cleanup_runtime ();
+            base.shutdown ();
+        }
+
+        private void cleanup_runtime () {
+            if (this.cleanup_completed) {
+                return;
+            }
+            this.cleanup_completed = true;
             if (this.tunnel_manager != null) {
                 this.tunnel_manager.disconnect_tunnel ();
                 this.tunnel_manager.cleanup_proxy_runtime ();
             }
-            this.quit ();
         }
 
         public override void activate () {

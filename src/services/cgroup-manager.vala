@@ -14,6 +14,11 @@ namespace Sshuttle {
         public const string ROOT_PROCS_PATH = "/sys/fs/cgroup/cgroup.procs";
         public const string PROXY_PROCS_PATH = "/sys/fs/cgroup/sshuttle-proxy/cgroup.procs";
         public const string BLOCK_PROCS_PATH = "/sys/fs/cgroup/sshuttle-block/cgroup.procs";
+        private GLib.HashTable<int, string> original_cgroups;
+
+        public CgroupManager () {
+            this.original_cgroups = new GLib.HashTable<int, string> (GLib.direct_hash, GLib.direct_equal);
+        }
 
         public bool is_cgroup_created () {
             return GLib.FileUtils.test (PROXY_CGROUP_PATH, GLib.FileTest.IS_DIR);
@@ -60,6 +65,7 @@ namespace Sshuttle {
                 return false;
             }
 
+            this.remember_original_cgroup (pid);
             try {
                 var file = GLib.File.new_for_path (PROXY_PROCS_PATH);
                 var os = file.append_to (GLib.FileCreateFlags.NONE);
@@ -82,12 +88,25 @@ namespace Sshuttle {
                 return false;
             }
 
+            string target_procs_path = ROOT_PROCS_PATH;
+            string? original_path = this.original_cgroups.lookup (pid);
+            if (original_path != null && original_path != "" && original_path != "/") {
+                string relative_path = original_path.has_prefix ("/")
+                    ? original_path.substring (1)
+                    : original_path;
+                string candidate = GLib.Path.build_filename (CGROUP_BASE, relative_path, "cgroup.procs");
+                if (GLib.FileUtils.test (candidate, GLib.FileTest.EXISTS)) {
+                    target_procs_path = candidate;
+                }
+            }
+
             try {
-                var file = GLib.File.new_for_path (ROOT_PROCS_PATH);
+                var file = GLib.File.new_for_path (target_procs_path);
                 var os = file.append_to (GLib.FileCreateFlags.NONE);
                 string pid_str = @"$(pid)\n";
                 os.write (pid_str.data);
                 os.close ();
+                this.original_cgroups.remove (pid);
                 return true;
             } catch (GLib.Error e) {
                 return false;
@@ -160,6 +179,7 @@ namespace Sshuttle {
                 return false;
             }
 
+            this.remember_original_cgroup (pid);
             try {
                 var file = GLib.File.new_for_path (BLOCK_PROCS_PATH);
                 var os = file.append_to (GLib.FileCreateFlags.NONE);
@@ -225,6 +245,29 @@ namespace Sshuttle {
                     this.move_pid_to_default (pid);
                 }
                 Posix.rmdir (BLOCK_CGROUP_PATH);
+            }
+            this.original_cgroups.remove_all ();
+        }
+
+        private void remember_original_cgroup (int pid) {
+            try {
+                string content;
+                GLib.FileUtils.get_contents (@"/proc/$(pid)/cgroup", out content);
+                foreach (var line in content.split ("\n")) {
+                    string trimmed = line.strip ();
+                    if (!trimmed.has_prefix ("0::")) {
+                        continue;
+                    }
+
+                    string cgroup_path = trimmed.substring (3);
+                    if (cgroup_path == @"/$(PROXY_CGROUP_NAME)" || cgroup_path == @"/$(BLOCK_CGROUP_NAME)") {
+                        return;
+                    }
+                    // PID 可能在长时间运行中被系统复用，以当前进程的实际归属覆盖旧记录。
+                    this.original_cgroups.insert (pid, cgroup_path);
+                    return;
+                }
+            } catch (GLib.Error e) {
             }
         }
     }

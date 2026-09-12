@@ -8,28 +8,50 @@ namespace Sshuttle {
      */
     public class NftManager : Object {
         public int active_port { get; set; default = 12300; }
+        private bool active_ipv6 = false;
 
         /**
          * 向 sshuttle 的 nftables 表插入 cgroup 与域名分流规则
          */
-        public bool apply_cgroup_filter (int port, bool ipv6_enabled, string default_policy = "direct") {
+        public bool apply_cgroup_filter (
+            int port,
+            bool ipv6_enabled,
+            string default_policy,
+            string[] direct_networks,
+            DomainRule[] routing_rules
+        ) {
             this.active_port = port;
+            this.active_ipv6 = ipv6_enabled;
             bool success = true;
 
             string table_v4 = @"sshuttle-ipv4-$(port)";
+            var direct_v4 = new GLib.GenericArray<string> ();
+            var proxy_v4 = new GLib.GenericArray<string> ();
+            var direct_v6 = new GLib.GenericArray<string> ();
+            var proxy_v6 = new GLib.GenericArray<string> ();
+
+            foreach (var network in direct_networks) {
+                this.append_network (network, "direct", direct_v4, proxy_v4, direct_v6, proxy_v6);
+            }
+            foreach (var rule in routing_rules) {
+                this.append_network (rule.pattern, rule.action, direct_v4, proxy_v4, direct_v6, proxy_v6);
+            }
 
             // 1. 创建用于动态域名 IP 分流的 set (带 300 秒超时)
-            success = this.run_nft_command (@"nft add set inet $(table_v4) proxy_ips '{ type ipv4_addr; flags timeout; }'") && success;
-            success = this.run_nft_command (@"nft add set inet $(table_v4) direct_ips '{ type ipv4_addr; flags timeout; }'") && success;
+            success = this.ensure_ip_set (table_v4, "proxy_ips", "ipv4_addr") && success;
+            success = this.ensure_ip_set (table_v4, "direct_ips", "ipv4_addr") && success;
 
             // 2. 清理旧规则以防重复
             this.remove_cgroup_filter (port, ipv6_enabled);
 
             // 3. 在 output 链插入规则 (注意倒序插入以确保最终执行顺序)：
-            //   1) udp sport 15354 return (DnsProxy 自身上游查询放行，杜绝回环)
-            //   2) udp dport 53 redirect to :15353 (全局 DNS 查询重定向至本地 DnsProxy)
-            success = this.run_nft_command (@"nft insert rule inet $(table_v4) output udp dport 53 redirect to :15353") && success;
-            success = this.run_nft_command (@"nft insert rule inet $(table_v4) output udp sport 15354 return") && success;
+            //   1) DnsProxy 自身上游查询放行，杜绝回环
+            //   2) 已勾选 App 的 DNS 查询重定向至 App 专用入口
+            //   3) 其他 DNS 查询重定向至通用入口
+            success = this.run_nft_command (@"nft insert rule inet $(table_v4) output meta nfproto ipv4 udp dport 53 redirect to :15353") && success;
+            success = this.run_nft_command (@"nft insert rule inet $(table_v4) output meta nfproto ipv4 socket cgroupv2 level 1 \"sshuttle-proxy\" udp dport 53 redirect to :15355") && success;
+            success = this.run_nft_command (@"nft insert rule inet $(table_v4) output meta nfproto ipv4 udp sport 15356 return") && success;
+            success = this.run_nft_command (@"nft insert rule inet $(table_v4) output meta nfproto ipv4 udp sport 15354 return") && success;
 
             // 4. 在 sshuttle 子链首部插入分流与裁决规则 (倒序插入)：
             // 最终期望执行顺序：
@@ -43,13 +65,29 @@ namespace Sshuttle {
             }
             success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) socket cgroupv2 level 1 \"sshuttle-proxy\" meta l4proto tcp redirect to :$(port)") && success;
             success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr @proxy_ips meta l4proto tcp redirect to :$(port)") && success;
+            for (uint i = 0; i < proxy_v4.length; i++) {
+                success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr $(proxy_v4[i]) meta l4proto tcp redirect to :$(port) comment \"sshuttle-gui-network\"") && success;
+            }
             success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr @direct_ips return") && success;
+            for (uint i = 0; i < direct_v4.length; i++) {
+                success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr $(direct_v4[i]) return comment \"sshuttle-gui-network\"") && success;
+            }
 
             if (ipv6_enabled) {
                 string table_v6 = @"sshuttle-ipv6-$(port)";
+                success = this.ensure_ip_set (table_v6, "proxy_ips", "ipv6_addr") && success;
+                success = this.ensure_ip_set (table_v6, "direct_ips", "ipv6_addr") && success;
                 if (default_policy == "direct") {
-                    string cmd_v6 = @"nft insert rule inet $(table_v6) output socket cgroupv2 level 1 != \"sshuttle-proxy\" return";
-                    success = this.run_nft_command (cmd_v6) && success;
+                    success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) socket cgroupv2 level 1 != \"sshuttle-proxy\" return") && success;
+                }
+                success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) socket cgroupv2 level 1 \"sshuttle-proxy\" meta l4proto tcp redirect to :$(port)") && success;
+                success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) ip6 daddr @proxy_ips meta l4proto tcp redirect to :$(port)") && success;
+                for (uint i = 0; i < proxy_v6.length; i++) {
+                    success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) ip6 daddr $(proxy_v6[i]) meta l4proto tcp redirect to :$(port) comment \"sshuttle-gui-network\"") && success;
+                }
+                success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) ip6 daddr @direct_ips return") && success;
+                for (uint i = 0; i < direct_v6.length; i++) {
+                    success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) ip6 daddr $(direct_v6[i]) return comment \"sshuttle-gui-network\"") && success;
                 }
             }
 
@@ -64,28 +102,37 @@ namespace Sshuttle {
                 return;
             }
 
-            var elements = new GLib.GenericArray<string> ();
+            var elements_v4 = new GLib.GenericArray<string> ();
+            var elements_v6 = new GLib.GenericArray<string> ();
             foreach (var ip in ips) {
                 string trimmed = ip.strip ();
-                if (trimmed != "") {
-                    elements.add (@"$(trimmed) timeout 300s");
+                var address = new GLib.InetAddress.from_string (trimmed);
+                if (address == null) {
+                    continue;
+                }
+                if (address.get_family () == GLib.SocketFamily.IPV6) {
+                    if (this.active_ipv6) {
+                        elements_v6.add (@"$(address.to_string ()) timeout 300s");
+                    }
+                } else {
+                    elements_v4.add (@"$(address.to_string ()) timeout 300s");
                 }
             }
 
-            if (elements.length == 0) {
-                return;
-            }
-
-            var arr = new string[elements.length];
-            for (uint i = 0; i < elements.length; i++) {
-                arr[i] = elements[i];
-            }
-
-            string joined = string.joinv (", ", arr);
-            string table_v4 = @"sshuttle-ipv4-$(this.active_port)";
             string set_name = (action == "proxy") ? "proxy_ips" : "direct_ips";
-            string cmd = @"nft add element inet $(table_v4) $(set_name) '{ $(joined) }'";
-            this.run_nft_command (cmd);
+            this.add_elements_to_set (@"sshuttle-ipv4-$(this.active_port)", set_name, elements_v4);
+            if (this.active_ipv6) {
+                this.add_elements_to_set (@"sshuttle-ipv6-$(this.active_port)", set_name, elements_v6);
+            }
+        }
+
+        public void flush_ip_sets () {
+            this.run_nft_command (@"nft flush set inet sshuttle-ipv4-$(this.active_port) proxy_ips");
+            this.run_nft_command (@"nft flush set inet sshuttle-ipv4-$(this.active_port) direct_ips");
+            if (this.active_ipv6) {
+                this.run_nft_command (@"nft flush set inet sshuttle-ipv6-$(this.active_port) proxy_ips");
+                this.run_nft_command (@"nft flush set inet sshuttle-ipv6-$(this.active_port) direct_ips");
+            }
         }
 
         /**
@@ -100,15 +147,110 @@ namespace Sshuttle {
          */
         public void remove_cgroup_filter (int port, bool ipv6_enabled) {
             this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", "output", "15354");
+            this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", "output", "15355");
+            this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", "output", "15356");
             this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", "output", "15353");
             this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", "output", "@proxy_ips");
             this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", @"sshuttle-ipv4-$(port)", "@direct_ips");
             this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", @"sshuttle-ipv4-$(port)", "@proxy_ips");
             this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", @"sshuttle-ipv4-$(port)", "sshuttle-proxy");
+            this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", @"sshuttle-ipv4-$(port)", "sshuttle-gui-network");
 
             if (ipv6_enabled) {
-                this.delete_matching_rules ("inet", @"sshuttle-ipv6-$(port)", "output", "sshuttle-proxy");
+                this.delete_matching_rules ("inet", @"sshuttle-ipv6-$(port)", @"sshuttle-ipv6-$(port)", "@direct_ips");
+                this.delete_matching_rules ("inet", @"sshuttle-ipv6-$(port)", @"sshuttle-ipv6-$(port)", "@proxy_ips");
+                this.delete_matching_rules ("inet", @"sshuttle-ipv6-$(port)", @"sshuttle-ipv6-$(port)", "sshuttle-proxy");
+                this.delete_matching_rules ("inet", @"sshuttle-ipv6-$(port)", @"sshuttle-ipv6-$(port)", "sshuttle-gui-network");
             }
+        }
+
+        private void append_network (
+            string value,
+            string action,
+            GLib.GenericArray<string> direct_v4,
+            GLib.GenericArray<string> proxy_v4,
+            GLib.GenericArray<string> direct_v6,
+            GLib.GenericArray<string> proxy_v6
+        ) {
+            string normalized;
+            bool is_ipv6;
+            if (!this.normalize_network (value, out normalized, out is_ipv6)) {
+                return;
+            }
+
+            bool is_proxy = action.strip ().down () == "proxy";
+            if (is_ipv6) {
+                (is_proxy ? proxy_v6 : direct_v6).add (normalized);
+            } else {
+                (is_proxy ? proxy_v4 : direct_v4).add (normalized);
+            }
+        }
+
+        private bool normalize_network (string value, out string normalized, out bool is_ipv6) {
+            normalized = "";
+            is_ipv6 = false;
+            string[] parts = value.strip ().split ("/", 2);
+            if (parts.length == 0 || parts[0] == "") {
+                return false;
+            }
+
+            var address = new GLib.InetAddress.from_string (parts[0]);
+            if (address == null) {
+                return false;
+            }
+
+            is_ipv6 = address.get_family () == GLib.SocketFamily.IPV6;
+            int max_prefix = is_ipv6 ? 128 : 32;
+            int prefix = max_prefix;
+            if (parts.length == 2 && (!int.try_parse (parts[1], out prefix) || prefix < 0 || prefix > max_prefix)) {
+                return false;
+            }
+
+            normalized = address.to_string ();
+            if (parts.length == 2) {
+                normalized = @"$(normalized)/$(prefix)";
+            }
+            return true;
+        }
+
+        private void add_elements_to_set (string table_name, string set_name, GLib.GenericArray<string> elements) {
+            if (elements.length == 0) {
+                return;
+            }
+
+            var arr = new string[elements.length];
+            for (uint i = 0; i < elements.length; i++) {
+                arr[i] = elements[i];
+            }
+            string joined = string.joinv (", ", arr);
+            this.run_nft_command (@"nft add element inet $(table_name) $(set_name) '{ $(joined) }'");
+        }
+
+        private bool ensure_ip_set (string table_name, string set_name, string address_type) {
+            try {
+                string[] argv = { "nft", "list", "set", "inet", table_name, set_name };
+                int exit_status;
+                GLib.Process.spawn_sync (
+                    null,
+                    argv,
+                    null,
+                    GLib.SpawnFlags.SEARCH_PATH,
+                    null,
+                    null,
+                    null,
+                    out exit_status
+                );
+                if (exit_status == 0) {
+                    return true;
+                }
+            } catch (GLib.Error e) {
+                warning ("Failed to inspect nft set %s/%s: %s", table_name, set_name, e.message);
+                return false;
+            }
+
+            return this.run_nft_command (
+                @"nft add set inet $(table_name) $(set_name) '{ type $(address_type); flags timeout; }'"
+            );
         }
 
         private void delete_matching_rules (string family, string table_name, string chain_name, string keyword) {
@@ -207,9 +349,6 @@ namespace Sshuttle {
                 );
                 if (exit_status != 0 && stderr_text != null && stderr_text.strip () != "") {
                     string err_msg = stderr_text.strip ();
-                    if ("add set" in command && "File exists" in err_msg) {
-                        return true;
-                    }
                     // 清理时若表原本就不存在，属于正常预期，不输出警告日志
                     if (!("delete table" in command && "No such file or directory" in err_msg)) {
                         warning ("nft command failed (code %d): %s | command: %s", exit_status, err_msg, command);

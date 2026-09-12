@@ -2,6 +2,60 @@ namespace Sshuttle {
 
     public class CommandBuilder : Object {
 
+        public static string[] get_effective_excludes (Profile profile) {
+            var excludes = new GLib.GenericArray<string> ();
+            var exclude_set = new GLib.HashTable<string, bool> (GLib.str_hash, GLib.str_equal);
+
+            string host = profile.host.strip ();
+            if (host != "") {
+                excludes.add (host);
+                exclude_set.insert (host, true);
+            }
+
+            foreach (var value in profile.exclude) {
+                string network = value.strip ();
+                if (network != "" && !exclude_set.contains (network)) {
+                    excludes.add (network);
+                    exclude_set.insert (network, true);
+                }
+            }
+
+            bool has_global_v4_route = profile.routes.length == 0;
+            bool has_global_v6_route = profile.routes.length == 0;
+            foreach (var value in profile.routes) {
+                string route = value.strip ();
+                if (route == "0.0.0.0/0") {
+                    has_global_v4_route = true;
+                } else if (route == "::/0") {
+                    has_global_v6_route = true;
+                }
+            }
+            if (has_global_v4_route) {
+                string[] local_networks = { "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16" };
+                foreach (var network in local_networks) {
+                    if (!exclude_set.contains (network)) {
+                        excludes.add (network);
+                        exclude_set.insert (network, true);
+                    }
+                }
+            }
+            if (profile.ipv6 && (has_global_v4_route || has_global_v6_route)) {
+                string[] local_networks_v6 = { "::1/128", "fc00::/7", "fe80::/10" };
+                foreach (var network in local_networks_v6) {
+                    if (!exclude_set.contains (network)) {
+                        excludes.add (network);
+                        exclude_set.insert (network, true);
+                    }
+                }
+            }
+
+            var result = new string[excludes.length];
+            for (uint i = 0; i < excludes.length; i++) {
+                result[i] = excludes[i];
+            }
+            return result;
+        }
+
         public static string[] build_argv (Profile profile, int local_port = 12300) throws GLib.Error {
             if (profile.host.strip () == "") {
                 throw new GLib.IOError.INVALID_ARGUMENT ("Host cannot be empty");
@@ -13,14 +67,16 @@ namespace Sshuttle {
 
             // 指定监听端口，便于精准管理对应 nftables 表 (sshuttle-ipv4-<port>)
             argv.add ("-l");
-            argv.add (@"127.0.0.1:$(local_port)");
+            argv.add (profile.ipv6
+                ? @"127.0.0.1:$(local_port),[::1]:$(local_port)"
+                : @"127.0.0.1:$(local_port)");
 
             if (profile.dns) {
                 argv.add ("--dns");
             }
 
-            if (profile.ipv6) {
-                argv.add ("--ipv6");
+            if (!profile.ipv6) {
+                argv.add ("--disable-ipv6");
             }
 
             // 强制采用 nftables 模式，支持内核级 cgroup v2 应用过滤
@@ -43,8 +99,7 @@ namespace Sshuttle {
             }
 
             if (profile.auth_type == "password" && profile.password != "") {
-                string quoted_pwd = profile.password.replace ("'", "'\\''");
-                ssh_parts.add (@"sshpass -p '$(quoted_pwd)' ssh");
+                ssh_parts.add ("sshpass -e ssh");
             } else {
                 ssh_parts.add ("ssh");
             }
@@ -88,52 +143,30 @@ namespace Sshuttle {
             argv.add ("-r");
             argv.add (profile.get_ssh_target ());
 
-            var exclude_set = new GLib.HashTable<string, bool> (GLib.str_hash, GLib.str_equal);
-
-            // 自动排除目标服务器自身 IP / 域名，防止全局转发规则切断 SSH 连接自身
-            string host_trimmed = profile.host.strip ();
-            if (host_trimmed != "") {
+            // 自动排除 SSH 服务器、用户配置项与全局路由下的本地网段。
+            foreach (var network in get_effective_excludes (profile)) {
                 argv.add ("-x");
-                argv.add (host_trimmed);
-                exclude_set.insert (host_trimmed, true);
-            }
-
-            foreach (var exc in profile.exclude) {
-                string exc_trimmed = exc.strip ();
-                if (exc_trimmed != "" && !exclude_set.contains (exc_trimmed)) {
-                    argv.add ("-x");
-                    argv.add (exc_trimmed);
-                    exclude_set.insert (exc_trimmed, true);
-                }
-            }
-
-            // 当包含全局 0.0.0.0/0 路由时，默认排除回环与局域网私有网段，确保本地服务与内网访问通畅
-            bool has_global_route = (profile.routes.length == 0);
-            foreach (var r in profile.routes) {
-                if (r.strip () == "0.0.0.0/0") {
-                    has_global_route = true;
-                    break;
-                }
-            }
-            if (has_global_route) {
-                string[] default_subnets = { "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16" };
-                foreach (var net in default_subnets) {
-                    if (!exclude_set.contains (net)) {
-                        argv.add ("-x");
-                        argv.add (net);
-                        exclude_set.insert (net, true);
-                    }
-                }
+                argv.add (network);
             }
 
             if (profile.routes.length == 0) {
                 argv.add ("0.0.0.0/0");
+                if (profile.ipv6) {
+                    argv.add ("::/0");
+                }
             } else {
+                bool has_global_v4_route = false;
+                bool has_global_v6_route = false;
                 foreach (var r in profile.routes) {
                     string r_trimmed = r.strip ();
                     if (r_trimmed != "") {
                         argv.add (r_trimmed);
+                        has_global_v4_route = has_global_v4_route || r_trimmed == "0.0.0.0/0";
+                        has_global_v6_route = has_global_v6_route || r_trimmed == "::/0";
                     }
+                }
+                if (profile.ipv6 && has_global_v4_route && !has_global_v6_route) {
+                    argv.add ("::/0");
                 }
             }
 

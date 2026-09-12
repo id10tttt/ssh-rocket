@@ -229,7 +229,9 @@ namespace Sshuttle {
                 // 启动按软件代理监控与 DNS 分流器
                 this.sync_process_monitor_targets ();
                 this.process_monitor.start ();
-                this.dns_proxy.start ();
+                if (!this.dns_proxy.start ()) {
+                    throw new GLib.IOError.FAILED ("Failed to start DNS routing service");
+                }
 
                 string[] argv = CommandBuilder.build_argv (profile, this.local_proxy_port);
 
@@ -240,6 +242,9 @@ namespace Sshuttle {
                 var launcher = new GLib.SubprocessLauncher (
                     GLib.SubprocessFlags.STDOUT_PIPE | GLib.SubprocessFlags.STDERR_PIPE
                 );
+                if (profile.auth_type == "password" && profile.password != "") {
+                    launcher.setenv ("SSHPASS", profile.password, true);
+                }
 
                 this.process = launcher.spawnv (argv);
 
@@ -748,10 +753,15 @@ namespace Sshuttle {
         private bool refresh_proxy_rules () {
             var p = this.active_profile;
             bool ipv6 = (p != null) ? p.ipv6 : false;
+            string[] direct_networks = (p != null)
+                ? CommandBuilder.get_effective_excludes (p)
+                : new string[0];
             bool filter_ready = this.nft_manager.apply_cgroup_filter (
                 this.local_proxy_port,
                 ipv6,
-                this.config_manager.get_domain_default_policy ()
+                this.config_manager.get_domain_default_policy (),
+                direct_networks,
+                this.config_manager.get_domain_rules ()
             );
             if (!filter_ready) {
                 this.emit_log ("Failed to install per-app proxy rules. Disconnecting tunnel.");
@@ -759,6 +769,12 @@ namespace Sshuttle {
                 return false;
             }
             return true;
+        }
+
+        public void refresh_routing_configuration () {
+            if (this.state == TunnelState.CONNECTED && this.refresh_proxy_rules ()) {
+                this.dns_proxy.rebuild_routing_sets ();
+            }
         }
 
         private void on_app_rules_changed () {
@@ -772,15 +788,12 @@ namespace Sshuttle {
         }
 
         private void on_domain_rules_changed () {
-            if (this.state == TunnelState.CONNECTED) {
-                this.refresh_proxy_rules ();
-            }
+            this.refresh_routing_configuration ();
         }
 
         private void on_blacklist_changed () {
             this.sync_process_monitor_targets ();
             if (this.state == TunnelState.CONNECTED) {
-                this.nft_manager.apply_blacklist_filter ();
                 this.process_monitor.start ();
             }
         }

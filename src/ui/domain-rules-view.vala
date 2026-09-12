@@ -19,8 +19,8 @@ namespace Sshuttle {
             this.rule_rows = new GLib.GenericArray<Adw.ActionRow> ();
             this.displayed_rules = new GLib.GenericArray<DomainRule> ();
 
-            this.title = "Domain Routing and Exceptions (Zero Omega Compatible)";
-            this.description = GLib.Markup.escape_text ("Route specific domains via direct exception or proxy. Supports wildcards (*.google.com).");
+            this.title = "Domain and IP Routing";
+            this.description = GLib.Markup.escape_text ("Route domains, IP addresses, or CIDR networks via direct or proxy.");
 
             // 1. 默认兜底策略
             this.default_policy_row = new Adw.ComboRow ();
@@ -59,7 +59,7 @@ namespace Sshuttle {
 
             // 3. 新增域名规则行
             this.new_pattern_row = new Adw.EntryRow ();
-            this.new_pattern_row.title = "New Domain Pattern (e.g. *.google.com)";
+            this.new_pattern_row.title = "New Domain, IP, or CIDR Rule";
 
             string[] action_labels = { "direct", "proxy" };
             this.action_dropdown = new Gtk.DropDown.from_strings (action_labels);
