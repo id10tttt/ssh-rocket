@@ -198,9 +198,36 @@ namespace Sshuttle {
         private void on_add_cidr () {
             string text = this.new_cidr_row.text.strip ();
             if (text != "") {
+                if (!this.is_valid_network (text)) {
+                    var root_win = this.get_root () as Gtk.Window;
+                    var dialog = new Adw.MessageDialog (root_win, "Invalid Network", "Enter a valid IPv4 or IPv6 address with an optional CIDR prefix.");
+                    dialog.add_response ("close", "Close");
+                    dialog.present ();
+                    return;
+                }
                 this.add_exclude_item (text);
                 this.new_cidr_row.text = "";
             }
+        }
+
+        /**
+         * 校验直连网络地址及 CIDR 前缀。
+         */
+        private bool is_valid_network (string value) {
+            string[] parts = value.strip ().split ("/", 2);
+            if (parts.length == 0 || parts[0] == "") {
+                return false;
+            }
+            var address = new GLib.InetAddress.from_string (parts[0]);
+            if (address == null) {
+                return false;
+            }
+            if (parts.length == 1) {
+                return true;
+            }
+            int prefix;
+            int max_prefix = address.get_family () == GLib.SocketFamily.IPV6 ? 128 : 32;
+            return int.try_parse (parts[1], out prefix) && prefix >= 0 && prefix <= max_prefix;
         }
 
         private void sync_to_active_profile () {

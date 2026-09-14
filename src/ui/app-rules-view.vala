@@ -72,6 +72,7 @@ namespace Sshuttle {
             this.add (this.apps_list_box);
 
             this.config_manager.traffic_stats_changed.connect (this.update_traffic_display);
+            this.config_manager.app_rules_changed.connect (this.refresh_selection);
 
             this.load_apps_async.begin ();
         }
@@ -154,6 +155,18 @@ namespace Sshuttle {
             if (this.sort_dropdown.selected == 1) {
                 this.apps_list_box.invalidate_sort ();
             }
+        }
+
+        /**
+         * 根据当前配置刷新应用开关状态。
+         */
+        private void refresh_selection () {
+            for (uint i = 0; i < this.app_rows.length; i++) {
+                var row = this.app_rows[i];
+                row.toggle_switch.active = this.config_manager.is_app_proxied (row.app.id) ||
+                                           this.config_manager.is_app_proxied (row.app.exec_name);
+            }
+            this.apps_list_box.invalidate_sort ();
         }
 
         private int sort_apps_func (Gtk.ListBoxRow row_a, Gtk.ListBoxRow row_b) {

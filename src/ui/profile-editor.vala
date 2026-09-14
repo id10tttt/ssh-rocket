@@ -25,14 +25,12 @@ namespace Sshuttle {
         private Adw.EntryRow new_exclude_entry;
         private GLib.GenericArray<string> excludes;
 
-        private Adw.ComboRow method_row;
         private Adw.ComboRow verbosity_row;
         private Adw.SwitchRow auto_connect_row;
 
         private static string[] AUTH_TYPES = { "agent", "key", "password" };
         private static string[] AUTH_LABELS = { "SSH Agent / Default", "Private Key File", "Password" };
 
-        private static string[] METHODS = { "auto", "nat", "tproxy", "nft" };
         private static string[] VERBOSITIES = { "normal", "verbose", "very_verbose" };
         private static string[] VERBOSITY_LABELS = { "Normal", "Verbose", "Very Verbose" };
 
@@ -165,19 +163,6 @@ namespace Sshuttle {
             adv_group.title = "Advanced";
             page.add (adv_group);
 
-            this.method_row = new Adw.ComboRow ();
-            this.method_row.title = "Method";
-            var method_model = new Gtk.StringList (METHODS);
-            this.method_row.model = method_model;
-            string cur_method = (profile != null) ? profile.method : "auto";
-            for (uint i = 0; i < METHODS.length; i++) {
-                if (METHODS[i] == cur_method) {
-                    this.method_row.selected = i;
-                    break;
-                }
-            }
-            adv_group.add (this.method_row);
-
             this.verbosity_row = new Adw.ComboRow ();
             this.verbosity_row.title = "Verbosity";
             var verb_model = new Gtk.StringList (VERBOSITY_LABELS);
@@ -291,6 +276,22 @@ namespace Sshuttle {
         }
 
         private void on_save_clicked () {
+            if (this.host_row.text.strip () == "") {
+                this.show_validation_error ("Host is required.");
+                return;
+            }
+
+            uint auth_idx = this.auth_row.selected;
+            string auth_mode = (auth_idx < AUTH_TYPES.length) ? AUTH_TYPES[auth_idx] : "agent";
+            if (auth_mode == "key" && this.key_row.text.strip () == "") {
+                this.show_validation_error ("Select a private key file.");
+                return;
+            }
+            if (auth_mode == "password" && this.password_row.text == "") {
+                this.show_validation_error ("Password is required for password login.");
+                return;
+            }
+
             var p = new Profile ();
             if (this.original_profile != null) {
                 p.id = this.original_profile.id;
@@ -301,8 +302,7 @@ namespace Sshuttle {
             p.port = (int) this.port_row.value;
             p.username = this.user_row.text.strip ();
 
-            uint a_idx = this.auth_row.selected;
-            p.auth_type = (a_idx < AUTH_TYPES.length) ? AUTH_TYPES[a_idx] : "agent";
+            p.auth_type = auth_mode;
             p.key_path = this.key_row.text.strip ();
             p.password = this.password_row.text;
 
@@ -312,6 +312,10 @@ namespace Sshuttle {
             foreach (var r in split_routes) {
                 string trimmed = r.strip ();
                 if (trimmed != "") {
+                    if (!this.is_valid_network (trimmed)) {
+                        this.show_validation_error (@"Invalid remote route: $(trimmed)");
+                        return;
+                    }
                     r_list.add (trimmed);
                 }
             }
@@ -327,6 +331,10 @@ namespace Sshuttle {
 
             var exc_arr = new string[this.excludes.length];
             for (uint i = 0; i < this.excludes.length; i++) {
+                if (!this.is_valid_network (this.excludes[i])) {
+                    this.show_validation_error (@"Invalid exclude network: $(this.excludes[i])");
+                    return;
+                }
                 exc_arr[i] = this.excludes[i];
             }
             p.exclude = exc_arr;
@@ -334,8 +342,7 @@ namespace Sshuttle {
             p.dns = this.dns_row.active;
             p.ipv6 = this.ipv6_row.active;
 
-            uint m_idx = this.method_row.selected;
-            p.method = (m_idx < METHODS.length) ? METHODS[m_idx] : "auto";
+            p.method = "nft";
 
             uint v_idx = this.verbosity_row.selected;
             p.verbosity = (v_idx < VERBOSITIES.length) ? VERBOSITIES[v_idx] : "normal";
@@ -344,6 +351,37 @@ namespace Sshuttle {
 
             this.profile_saved (p);
             this.close ();
+        }
+
+        /**
+         * 校验 IPv4、IPv6 地址及其 CIDR 前缀。
+         */
+        private bool is_valid_network (string value) {
+            string[] parts = value.strip ().split ("/", 2);
+            if (parts.length == 0 || parts[0] == "") {
+                return false;
+            }
+
+            var address = new GLib.InetAddress.from_string (parts[0]);
+            if (address == null) {
+                return false;
+            }
+            if (parts.length == 1) {
+                return true;
+            }
+
+            int prefix;
+            int max_prefix = address.get_family () == GLib.SocketFamily.IPV6 ? 128 : 32;
+            return int.try_parse (parts[1], out prefix) && prefix >= 0 && prefix <= max_prefix;
+        }
+
+        /**
+         * 显示连接配置校验错误。
+         */
+        private void show_validation_error (string message) {
+            var dialog = new Adw.MessageDialog (this, "Invalid Configuration", message);
+            dialog.add_response ("close", "Close");
+            dialog.present ();
         }
 
         private void on_delete_clicked () {

@@ -58,6 +58,10 @@ namespace Sshuttle {
             this.apps_list_box.margin_top = 8;
             apps_group_header.add (this.apps_list_box);
 
+            this.config_manager.blacklist_changed.connect (() => {
+                this.refresh_process_list ();
+                this.refresh_app_selection ();
+            });
             this.load_apps_async.begin ();
         }
 
@@ -167,6 +171,19 @@ namespace Sshuttle {
                                   app.exec_name.down ().contains (query) ||
                                   app.id.down ().contains (query));
                     row.visible = match;
+                }
+            }
+        }
+
+        /**
+         * 根据当前配置刷新应用黑名单开关。
+         */
+        private void refresh_app_selection () {
+            for (uint i = 0; i < this.apps.length && i < this.app_rows.length; i++) {
+                var sw = this.app_rows[i].activatable_widget as Gtk.Switch;
+                if (sw != null) {
+                    sw.active = this.config_manager.is_app_blocked (this.apps[i].id) ||
+                                this.config_manager.is_app_blocked (this.apps[i].exec_name);
                 }
             }
         }

@@ -9,7 +9,7 @@ namespace Sshuttle {
 
         public DomainRule (string pattern, string action = "proxy") {
             this.pattern = pattern.strip ().down ();
-            this.action = action;
+            this.action = action.strip ().down () == "direct" ? "direct" : "proxy";
             this.init_matcher ();
         }
 

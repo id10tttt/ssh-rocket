@@ -11,6 +11,56 @@ namespace Sshuttle {
         private bool active_ipv6 = false;
 
         /**
+         * 检查 sshuttle 已创建当前端口对应的基础表和链。
+         */
+        public bool base_chains_exist (int port, bool ipv6_enabled) {
+            string table_v4 = @"sshuttle-ipv4-$(port)";
+            if (!this.chain_exists ("inet", table_v4, "output") ||
+                !this.chain_exists ("inet", table_v4, table_v4)) {
+                return false;
+            }
+
+            if (ipv6_enabled) {
+                string table_v6 = @"sshuttle-ipv6-$(port)";
+                if (!this.chain_exists ("inet", table_v6, "output") ||
+                    !this.chain_exists ("inet", table_v6, table_v6)) {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        /**
+         * 检查系统中是否已有其他 sshuttle nftables 会话。
+         */
+        public bool has_active_sshuttle_tables () {
+            try {
+                string[] argv = { "nft", "list", "tables" };
+                string stdout_text;
+                string stderr_text;
+                int exit_status;
+                GLib.Process.spawn_sync (
+                    null,
+                    argv,
+                    null,
+                    GLib.SpawnFlags.SEARCH_PATH,
+                    null,
+                    out stdout_text,
+                    out stderr_text,
+                    out exit_status
+                );
+                if (exit_status != 0 || stdout_text == null) {
+                    return false;
+                }
+                return "sshuttle-ipv4-" in stdout_text || "sshuttle-ipv6-" in stdout_text;
+            } catch (GLib.Error e) {
+                warning ("Failed to inspect active sshuttle tables: %s", e.message);
+                return false;
+            }
+        }
+
+        /**
          * 向 sshuttle 的 nftables 表插入 cgroup 与域名分流规则
          */
         public bool apply_cgroup_filter (
@@ -229,6 +279,8 @@ namespace Sshuttle {
         private bool ensure_ip_set (string table_name, string set_name, string address_type) {
             try {
                 string[] argv = { "nft", "list", "set", "inet", table_name, set_name };
+                string stdout_text;
+                string stderr_text;
                 int exit_status;
                 GLib.Process.spawn_sync (
                     null,
@@ -236,8 +288,8 @@ namespace Sshuttle {
                     null,
                     GLib.SpawnFlags.SEARCH_PATH,
                     null,
-                    null,
-                    null,
+                    out stdout_text,
+                    out stderr_text,
                     out exit_status
                 );
                 if (exit_status == 0) {
@@ -251,6 +303,32 @@ namespace Sshuttle {
             return this.run_nft_command (
                 @"nft add set inet $(table_name) $(set_name) '{ type $(address_type); flags timeout; }'"
             );
+        }
+
+        /**
+         * 检查指定 nftables 链是否存在，并吞掉尚未创建时的预期错误输出。
+         */
+        private bool chain_exists (string family, string table_name, string chain_name) {
+            try {
+                string[] argv = { "nft", "list", "chain", family, table_name, chain_name };
+                string stdout_text;
+                string stderr_text;
+                int exit_status;
+                GLib.Process.spawn_sync (
+                    null,
+                    argv,
+                    null,
+                    GLib.SpawnFlags.SEARCH_PATH,
+                    null,
+                    out stdout_text,
+                    out stderr_text,
+                    out exit_status
+                );
+                return exit_status == 0;
+            } catch (GLib.Error e) {
+                warning ("Failed to inspect nft chain %s/%s: %s", table_name, chain_name, e.message);
+                return false;
+            }
         }
 
         private void delete_matching_rules (string family, string table_name, string chain_name, string keyword) {
@@ -280,12 +358,14 @@ namespace Sshuttle {
         /**
          * 启用黑名单内核阻断规则：凡是在 sshuttle-block cgroup 的进程，所有外出网络在优先级 -100 直接 drop
          */
-        public void apply_blacklist_filter () {
-            this.run_nft_command ("nft add table inet sshuttle-firewall");
-            this.run_nft_command ("nft 'add chain inet sshuttle-firewall output { type filter hook output priority -100; policy accept; }'");
-            this.run_nft_command ("nft 'add rule inet sshuttle-firewall output socket cgroupv2 level 1 \"sshuttle-block\" drop'");
+        public bool apply_blacklist_filter () {
+            bool success = true;
+            success = this.run_nft_command ("nft add table inet sshuttle-firewall") && success;
+            success = this.run_nft_command ("nft 'add chain inet sshuttle-firewall output { type filter hook output priority -100; policy accept; }'") && success;
+            success = this.run_nft_command ("nft 'add rule inet sshuttle-firewall output socket cgroupv2 level 1 \"sshuttle-block\" drop'") && success;
             // 被代理的应用 (如 Chrome) 遇到 UDP 443 (QUIC) 立即在 filter 链 reject，促使浏览器秒级降级为 TCP 走代理
-            this.run_nft_command ("nft 'add rule inet sshuttle-firewall output socket cgroupv2 level 1 \"sshuttle-proxy\" udp dport 443 reject'");
+            success = this.run_nft_command ("nft 'add rule inet sshuttle-firewall output socket cgroupv2 level 1 \"sshuttle-proxy\" udp dport 443 reject'") && success;
+            return success;
         }
 
         public void cleanup_blacklist_filter () {
@@ -293,7 +373,7 @@ namespace Sshuttle {
         }
 
         /**
-         * 彻底清理指定端口或所有残留的 sshuttle nftables 表
+         * 清理当前连接使用的 sshuttle nftables 表。
          */
         public void cleanup_all_sshuttle_tables (int port = 0) {
             this.cleanup_blacklist_filter ();
@@ -301,32 +381,6 @@ namespace Sshuttle {
             if (port > 0) {
                 this.run_nft_command (@"nft delete table inet sshuttle-ipv4-$(port)");
                 this.run_nft_command (@"nft delete table inet sshuttle-ipv6-$(port)");
-            }
-
-            // 扫描所有残留的 sshuttle 表并清除
-            try {
-                string[] argv = { "nft", "list", "tables" };
-                string stdout_text;
-                string stderr_text;
-                int exit_status;
-                GLib.Process.spawn_sync (null, argv, null, GLib.SpawnFlags.SEARCH_PATH, null, out stdout_text, out stderr_text, out exit_status);
-                if (exit_status == 0 && stdout_text != null) {
-                    string[] lines = stdout_text.split ("\n");
-                    foreach (var line in lines) {
-                        string trimmed = line.strip ();
-                        if (trimmed.has_prefix ("table ")) {
-                            string[] tokens = trimmed.split (" ");
-                            if (tokens.length >= 3) {
-                                string family = tokens[1];
-                                string tbl = tokens[2];
-                                if (tbl.has_prefix ("sshuttle-ipv4-") || tbl.has_prefix ("sshuttle-ipv6-") || tbl == "sshuttle-firewall") {
-                                    this.run_nft_command (@"nft delete table $(family) $(tbl)");
-                                }
-                            }
-                        }
-                    }
-                }
-            } catch (GLib.Error e) {
             }
         }
 

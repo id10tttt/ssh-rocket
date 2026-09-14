@@ -4,7 +4,7 @@ namespace Sshuttle {
         private TunnelManager tunnel_manager;
         private ConfigManager config_manager;
 
-        private Adw.ViewStack view_stack;
+        private Gtk.Stack view_stack;
         private Gtk.FlowBox flow_box;
         private Adw.StatusPage empty_page;
         private Gtk.Stack content_stack;
@@ -84,22 +84,64 @@ namespace Sshuttle {
                 this.on_add_profile ();
             });
             this.add_action (new_profile_action);
+
+            var reset_settings_action = new GLib.SimpleAction ("reset-settings", null);
+            reset_settings_action.activate.connect (this.on_reset_settings);
+            this.add_action (reset_settings_action);
         }
 
         private void build_ui () {
+            var root_box = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 0);
+            this.set_content (root_box);
+
+            this.view_stack = new Gtk.Stack ();
+            this.view_stack.vexpand = true;
+            this.view_stack.hexpand = true;
+
+            var sidebar_box = new Gtk.Box (Gtk.Orientation.VERTICAL, 0);
+            sidebar_box.width_request = 200;
+            sidebar_box.add_css_class ("sidebar");
+
+            var app_title = new Gtk.Label ("SShuttle");
+            app_title.add_css_class ("title-2");
+            app_title.halign = Gtk.Align.START;
+            app_title.margin_start = 18;
+            app_title.margin_end = 18;
+            app_title.margin_top = 18;
+            app_title.margin_bottom = 12;
+            sidebar_box.append (app_title);
+
+            var navigation_list = new Gtk.ListBox ();
+            navigation_list.add_css_class ("navigation-sidebar");
+            navigation_list.selection_mode = Gtk.SelectionMode.SINGLE;
+            navigation_list.activate_on_single_click = true;
+            navigation_list.vexpand = true;
+
+            var connect_nav_row = this.create_navigation_row ("network-vpn-symbolic", "Connect");
+            var rules_nav_row = this.create_navigation_row ("preferences-system-network-symbolic", "Rules");
+            var log_nav_row = this.create_navigation_row ("utilities-terminal-symbolic", "Log");
+            navigation_list.append (connect_nav_row);
+            navigation_list.append (rules_nav_row);
+            navigation_list.append (log_nav_row);
+            navigation_list.row_selected.connect ((row) => {
+                if (row == connect_nav_row) {
+                    this.view_stack.visible_child_name = "connect";
+                } else if (row == rules_nav_row) {
+                    this.view_stack.visible_child_name = "rules";
+                } else if (row == log_nav_row) {
+                    this.view_stack.visible_child_name = "log";
+                }
+            });
+            sidebar_box.append (navigation_list);
+            root_box.append (sidebar_box);
+            root_box.append (new Gtk.Separator (Gtk.Orientation.VERTICAL));
+
             var toolbar_view = new Adw.ToolbarView ();
-            this.set_content (toolbar_view);
+            toolbar_view.hexpand = true;
+            root_box.append (toolbar_view);
 
-            // 使用原生 Adw.HeaderBar + ViewSwitcher 实现 GNOME 风格 Tab 导航
+            // 主页面使用左侧导航，HeaderBar 只保留当前页面操作。
             var header_bar = new Adw.HeaderBar ();
-
-            // 中央 ViewSwitcher（Connect / Rules / Log）
-            this.view_stack = new Adw.ViewStack ();
-
-            var switcher = new Adw.ViewSwitcher ();
-            switcher.stack = this.view_stack;
-            switcher.policy = Adw.ViewSwitcherPolicy.WIDE;
-            header_bar.set_title_widget (switcher);
 
             // 右侧操作按钮
             var add_btn = new Gtk.Button.from_icon_name ("list-add-symbolic");
@@ -114,6 +156,7 @@ namespace Sshuttle {
             settings_btn.add_css_class ("flat");
 
             var menu = new GLib.Menu ();
+            menu.append ("Reset Rules and Settings…", "win.reset-settings");
             menu.append ("About SShuttle", "app.about");
             menu.append ("Quit", "app.quit");
             settings_btn.menu_model = menu;
@@ -127,25 +170,24 @@ namespace Sshuttle {
 
             // Page 1: Connect
             var connect_page = this.build_connect_page ();
-            var connect_vs_page = this.view_stack.add_named (connect_page, "connect");
-            connect_vs_page.title = "Connect";
+            var connect_vs_page = this.view_stack.add_titled (connect_page, "connect", "Connect");
             connect_vs_page.icon_name = "network-vpn-symbolic";
 
             // Page 2: Rules
             var rules_view = new RulesView (this.config_manager, this.tunnel_manager);
-            var rules_vs_page = this.view_stack.add_named (rules_view, "rules");
-            rules_vs_page.title = "Rules";
+            var rules_vs_page = this.view_stack.add_titled (rules_view, "rules", "Rules");
             rules_vs_page.icon_name = "preferences-system-network-symbolic";
 
             // Page 3: Log
             var log_view = new LogView (this.tunnel_manager);
-            var log_vs_page = this.view_stack.add_named (log_view, "log");
-            log_vs_page.title = "Log";
+            var log_vs_page = this.view_stack.add_titled (log_view, "log", "Log");
             log_vs_page.icon_name = "utilities-terminal-symbolic";
 
             this.view_stack.notify["visible-child-name"].connect (() => {
                 add_btn.visible = (this.view_stack.visible_child_name == "connect");
             });
+
+            navigation_list.select_row (connect_nav_row);
 
             // 底部状态栏 (Bottom Status Bar)
             var bottom_bar = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 12);
@@ -169,6 +211,54 @@ namespace Sshuttle {
 
             this.refresh_connections ();
             this.update_status_display ();
+        }
+
+        /**
+         * 创建带图标和名称的左侧导航行。
+         */
+        private Gtk.ListBoxRow create_navigation_row (string icon_name, string title) {
+            var row = new Gtk.ListBoxRow ();
+            row.height_request = 48;
+
+            var content = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 12);
+            content.margin_start = 12;
+            content.margin_end = 12;
+            content.margin_top = 8;
+            content.margin_bottom = 8;
+
+            var icon = new Gtk.Image.from_icon_name (icon_name);
+            icon.pixel_size = 20;
+            content.append (icon);
+
+            var label = new Gtk.Label (title);
+            label.halign = Gtk.Align.START;
+            label.hexpand = true;
+            content.append (label);
+
+            row.set_child (content);
+            return row;
+        }
+
+        /**
+         * 确认后重置规则和统计设置，连接 Profile 保持不变。
+         */
+        private void on_reset_settings () {
+            var dialog = new Adw.MessageDialog (
+                this,
+                "Reset Rules and Settings?",
+                "Application rules, domain rules, blacklist entries, and traffic statistics will be cleared. Connection profiles will be kept."
+            );
+            dialog.add_response ("cancel", "Cancel");
+            dialog.add_response ("reset", "Reset");
+            dialog.set_response_appearance ("reset", Adw.ResponseAppearance.DESTRUCTIVE);
+            dialog.default_response = "cancel";
+            dialog.close_response = "cancel";
+            dialog.response.connect ((response) => {
+                if (response == "reset") {
+                    this.config_manager.reset_rules_and_settings ();
+                }
+            });
+            dialog.present ();
         }
 
         private void update_status_display () {

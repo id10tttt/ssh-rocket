@@ -154,7 +154,8 @@ namespace Sshuttle {
                             });
                         }
                         if (obj.has_member ("domain_default_policy")) {
-                            this.domain_default_policy = obj.get_string_member ("domain_default_policy");
+                            string policy = obj.get_string_member ("domain_default_policy").down ();
+                            this.domain_default_policy = policy == "direct" ? "direct" : "proxy";
                         }
                         if (obj.has_member ("domain_rules")) {
                             this.domain_rules.remove_range (0, this.domain_rules.length);
@@ -397,6 +398,25 @@ namespace Sshuttle {
         public void reset_traffic_stats () {
             this.app_traffic.remove_all ();
             this.save_settings ();
+            this.traffic_stats_changed ();
+        }
+
+        /**
+         * 重置分流、黑名单与统计设置，同时保留连接配置和窗口尺寸。
+         */
+        public void reset_rules_and_settings () {
+            this.app_proxy_enabled = false;
+            this.proxy_apps.remove_range (0, this.proxy_apps.length);
+            this.blocked_apps.remove_range (0, this.blocked_apps.length);
+            this.blocked_processes.remove_range (0, this.blocked_processes.length);
+            this.domain_rules.remove_range (0, this.domain_rules.length);
+            this.domain_default_policy = "proxy";
+            this.app_traffic.remove_all ();
+            this.save_settings ();
+
+            this.app_rules_changed ();
+            this.domain_rules_changed ();
+            this.blacklist_changed ();
             this.traffic_stats_changed ();
         }
 

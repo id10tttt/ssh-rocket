@@ -51,7 +51,7 @@ namespace Sshuttle {
         public string[] exclude { get; set; }
         public bool dns { get; set; default = true; }
         public bool ipv6 { get; set; default = false; }
-        public string method { get; set; default = "auto"; }
+        public string method { get; set; default = "nft"; }
         public string verbosity { get; set; default = "normal"; }
         public bool auto_connect { get; set; default = false; }
 
@@ -206,7 +206,8 @@ namespace Sshuttle {
                 p.ipv6 = obj.get_boolean_member ("ipv6");
             }
             if (obj.has_member ("method")) {
-                p.method = obj.get_string_member ("method");
+                // 应用级分流依赖 nftables，旧配置中的 method 仅作兼容读取。
+                p.method = "nft";
             }
             if (obj.has_member ("verbosity")) {
                 p.verbosity = obj.get_string_member ("verbosity");

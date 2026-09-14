@@ -45,6 +45,7 @@ namespace Sshuttle {
         private GLib.Subprocess? process = null;
         private GLib.Cancellable? cancellable = null;
         private uint connect_timeout_id = 0;
+        private uint runtime_ready_timeout_id = 0;
         private const uint MAX_LOGS = 1000;
 
         private uint speed_timer_id = 0;
@@ -85,8 +86,9 @@ namespace Sshuttle {
             this.process_monitor = new ProcessMonitor (this.cgroup_manager);
             this.dns_proxy = new DnsProxy (this.config_manager, this.nft_manager);
 
-            // 启动时主动清除任何可能的上次异常残留（确保纯运行时无残余）
-            this.cleanup_proxy_runtime ();
+            // 只清理由本应用管理的共享过滤表与 cgroup，避免误删其他 sshuttle 会话。
+            this.nft_manager.cleanup_blacklist_filter ();
+            this.cgroup_manager.cleanup_and_destroy ();
 
             this.config_manager.app_rules_changed.connect (this.on_app_rules_changed);
             this.config_manager.domain_rules_changed.connect (this.on_domain_rules_changed);
@@ -210,19 +212,18 @@ namespace Sshuttle {
                 return;
             }
 
+            if (this.nft_manager.has_active_sshuttle_tables ()) {
+                this.emit_log ("Another sshuttle session is active. Stop it before connecting with SShuttle.");
+                this.change_state (TunnelState.ERROR);
+                return;
+            }
+
             // 取消正在等待的自动重连倒计时
             this.cancel_reconnect ();
 
             this.change_state (TunnelState.CONNECTING);
 
             try {
-                // 清理可能残留的孤儿 sshuttle 进程
-                try {
-                    GLib.Process.spawn_command_line_sync ("pkill -9 -f 'sshuttle.*127.0.0.1'");
-                } catch (GLib.Error e) {
-                    // 忽略无匹配进程报错
-                }
-
                 // 探测空闲端口，避免与已有服务冲突
                 this.local_proxy_port = this.find_available_local_port (12300);
 
@@ -263,10 +264,7 @@ namespace Sshuttle {
                 this.connect_timeout_id = GLib.Timeout.add_seconds (25, () => {
                     this.connect_timeout_id = 0;
                     if (this.state == TunnelState.CONNECTING) {
-                        this.emit_log ("Connection timed out after 25 seconds.");
-                        this.disconnect_tunnel ();
-                        this.change_state (TunnelState.ERROR);
-                        this.schedule_auto_reconnect ();
+                        this.fail_current_attempt ("Connection setup timed out after 25 seconds.");
                     }
                     return false;
                 });
@@ -339,24 +337,83 @@ namespace Sshuttle {
 
             if ("connected to server" in lower || "c : connected" in lower || "tunnel ready" in lower || (lower.has_prefix ("connected") && !("not connected" in lower))) {
                 if (this.state == TunnelState.CONNECTING) {
-                    if (this.connect_timeout_id != 0) {
-                        GLib.Source.remove (this.connect_timeout_id);
-                        this.connect_timeout_id = 0;
-                    }
-                    this.reconnect_attempt = 0;
-                    this.change_state (TunnelState.CONNECTED);
-
-                    // 成功连上后，向 nftables 插入 cgroup 过滤规则与黑名单规则
-                    this.dns_proxy.start ();
-                    if (!this.refresh_proxy_rules ()) {
-                        return;
-                    }
-                    this.nft_manager.apply_blacklist_filter ();
-                    this.sync_process_monitor_targets ();
-                    this.process_monitor.start ();
-                    this.start_speed_monitor ();
-                    this.emit_log ("Per-app proxy and blacklist active.");
+                    this.wait_for_runtime_ready ();
                 }
+            }
+        }
+
+        /**
+         * 等待 sshuttle 防火墙进程完成 nftables 基础表和链的创建。
+         */
+        private void wait_for_runtime_ready () {
+            if (this.runtime_ready_timeout_id != 0) {
+                return;
+            }
+
+            this.runtime_ready_timeout_id = GLib.Timeout.add (100, () => {
+                if (this.state != TunnelState.CONNECTING) {
+                    this.runtime_ready_timeout_id = 0;
+                    return GLib.Source.REMOVE;
+                }
+
+                var profile = this.active_profile;
+                bool ipv6_enabled = profile != null && this.profile_uses_ipv6_routing (profile);
+                bool dns_ready = profile == null || !profile.dns || this.dns_proxy.remote_dns_port > 0;
+                if (dns_ready && this.nft_manager.base_chains_exist (this.local_proxy_port, ipv6_enabled)) {
+                    this.runtime_ready_timeout_id = 0;
+                    this.finish_connection_setup ();
+                    return GLib.Source.REMOVE;
+                }
+
+                return GLib.Source.CONTINUE;
+            });
+        }
+
+        /**
+         * 安装运行时分流规则，全部成功后再发布已连接状态。
+         */
+        private void finish_connection_setup () {
+            if (this.state != TunnelState.CONNECTING) {
+                return;
+            }
+
+            if (!this.refresh_proxy_rules () || !this.nft_manager.apply_blacklist_filter ()) {
+                this.fail_current_attempt ("Failed to install runtime routing rules.");
+                return;
+            }
+
+            if (this.connect_timeout_id != 0) {
+                GLib.Source.remove (this.connect_timeout_id);
+                this.connect_timeout_id = 0;
+            }
+            this.reconnect_attempt = 0;
+            this.sync_process_monitor_targets ();
+            this.process_monitor.start ();
+            this.start_speed_monitor ();
+            this.change_state (TunnelState.CONNECTED);
+            this.emit_log ("Tunnel, DNS routing, and application rules are ready.");
+        }
+
+        /**
+         * 终止未完成的连接，并在子进程退出后进入自动重连。
+         */
+        private void fail_current_attempt (string message) {
+            if (this.runtime_ready_timeout_id != 0) {
+                GLib.Source.remove (this.runtime_ready_timeout_id);
+                this.runtime_ready_timeout_id = 0;
+            }
+            if (this.connect_timeout_id != 0) {
+                GLib.Source.remove (this.connect_timeout_id);
+                this.connect_timeout_id = 0;
+            }
+
+            this.emit_log (message);
+            this.change_state (TunnelState.ERROR);
+            this.cleanup_proxy_runtime ();
+            if (this.process != null) {
+                this.process.force_exit ();
+            } else {
+                this.schedule_auto_reconnect ();
             }
         }
 
@@ -372,6 +429,10 @@ namespace Sshuttle {
             if (this.connect_timeout_id != 0) {
                 GLib.Source.remove (this.connect_timeout_id);
                 this.connect_timeout_id = 0;
+            }
+            if (this.runtime_ready_timeout_id != 0) {
+                GLib.Source.remove (this.runtime_ready_timeout_id);
+                this.runtime_ready_timeout_id = 0;
             }
 
             if (this.cancellable != null) {
@@ -452,6 +513,10 @@ namespace Sshuttle {
         }
 
         public void cleanup_proxy_runtime () {
+            if (this.runtime_ready_timeout_id != 0) {
+                GLib.Source.remove (this.runtime_ready_timeout_id);
+                this.runtime_ready_timeout_id = 0;
+            }
             this.stop_speed_monitor ();
             this.dns_proxy.stop ();
             this.dns_proxy.remote_dns_port = 0;
@@ -752,7 +817,7 @@ namespace Sshuttle {
 
         private bool refresh_proxy_rules () {
             var p = this.active_profile;
-            bool ipv6 = (p != null) ? p.ipv6 : false;
+            bool ipv6 = p != null && this.profile_uses_ipv6_routing (p);
             string[] direct_networks = (p != null)
                 ? CommandBuilder.get_effective_excludes (p)
                 : new string[0];
@@ -764,23 +829,48 @@ namespace Sshuttle {
                 this.config_manager.get_domain_rules ()
             );
             if (!filter_ready) {
-                this.emit_log ("Failed to install per-app proxy rules. Disconnecting tunnel.");
-                this.disconnect_tunnel ();
+                this.emit_log ("Failed to install per-app proxy rules.");
                 return false;
             }
             return true;
         }
 
-        public void refresh_routing_configuration () {
-            if (this.state == TunnelState.CONNECTED && this.refresh_proxy_rules ()) {
-                this.dns_proxy.rebuild_routing_sets ();
+        /**
+         * 判断当前 Profile 是否会让 sshuttle 创建 IPv6 路由表。
+         */
+        private bool profile_uses_ipv6_routing (Profile profile) {
+            if (!profile.ipv6) {
+                return false;
             }
+            if (profile.routes.length == 0) {
+                return true;
+            }
+
+            foreach (var route in profile.routes) {
+                string value = route.strip ();
+                if (value == "0.0.0.0/0" || ":" in value) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        public void refresh_routing_configuration () {
+            if (this.state != TunnelState.CONNECTED) {
+                return;
+            }
+            if (!this.refresh_proxy_rules ()) {
+                this.fail_current_attempt ("Failed to refresh routing configuration.");
+                return;
+            }
+            this.dns_proxy.rebuild_routing_sets ();
         }
 
         private void on_app_rules_changed () {
             this.sync_process_monitor_targets ();
             if (this.state == TunnelState.CONNECTED) {
                 if (!this.refresh_proxy_rules ()) {
+                    this.fail_current_attempt ("Failed to refresh application routing rules.");
                     return;
                 }
                 this.process_monitor.start ();
