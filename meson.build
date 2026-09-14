@@ -29,14 +29,29 @@ dependencies = [
   dependency('glib-2.0'),
   dependency('gobject-2.0'),
   dependency('gio-2.0'),
+  dependency('gio-unix-2.0'),
   gtk_dep,
   adw_dep,
   json_dep,
   posix_dep,
 ]
 
+helper_path = get_option('prefix') / get_option('libexecdir') / 'sshuttle-gui-helper'
+
 subdir('data')
 subdir('src')
+runtime_tests = executable(
+  'runtime-tests',
+  'tests/runtime-tests.vala',
+  'tests/runtime-fakes.vala',
+  'src/helper-main.vala',
+  'src/services/runtime-client.vala',
+  'src/models/domain-rule.vala',
+  dependencies: dependencies,
+  vala_args: ['--main=runtime_test_main'],
+  install: false,
+)
+test('runtime-session', runtime_tests, timeout: 30)
 
 gnome.post_install(
   gtk_update_icon_cache: true,

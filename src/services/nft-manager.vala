@@ -14,6 +14,14 @@ namespace Sshuttle {
          * 检查 sshuttle 已创建当前端口对应的基础表和链。
          */
         public bool base_chains_exist (int port, bool ipv6_enabled) {
+            if (Posix.geteuid () != 0) {
+                try {
+                    return RuntimeClient.proxy != null && RuntimeClient.proxy.base_chains_exist (port, ipv6_enabled);
+                } catch (GLib.Error e) {
+                    warning ("Runtime firewall operation failed: %s", e.message);
+                    return false;
+                }
+            }
             string table_v4 = @"sshuttle-ipv4-$(port)";
             if (!this.chain_exists ("inet", table_v4, "output") ||
                 !this.chain_exists ("inet", table_v4, table_v4)) {
@@ -35,8 +43,16 @@ namespace Sshuttle {
          * 检查系统中是否已有其他 sshuttle nftables 会话。
          */
         public bool has_active_sshuttle_tables () {
+            if (Posix.geteuid () != 0) {
+                try {
+                    return RuntimeClient.proxy != null && RuntimeClient.proxy.has_active_tables ();
+                } catch (GLib.Error e) {
+                    warning ("Runtime firewall operation failed: %s", e.message);
+                    return false;
+                }
+            }
             try {
-                string[] argv = { "nft", "list", "tables" };
+                string[] argv = { Config.NFT_PATH, "list", "tables" };
                 string stdout_text;
                 string stderr_text;
                 int exit_status;
@@ -72,6 +88,21 @@ namespace Sshuttle {
         ) {
             this.active_port = port;
             this.active_ipv6 = ipv6_enabled;
+            if (Posix.geteuid () != 0) {
+                string[] patterns = {};
+                string[] actions = {};
+                foreach (var rule in routing_rules) {
+                    patterns += rule.pattern;
+                    actions += rule.action;
+                }
+                try {
+                    return RuntimeClient.proxy != null && RuntimeClient.proxy.apply_routing (
+                        port, ipv6_enabled, default_policy, direct_networks, patterns, actions);
+                } catch (GLib.Error e) {
+                    warning ("Routing rules failed: %s", e.message);
+                    return false;
+                }
+            }
             bool success = true;
 
             string table_v4 = @"sshuttle-ipv4-$(port)";
@@ -148,6 +179,16 @@ namespace Sshuttle {
          * 动态将解析出的多个 IP 批量添加到指定集合中
          */
         public void add_ips_to_set (string[] ips, string action) {
+            if (Posix.geteuid () != 0) {
+                try {
+                    if (RuntimeClient.proxy != null) {
+                        RuntimeClient.proxy.add_ips (ips, action);
+                    }
+                } catch (GLib.Error e) {
+                    warning ("Runtime firewall operation failed: %s", e.message);
+                }
+                return;
+            }
             if (this.active_port <= 0 || ips.length == 0) {
                 return;
             }
@@ -177,6 +218,16 @@ namespace Sshuttle {
         }
 
         public void flush_ip_sets () {
+            if (Posix.geteuid () != 0) {
+                try {
+                    if (RuntimeClient.proxy != null) {
+                        RuntimeClient.proxy.flush_ips ();
+                    }
+                } catch (GLib.Error e) {
+                    warning ("Runtime firewall operation failed: %s", e.message);
+                }
+                return;
+            }
             this.run_nft_command (@"nft flush set inet sshuttle-ipv4-$(this.active_port) proxy_ips");
             this.run_nft_command (@"nft flush set inet sshuttle-ipv4-$(this.active_port) direct_ips");
             if (this.active_ipv6) {
@@ -196,6 +247,9 @@ namespace Sshuttle {
          * 移除 cgroup 过滤规则
          */
         public void remove_cgroup_filter (int port, bool ipv6_enabled) {
+            if (Posix.geteuid () != 0) {
+                return;
+            }
             this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", "output", "15354");
             this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", "output", "15355");
             this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", "output", "15356");
@@ -278,7 +332,7 @@ namespace Sshuttle {
 
         private bool ensure_ip_set (string table_name, string set_name, string address_type) {
             try {
-                string[] argv = { "nft", "list", "set", "inet", table_name, set_name };
+                string[] argv = { Config.NFT_PATH, "list", "set", "inet", table_name, set_name };
                 string stdout_text;
                 string stderr_text;
                 int exit_status;
@@ -310,7 +364,7 @@ namespace Sshuttle {
          */
         private bool chain_exists (string family, string table_name, string chain_name) {
             try {
-                string[] argv = { "nft", "list", "chain", family, table_name, chain_name };
+                string[] argv = { Config.NFT_PATH, "list", "chain", family, table_name, chain_name };
                 string stdout_text;
                 string stderr_text;
                 int exit_status;
@@ -333,7 +387,7 @@ namespace Sshuttle {
 
         private void delete_matching_rules (string family, string table_name, string chain_name, string keyword) {
             try {
-                string[] argv = { "nft", "-a", "list", "chain", family, table_name, chain_name };
+                string[] argv = { Config.NFT_PATH, "-a", "list", "chain", family, table_name, chain_name };
                 string stdout_text;
                 string stderr_text;
                 int exit_status;
@@ -359,6 +413,14 @@ namespace Sshuttle {
          * 启用黑名单内核阻断规则：凡是在 sshuttle-block cgroup 的进程，所有外出网络在优先级 -100 直接 drop
          */
         public bool apply_blacklist_filter () {
+            if (Posix.geteuid () != 0) {
+                try {
+                    return RuntimeClient.proxy != null && RuntimeClient.proxy.apply_blacklist ();
+                } catch (GLib.Error e) {
+                    warning ("Runtime firewall operation failed: %s", e.message);
+                    return false;
+                }
+            }
             bool success = true;
             success = this.run_nft_command ("nft add table inet sshuttle-firewall") && success;
             success = this.run_nft_command ("nft 'add chain inet sshuttle-firewall output { type filter hook output priority -100; policy accept; }'") && success;
@@ -369,6 +431,9 @@ namespace Sshuttle {
         }
 
         public void cleanup_blacklist_filter () {
+            if (Posix.geteuid () != 0) {
+                return;
+            }
             this.run_nft_command ("nft delete table inet sshuttle-firewall");
         }
 
@@ -376,6 +441,16 @@ namespace Sshuttle {
          * 清理当前连接使用的 sshuttle nftables 表。
          */
         public void cleanup_all_sshuttle_tables (int port = 0) {
+            if (Posix.geteuid () != 0) {
+                try {
+                    if (RuntimeClient.proxy != null) {
+                        RuntimeClient.proxy.cleanup ();
+                    }
+                } catch (GLib.Error e) {
+                    warning ("Runtime firewall operation failed: %s", e.message);
+                }
+                return;
+            }
             this.cleanup_blacklist_filter ();
 
             if (port > 0) {
@@ -388,6 +463,7 @@ namespace Sshuttle {
             try {
                 string[] argv;
                 GLib.Shell.parse_argv (command, out argv);
+                argv[0] = Config.NFT_PATH;
                 string stdout_text;
                 string stderr_text;
                 int exit_status;

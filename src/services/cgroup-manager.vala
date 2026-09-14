@@ -32,6 +32,9 @@ namespace Sshuttle {
          * 创建代理专用的 cgroup v2 目录
          */
         public bool ensure_proxy_cgroup () {
+            if (Posix.geteuid () != 0) {
+                return this.remote_operation ("ensure-proxy", 0);
+            }
             if (this.is_cgroup_created ()) {
                 return true;
             }
@@ -55,6 +58,9 @@ namespace Sshuttle {
          * 将指定 PID 移入代理 cgroup
          */
         public bool move_pid_to_proxy (int pid) {
+            if (Posix.geteuid () != 0) {
+                return this.remote_operation ("proxy", pid);
+            }
             if (!this.ensure_proxy_cgroup ()) {
                 return false;
             }
@@ -83,6 +89,9 @@ namespace Sshuttle {
          * 将指定 PID 移回根 cgroup
          */
         public bool move_pid_to_default (int pid) {
+            if (Posix.geteuid () != 0) {
+                return this.remote_operation ("default", pid);
+            }
             string proc_dir = @"/proc/$(pid)";
             if (!GLib.FileUtils.test (proc_dir, GLib.FileTest.IS_DIR)) {
                 return false;
@@ -150,6 +159,9 @@ namespace Sshuttle {
          * 创建黑名单专用的 cgroup v2 目录
          */
         public bool ensure_block_cgroup () {
+            if (Posix.geteuid () != 0) {
+                return this.remote_operation ("ensure-block", 0);
+            }
             if (this.is_block_cgroup_created ()) {
                 return true;
             }
@@ -170,6 +182,9 @@ namespace Sshuttle {
          * 将指定 PID 移入黑名单 (禁止联网) cgroup
          */
         public bool move_pid_to_block (int pid) {
+            if (Posix.geteuid () != 0) {
+                return this.remote_operation ("block", pid);
+            }
             if (!this.ensure_block_cgroup ()) {
                 return false;
             }
@@ -229,6 +244,9 @@ namespace Sshuttle {
          * 确保系统无任何残余。
          */
         public void cleanup_and_destroy () {
+            if (Posix.geteuid () != 0) {
+                return;
+            }
             // 1. 清理代理 cgroup
             if (this.is_cgroup_created ()) {
                 int[] pids = this.get_proxy_pids ();
@@ -247,6 +265,18 @@ namespace Sshuttle {
                 Posix.rmdir (BLOCK_CGROUP_PATH);
             }
             this.original_cgroups.remove_all ();
+        }
+
+        private bool remote_operation (string operation, int pid) {
+            if (RuntimeClient.proxy == null) {
+                return false;
+            }
+            try {
+                return RuntimeClient.proxy.cgroup (operation, pid);
+            } catch (GLib.Error e) {
+                warning ("Cgroup operation %s failed for PID %d: %s", operation, pid, e.message);
+                return false;
+            }
         }
 
         private void remember_original_cgroup (int pid) {

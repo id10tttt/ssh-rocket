@@ -93,11 +93,6 @@ namespace Sshuttle {
             // 构造 SSH 命令，确保在后台非终端环境下能够自动接受新 Host Key，并支持读取当前普通用户的 known_hosts / agent
             var ssh_parts = new GLib.GenericArray<string> ();
 
-            string? auth_sock = GLib.Environment.get_variable ("SSH_AUTH_SOCK");
-            if (auth_sock != null && auth_sock != "" && profile.auth_type == "agent") {
-                ssh_parts.add (@"env SSH_AUTH_SOCK=$(auth_sock)");
-            }
-
             if (profile.auth_type == "password" && profile.password != "") {
                 ssh_parts.add ("sshpass -e ssh");
             } else {
@@ -106,29 +101,26 @@ namespace Sshuttle {
 
             ssh_parts.add ("-o StrictHostKeyChecking=accept-new");
 
-            string? sudo_user = GLib.Environment.get_variable ("SUDO_USER");
-            string home_dir = (sudo_user != null && sudo_user != "")
-                ? @"/home/$(sudo_user)"
-                : GLib.Environment.get_home_dir ();
+            string home_dir = GLib.Environment.get_home_dir ();
 
             string known_hosts = GLib.Path.build_filename (home_dir, ".ssh", "known_hosts");
             if (GLib.FileUtils.test (known_hosts, GLib.FileTest.EXISTS)) {
-                ssh_parts.add (@"-o UserKnownHostsFile=$(known_hosts)");
+                ssh_parts.add (@"-o UserKnownHostsFile=$(GLib.Shell.quote (known_hosts))");
             }
 
             string ssh_config = GLib.Path.build_filename (home_dir, ".ssh", "config");
             if (GLib.FileUtils.test (ssh_config, GLib.FileTest.EXISTS)) {
-                ssh_parts.add (@"-F $(ssh_config)");
+                ssh_parts.add (@"-F $(GLib.Shell.quote (ssh_config))");
             }
 
             if (profile.auth_type == "key" && profile.key_path.strip () != "") {
-                ssh_parts.add (@"-i $(profile.key_path.strip ())");
+                ssh_parts.add (@"-i $(GLib.Shell.quote (profile.key_path.strip ()))");
             } else if (profile.auth_type == "agent" || profile.auth_type == "") {
                 string[] default_keys = { "id_ed25519", "id_rsa", "id_ecdsa" };
                 foreach (var k in default_keys) {
                     string k_path = GLib.Path.build_filename (home_dir, ".ssh", k);
                     if (GLib.FileUtils.test (k_path, GLib.FileTest.EXISTS)) {
-                        ssh_parts.add (@"-o IdentityFile=$(k_path)");
+                        ssh_parts.add (@"-o IdentityFile=$(GLib.Shell.quote (k_path))");
                     }
                 }
             }

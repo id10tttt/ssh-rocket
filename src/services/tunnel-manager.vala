@@ -42,8 +42,9 @@ namespace Sshuttle {
         private const uint BASE_RECONNECT_DELAY = 2;
         private const uint MAX_RECONNECT_DELAY = 30;
 
-        private GLib.Subprocess? process = null;
-        private GLib.Cancellable? cancellable = null;
+        private bool process_running = false;
+        private Runtime? attached_runtime = null;
+        private uint connection_generation = 0;
         private uint connect_timeout_id = 0;
         private uint runtime_ready_timeout_id = 0;
         private const uint MAX_LOGS = 1000;
@@ -86,9 +87,16 @@ namespace Sshuttle {
             this.process_monitor = new ProcessMonitor (this.cgroup_manager);
             this.dns_proxy = new DnsProxy (this.config_manager, this.nft_manager);
 
-            // 只清理由本应用管理的共享过滤表与 cgroup，避免误删其他 sshuttle 会话。
-            this.nft_manager.cleanup_blacklist_filter ();
-            this.cgroup_manager.cleanup_and_destroy ();
+            RuntimeClient.get_default ().lost.connect (() => {
+                this.attached_runtime = null;
+                this.process_running = false;
+                this.cancel_reconnect ();
+                this.cleanup_proxy_runtime ();
+                if (this.state != TunnelState.DISCONNECTED) {
+                    this.change_state (TunnelState.ERROR);
+                    this.emit_log ("Administrator session ended. Connect again to authorize a new session.");
+                }
+            });
 
             this.config_manager.app_rules_changed.connect (this.on_app_rules_changed);
             this.config_manager.domain_rules_changed.connect (this.on_domain_rules_changed);
@@ -208,8 +216,39 @@ namespace Sshuttle {
         }
 
         public void start_tunnel (Profile profile) {
-            if (this.state == TunnelState.CONNECTING || this.state == TunnelState.CONNECTED) {
+            if (this.state == TunnelState.CONNECTING || this.state == TunnelState.CONNECTED ||
+                this.state == TunnelState.DISCONNECTING || this.process_running) {
                 return;
+            }
+            this.cancel_reconnect ();
+            this.change_state (TunnelState.CONNECTING);
+            this.connection_generation++;
+            this.start_authorized_tunnel.begin (profile, this.connection_generation);
+        }
+
+        private async void start_authorized_tunnel (Profile profile, uint generation) {
+            try {
+                yield RuntimeClient.ensure_started ();
+            } catch (GLib.Error e) {
+                if (generation == this.connection_generation) {
+                    this.emit_log (e.message);
+                    this.change_state (TunnelState.ERROR);
+                }
+                return;
+            }
+            if (generation != this.connection_generation || this.state != TunnelState.CONNECTING) {
+                return;
+            }
+            if (this.attached_runtime != RuntimeClient.proxy) {
+                this.attached_runtime = RuntimeClient.proxy;
+                this.attached_runtime.log_line.connect ((line) => {
+                    if (this.process_running) {
+                        this.on_log_line (line);
+                    }
+                });
+                this.attached_runtime.tunnel_exited.connect ((status, signal_number) => {
+                    this.on_process_exit (status, signal_number);
+                });
             }
 
             if (this.nft_manager.has_active_sshuttle_tables ()) {
@@ -224,6 +263,9 @@ namespace Sshuttle {
             this.change_state (TunnelState.CONNECTING);
 
             try {
+                if (!RuntimeClient.proxy.prepare ()) {
+                    throw new GLib.IOError.FAILED ("Failed to prepare privileged routing runtime");
+                }
                 // 探测空闲端口，避免与已有服务冲突
                 this.local_proxy_port = this.find_available_local_port (12300);
 
@@ -239,27 +281,10 @@ namespace Sshuttle {
                 string cmd_str = string.joinv (" ", argv);
                 this.emit_log (@"Starting tunnel: $(cmd_str)");
 
-                this.cancellable = new GLib.Cancellable ();
-                var launcher = new GLib.SubprocessLauncher (
-                    GLib.SubprocessFlags.STDOUT_PIPE | GLib.SubprocessFlags.STDERR_PIPE
-                );
-                if (profile.auth_type == "password" && profile.password != "") {
-                    launcher.setenv ("SSHPASS", profile.password, true);
-                }
-
-                this.process = launcher.spawnv (argv);
-
-                var stdout_pipe = this.process.get_stdout_pipe ();
-                var stderr_pipe = this.process.get_stderr_pipe ();
-
-                if (stdout_pipe != null) {
-                    this.read_stream_async.begin (stdout_pipe);
-                }
-                if (stderr_pipe != null) {
-                    this.read_stream_async.begin (stderr_pipe);
-                }
-
-                this.wait_process_async.begin ();
+                RuntimeClient.proxy.start_tunnel (argv,
+                    profile.auth_type == "password" ? profile.password : "",
+                    GLib.Environment.get_variable ("SSH_AUTH_SOCK") ?? "");
+                this.process_running = true;
 
                 this.connect_timeout_id = GLib.Timeout.add_seconds (25, () => {
                     this.connect_timeout_id = 0;
@@ -274,37 +299,6 @@ namespace Sshuttle {
                 this.cleanup_proxy_runtime ();
                 this.change_state (TunnelState.ERROR);
                 this.schedule_auto_reconnect ();
-            }
-        }
-
-        private async void wait_process_async () {
-            try {
-                if (this.process != null) {
-                    yield this.process.wait_async (this.cancellable);
-                }
-            } catch (GLib.Error e) {
-                this.emit_log (@"Process wait failed: $(e.message)");
-            }
-            this.on_process_exit ();
-        }
-
-        private async void read_stream_async (GLib.InputStream stream) {
-            var data_stream = new GLib.DataInputStream (stream);
-            try {
-                while (true) {
-                    size_t length;
-                    string? line = yield data_stream.read_line_utf8_async (
-                        GLib.Priority.DEFAULT,
-                        this.cancellable,
-                        out length
-                    );
-                    if (line == null) {
-                        break;
-                    }
-                    this.on_log_line (line);
-                }
-            } catch (GLib.Error e) {
-                // 读取取消或流关闭
             }
         }
 
@@ -410,9 +404,7 @@ namespace Sshuttle {
             this.emit_log (message);
             this.change_state (TunnelState.ERROR);
             this.cleanup_proxy_runtime ();
-            if (this.process != null) {
-                this.process.force_exit ();
-            } else {
+            if (!this.process_running) {
                 this.schedule_auto_reconnect ();
             }
         }
@@ -435,9 +427,7 @@ namespace Sshuttle {
                 this.runtime_ready_timeout_id = 0;
             }
 
-            if (this.cancellable != null) {
-                this.cancellable.cancel ();
-            }
+            this.connection_generation++;
 
             this.change_state (TunnelState.DISCONNECTING);
             this.emit_log ("Disconnecting tunnel...");
@@ -445,32 +435,26 @@ namespace Sshuttle {
             // 彻底清理运行时防火墙规则与 cgroup
             this.cleanup_proxy_runtime ();
 
-            if (this.process != null) {
-                this.process.send_signal (Posix.Signal.INT);
-                GLib.Timeout.add_seconds (3, () => {
-                    if (this.state == TunnelState.DISCONNECTING && this.process != null) {
-                        this.process.force_exit ();
-                    }
-                    return false;
-                });
-            } else {
+            if (!this.process_running) {
                 this.change_state (TunnelState.DISCONNECTED);
             }
         }
 
-        private void on_process_exit () {
+        private void on_process_exit (int exit_status, int signal_number) {
             if (this.connect_timeout_id != 0) {
                 GLib.Source.remove (this.connect_timeout_id);
                 this.connect_timeout_id = 0;
             }
 
-            int exit_status = 0;
-            if (this.process != null) {
-                exit_status = this.process.get_exit_status ();
+            if (!this.process_running) {
+                return;
+            }
+            this.process_running = false;
+            if (signal_number != 0) {
+                this.emit_log (@"Process terminated by signal $(signal_number)");
+            } else {
                 this.emit_log (@"Process exited with status $(exit_status)");
             }
-
-            this.process = null;
 
             if (this.state == TunnelState.DISCONNECTING) {
                 this.cleanup_proxy_runtime ();

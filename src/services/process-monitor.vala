@@ -29,7 +29,9 @@ namespace Sshuttle {
                     this.target_execs.insert (trimmed, true);
                 }
             }
-            this.scan_and_migrate ();
+            if (this.monitor_timer_id != 0) {
+                this.scan_and_migrate ();
+            }
         }
 
         public void set_block_targets (string[] block_names) {
@@ -40,7 +42,9 @@ namespace Sshuttle {
                     this.block_execs.insert (trimmed, true);
                 }
             }
-            this.scan_and_migrate ();
+            if (this.monitor_timer_id != 0) {
+                this.scan_and_migrate ();
+            }
         }
 
         public void start () {
@@ -48,11 +52,11 @@ namespace Sshuttle {
                 return;
             }
 
-            this.scan_and_migrate ();
             this.monitor_timer_id = GLib.Timeout.add_seconds (MONITOR_INTERVAL_SEC, () => {
                 this.scan_and_migrate ();
                 return true;
             });
+            this.scan_and_migrate ();
         }
 
         public void stop () {
@@ -60,24 +64,17 @@ namespace Sshuttle {
                 GLib.Source.remove (this.monitor_timer_id);
                 this.monitor_timer_id = 0;
             }
-            this.cgroup_manager.cleanup_and_destroy ();
         }
 
         public void force_sync () {
-            this.scan_and_migrate ();
+            if (this.monitor_timer_id != 0) {
+                this.scan_and_migrate ();
+            }
         }
 
         private void scan_and_migrate () {
-            if (this.target_execs.size () == 0 && this.block_execs.size () == 0) {
-                this.cgroup_manager.cleanup_and_destroy ();
+            if (this.monitor_timer_id == 0) {
                 return;
-            }
-
-            if (this.target_execs.size () > 0) {
-                this.cgroup_manager.ensure_proxy_cgroup ();
-            }
-            if (this.block_execs.size () > 0) {
-                this.cgroup_manager.ensure_block_cgroup ();
             }
 
             int[] current_proxy_pids = this.cgroup_manager.get_proxy_pids ();
@@ -106,7 +103,7 @@ namespace Sshuttle {
                     }
 
                     string proc_exec = this.get_process_name (pid);
-                    if (proc_exec == "") {
+                    if (proc_exec == "" && !proxy_pids_set.contains (pid) && !block_pids_set.contains (pid)) {
                         continue;
                     }
 
@@ -116,13 +113,15 @@ namespace Sshuttle {
                     // 黑名单优先级最高：若被黑名单则移入 block cgroup
                     if (should_block) {
                         if (!block_pids_set.contains (pid)) {
-                            this.cgroup_manager.move_pid_to_block (pid);
-                            this.process_migrated (proc_exec, pid, "block");
+                            if (this.cgroup_manager.move_pid_to_block (pid)) {
+                                this.process_migrated (proc_exec, pid, "block");
+                            }
                         }
                     } else if (should_proxy) {
                         if (!proxy_pids_set.contains (pid)) {
-                            this.cgroup_manager.move_pid_to_proxy (pid);
-                            this.process_migrated (proc_exec, pid, "proxy");
+                            if (this.cgroup_manager.move_pid_to_proxy (pid)) {
+                                this.process_migrated (proc_exec, pid, "proxy");
+                            }
                         }
                     } else {
                         if (proxy_pids_set.contains (pid) || block_pids_set.contains (pid)) {
