@@ -142,6 +142,7 @@ namespace Sshuttle {
 
             // 主页面使用左侧导航，HeaderBar 只保留当前页面操作。
             var header_bar = new Adw.HeaderBar ();
+            header_bar.set_title_widget (new Gtk.Box (Gtk.Orientation.HORIZONTAL, 0));
 
             // 右侧操作按钮
             var add_btn = new Gtk.Button.from_icon_name ("list-add-symbolic");
