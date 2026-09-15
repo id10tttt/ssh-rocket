@@ -273,12 +273,8 @@ namespace Sshuttle {
                 return;
             }
 
-            // 检查当前节点是否启用了 IPv6 代理
-            bool ipv6_enabled = false;
-            var active_profile = this.config_manager.get_active_profile ();
-            if (active_profile != null) {
-                ipv6_enabled = active_profile.ipv6;
-            }
+            var settings = this.config_manager.get_network_settings ();
+            bool ipv6_enabled = settings.ipv6;
 
             // 当域名走代理时，过滤 AAAA (IPv6, 28) 与 HTTPS (Type 65, RFC 9460)：
             // 1) AAAA: 若未开启 IPv6 代理，返回 NOERROR 空响应，促使浏览器秒级切换 IPv4
@@ -298,7 +294,7 @@ namespace Sshuttle {
                 // 代理规则只允许经 SSH 的远端 TCP DNS 查询，避免失败时泄漏到本地网络。
                 if (this.remote_dns_port > 0) {
                     resp_packet = query_tcp (this.remote_dns_port, query_packet);
-                } else if (active_profile != null && !active_profile.dns) {
+                } else if (!settings.dns) {
                     // 配置明确关闭远端 DNS 时保留本地解析，否则域名规则与应用联网均无法工作。
                     resp_packet = this.query_udp ("127.0.0.53", 53, query_packet, forward_port);
                     if (resp_packet == null) {

@@ -16,11 +16,11 @@ namespace Sshuttle {
             Object (orientation: Gtk.Orientation.VERTICAL, spacing: 0);
             this.tunnel_manager = tunnel_manager;
 
-            // Tab 切换条
             var switcher_box = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 0);
-            switcher_box.halign = Gtk.Align.CENTER;
-            switcher_box.margin_top = 8;
-            switcher_box.margin_bottom = 8;
+            switcher_box.margin_start = 18;
+            switcher_box.margin_end = 18;
+            switcher_box.margin_top = 12;
+            switcher_box.margin_bottom = 12;
 
             this.stack = new Adw.ViewStack ();
             this.stack.vexpand = true;
@@ -28,35 +28,37 @@ namespace Sshuttle {
             var switcher = new Adw.ViewSwitcher ();
             switcher.stack = this.stack;
             switcher.policy = Adw.ViewSwitcherPolicy.WIDE;
+            switcher.hexpand = true;
             switcher_box.append (switcher);
             this.append (switcher_box);
+            this.append (new Gtk.Separator (Gtk.Orientation.HORIZONTAL));
             this.append (this.stack);
 
             // Tab 1: 软件日志 (App Logs)
             var app_tab = new Gtk.Box (Gtk.Orientation.VERTICAL, 0);
             this.setup_app_logs_tab (app_tab);
             var app_page = this.stack.add_named (app_tab, "app_logs");
-            app_page.title = "App Logs";
+            app_page.title = "Applications";
             app_page.icon_name = "application-x-executable-symbolic";
 
             // Tab 2: 代理日志 (Proxy Logs)
             var proxy_tab = new Gtk.Box (Gtk.Orientation.VERTICAL, 0);
             this.setup_proxy_logs_tab (proxy_tab);
             var proxy_page = this.stack.add_named (proxy_tab, "proxy_logs");
-            proxy_page.title = "Proxy Logs";
+            proxy_page.title = "Tunnel";
             proxy_page.icon_name = "ssh-rocket-symbolic";
         }
 
         private void setup_app_logs_tab (Gtk.Box container) {
             // 操作栏：筛选下拉菜单 + 复制 + 清空
             var action_bar = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 8);
-            action_bar.margin_start = 16;
-            action_bar.margin_end = 16;
-            action_bar.margin_top = 4;
-            action_bar.margin_bottom = 8;
+            action_bar.margin_start = 18;
+            action_bar.margin_end = 18;
+            action_bar.margin_top = 12;
+            action_bar.margin_bottom = 12;
             container.append (action_bar);
 
-            var filter_label = new Gtk.Label ("Filter App:");
+            var filter_label = new Gtk.Label ("Application");
             filter_label.add_css_class ("dim-label");
             action_bar.append (filter_label);
 
@@ -81,8 +83,7 @@ namespace Sshuttle {
             clear_btn.clicked.connect (this.on_clear_app_logs);
             action_bar.append (clear_btn);
 
-            var sep = new Gtk.Separator (Gtk.Orientation.HORIZONTAL);
-            container.append (sep);
+            container.append (new Gtk.Separator (Gtk.Orientation.HORIZONTAL));
 
             // 滚动文本区域
             var scrolled = new Gtk.ScrolledWindow ();
@@ -121,10 +122,10 @@ namespace Sshuttle {
 
         private void setup_proxy_logs_tab (Gtk.Box container) {
             var action_bar = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 8);
-            action_bar.margin_start = 16;
-            action_bar.margin_end = 16;
-            action_bar.margin_top = 4;
-            action_bar.margin_bottom = 8;
+            action_bar.margin_start = 18;
+            action_bar.margin_end = 18;
+            action_bar.margin_top = 12;
+            action_bar.margin_bottom = 12;
             container.append (action_bar);
 
             var spacer = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 0);
@@ -143,8 +144,11 @@ namespace Sshuttle {
             clear_btn.clicked.connect (this.on_clear_proxy_logs);
             action_bar.append (clear_btn);
 
-            var sep = new Gtk.Separator (Gtk.Orientation.HORIZONTAL);
-            container.append (sep);
+            var log_type = new Gtk.Label ("SSH and routing output");
+            log_type.add_css_class ("dim-label");
+            action_bar.prepend (log_type);
+
+            container.append (new Gtk.Separator (Gtk.Orientation.HORIZONTAL));
 
             var scrolled = new Gtk.ScrolledWindow ();
             scrolled.vexpand = true;

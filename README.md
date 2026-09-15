@@ -40,7 +40,8 @@ sudo dnf install meson ninja-build gcc vala gtk4-devel libadwaita-devel json-gli
 首次安装或更新后，以普通桌面用户执行：
 
 ```bash
-./run-gui.sh --install
+./build.sh
+./install.sh
 ```
 
 脚本以普通用户编译，通过 sudo 安装程序、特权 helper、Polkit 策略、图标和桌面入口。程序默认安装到 `/usr/local`。更新 helper 代码后需要重新安装。
@@ -51,7 +52,7 @@ sudo dnf install meson ninja-build gcc vala gtk4-devel libadwaita-devel json-gli
 /usr/local/bin/ssh-rocket
 ```
 
-开发运行：
+运行已编译的本地版本：
 
 ```bash
 ./run-gui.sh

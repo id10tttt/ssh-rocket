@@ -49,8 +49,9 @@ int main (string[] args) {
         var profile = new Sshuttle.Profile ();
         profile.host = args[2];
         profile.username = "debian";
-        profile.ipv6 = true;
-        var built = Sshuttle.CommandBuilder.build_argv (profile, 12300);
+        var settings = new Sshuttle.NetworkSettings ();
+        settings.ipv6 = true;
+        var built = Sshuttle.CommandBuilder.build_argv (profile, settings, 12300);
         string ssh_command = "";
         for (int i = 0; i < built.length - 1; i++) if (built[i] == "-e") ssh_command = built[i + 1];
         string home = GLib.Environment.get_variable ("ROCKET_TEST_HOME");

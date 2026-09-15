@@ -2,7 +2,7 @@ namespace Sshuttle {
 
     public class CommandBuilder : Object {
 
-        public static string[] get_effective_excludes (Profile profile) {
+        public static string[] get_effective_excludes (Profile profile, NetworkSettings settings) {
             var excludes = new GLib.GenericArray<string> ();
             var exclude_set = new GLib.HashTable<string, bool> (GLib.str_hash, GLib.str_equal);
 
@@ -12,7 +12,7 @@ namespace Sshuttle {
                 exclude_set.insert (host, true);
             }
 
-            foreach (var value in profile.exclude) {
+            foreach (var value in settings.exclude) {
                 string network = value.strip ();
                 if (network != "" && !exclude_set.contains (network)) {
                     excludes.add (network);
@@ -20,9 +20,9 @@ namespace Sshuttle {
                 }
             }
 
-            bool has_global_v4_route = profile.routes.length == 0;
-            bool has_global_v6_route = profile.routes.length == 0;
-            foreach (var value in profile.routes) {
+            bool has_global_v4_route = settings.routes.length == 0;
+            bool has_global_v6_route = settings.routes.length == 0;
+            foreach (var value in settings.routes) {
                 string route = value.strip ();
                 if (route == "0.0.0.0/0") {
                     has_global_v4_route = true;
@@ -39,7 +39,7 @@ namespace Sshuttle {
                     }
                 }
             }
-            if (profile.ipv6 && (has_global_v4_route || has_global_v6_route)) {
+            if (settings.ipv6 && (has_global_v4_route || has_global_v6_route)) {
                 string[] local_networks_v6 = { "::1/128", "fc00::/7", "fe80::/10" };
                 foreach (var network in local_networks_v6) {
                     if (!exclude_set.contains (network)) {
@@ -56,7 +56,11 @@ namespace Sshuttle {
             return result;
         }
 
-        public static string[] build_argv (Profile profile, int local_port = 12300) throws GLib.Error {
+        public static string[] build_argv (
+            Profile profile,
+            NetworkSettings settings,
+            int local_port = 12300
+        ) throws GLib.Error {
             if (profile.host.strip () == "") {
                 throw new GLib.IOError.INVALID_ARGUMENT ("Host cannot be empty");
             }
@@ -71,15 +75,15 @@ namespace Sshuttle {
 
             // SOCKS 和 DNS 转发使用相邻端口，连接前由 TunnelManager 一并检查占用。
             argv.add ("-l");
-            argv.add (profile.ipv6
+            argv.add (settings.ipv6
                 ? @"127.0.0.1:$(local_port),[::1]:$(local_port)"
                 : @"127.0.0.1:$(local_port)");
 
-            if (profile.dns) {
+            if (settings.dns) {
                 argv.add ("--dns");
             }
 
-            if (!profile.ipv6) {
+            if (!settings.ipv6) {
                 argv.add ("--disable-ipv6");
             }
 
@@ -97,7 +101,7 @@ namespace Sshuttle {
             ssh_parts.add ("-o StrictHostKeyChecking=accept-new -o ConnectTimeout=15");
             ssh_parts.add (profile.auth_type == "password" ? "-o NumberOfPasswordPrompts=1" : "-o BatchMode=yes");
             ssh_parts.add (@"-D 127.0.0.1:$(local_port)");
-            if (profile.dns) {
+            if (settings.dns) {
                 ssh_parts.add (@"-L 127.0.0.1:$(local_port + 1):1.1.1.1:53");
             }
             if (profile.port != 0 && profile.port != 22) {
@@ -106,7 +110,7 @@ namespace Sshuttle {
             if (profile.username.strip () != "") {
                 ssh_parts.add (@"-l $(GLib.Shell.quote (profile.username))");
             }
-            if (profile.verbosity == "very_verbose") {
+            if (settings.verbosity == "very_verbose") {
                 ssh_parts.add ("-vv");
             }
 
@@ -145,20 +149,20 @@ namespace Sshuttle {
             argv.add (profile.host.strip ());
 
             // 自动排除 SSH 服务器、用户配置项与全局路由下的本地网段。
-            foreach (var network in get_effective_excludes (profile)) {
+            foreach (var network in get_effective_excludes (profile, settings)) {
                 argv.add ("-x");
                 argv.add (network);
             }
 
-            if (profile.routes.length == 0) {
+            if (settings.routes.length == 0) {
                 argv.add ("0.0.0.0/0");
-                if (profile.ipv6) {
+                if (settings.ipv6) {
                     argv.add ("::/0");
                 }
             } else {
                 bool has_global_v4_route = false;
                 bool has_global_v6_route = false;
-                foreach (var r in profile.routes) {
+                foreach (var r in settings.routes) {
                     string r_trimmed = r.strip ();
                     if (r_trimmed != "") {
                         argv.add (r_trimmed);
@@ -166,7 +170,7 @@ namespace Sshuttle {
                         has_global_v6_route = has_global_v6_route || r_trimmed == "::/0";
                     }
                 }
-                if (profile.ipv6 && has_global_v4_route && !has_global_v6_route) {
+                if (settings.ipv6 && has_global_v4_route && !has_global_v6_route) {
                     argv.add ("::/0");
                 }
             }

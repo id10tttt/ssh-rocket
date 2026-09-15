@@ -85,9 +85,6 @@ namespace Sshuttle {
             });
             this.add_action (new_profile_action);
 
-            var reset_settings_action = new GLib.SimpleAction ("reset-settings", null);
-            reset_settings_action.activate.connect (this.on_reset_settings);
-            this.add_action (reset_settings_action);
         }
 
         private void build_ui () {
@@ -119,10 +116,12 @@ namespace Sshuttle {
 
             var connect_nav_row = this.create_navigation_row ("ssh-rocket-symbolic", "Connect");
             var rules_nav_row = this.create_navigation_row ("preferences-system-network-symbolic", "Rules");
-            var log_nav_row = this.create_navigation_row ("utilities-terminal-symbolic", "Log");
+            var log_nav_row = this.create_navigation_row ("utilities-terminal-symbolic", "Logs");
+            var settings_nav_row = this.create_navigation_row ("preferences-system-symbolic", "Settings");
             navigation_list.append (connect_nav_row);
             navigation_list.append (rules_nav_row);
             navigation_list.append (log_nav_row);
+            navigation_list.append (settings_nav_row);
             navigation_list.row_selected.connect ((row) => {
                 if (row == connect_nav_row) {
                     this.view_stack.visible_child_name = "connect";
@@ -130,6 +129,8 @@ namespace Sshuttle {
                     this.view_stack.visible_child_name = "rules";
                 } else if (row == log_nav_row) {
                     this.view_stack.visible_child_name = "log";
+                } else if (row == settings_nav_row) {
+                    this.view_stack.visible_child_name = "settings";
                 }
             });
             sidebar_box.append (navigation_list);
@@ -142,7 +143,9 @@ namespace Sshuttle {
 
             // 主页面使用左侧导航，HeaderBar 只保留当前页面操作。
             var header_bar = new Adw.HeaderBar ();
-            header_bar.set_title_widget (new Gtk.Box (Gtk.Orientation.HORIZONTAL, 0));
+            var page_title = new Gtk.Label ("Connect");
+            page_title.add_css_class ("title-3");
+            header_bar.set_title_widget (page_title);
 
             // 右侧操作按钮
             var add_btn = new Gtk.Button.from_icon_name ("list-add-symbolic");
@@ -157,7 +160,6 @@ namespace Sshuttle {
             settings_btn.add_css_class ("flat");
 
             var menu = new GLib.Menu ();
-            menu.append ("Reset Rules and Settings…", "win.reset-settings");
             menu.append ("About SSH Rocket", "app.about");
             menu.append ("Quit", "app.quit");
             settings_btn.menu_model = menu;
@@ -179,13 +181,20 @@ namespace Sshuttle {
             var rules_vs_page = this.view_stack.add_titled (rules_view, "rules", "Rules");
             rules_vs_page.icon_name = "preferences-system-network-symbolic";
 
-            // Page 3: Log
+            // Page 3: Logs
             var log_view = new LogView (this.tunnel_manager);
-            var log_vs_page = this.view_stack.add_titled (log_view, "log", "Log");
+            var log_vs_page = this.view_stack.add_titled (log_view, "log", "Logs");
             log_vs_page.icon_name = "utilities-terminal-symbolic";
+
+            // Page 4: Settings
+            var settings_view = new SettingsView (this.config_manager);
+            var settings_vs_page = this.view_stack.add_titled (settings_view, "settings", "Settings");
+            settings_vs_page.icon_name = "preferences-system-symbolic";
 
             this.view_stack.notify["visible-child-name"].connect (() => {
                 add_btn.visible = (this.view_stack.visible_child_name == "connect");
+                var visible_page = this.view_stack.get_page (this.view_stack.visible_child);
+                page_title.label = visible_page.title;
             });
 
             navigation_list.select_row (connect_nav_row);
@@ -238,27 +247,6 @@ namespace Sshuttle {
 
             row.set_child (content);
             return row;
-        }
-
-        /**
-         * 确认后重置规则和统计设置，连接 Profile 保持不变。
-         */
-        private void on_reset_settings () {
-            var dialog = new Adw.AlertDialog (
-                "Reset Rules and Settings?",
-                "Application rules, domain rules, blacklist entries, and traffic statistics will be cleared. Connection profiles will be kept."
-            );
-            dialog.add_response ("cancel", "Cancel");
-            dialog.add_response ("reset", "Reset");
-            dialog.set_response_appearance ("reset", Adw.ResponseAppearance.DESTRUCTIVE);
-            dialog.default_response = "cancel";
-            dialog.close_response = "cancel";
-            dialog.response.connect ((response) => {
-                if (response == "reset") {
-                    this.config_manager.reset_rules_and_settings ();
-                }
-            });
-            dialog.present (this);
         }
 
         private void update_status_display () {

@@ -86,6 +86,13 @@ namespace Sshuttle {
 
             if (this.window == null) {
                 this.window = new MainWindow (this, this.tunnel_manager);
+                if (this.config_manager.get_network_settings ().auto_connect &&
+                    this.config_manager.get_active_profile () != null) {
+                    GLib.Idle.add (() => {
+                        this.tunnel_manager.connect_active ();
+                        return GLib.Source.REMOVE;
+                    });
+                }
             }
             this.window.show_and_present ();
         }

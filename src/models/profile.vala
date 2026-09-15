@@ -47,20 +47,20 @@ namespace Sshuttle {
         public string auth_type { get; set; default = "agent"; } // "agent", "key", "password"
         public string key_path { get; set; default = ""; }
         public string password { get; set; default = ""; }
-        public string[] routes { get; set; }
-        public string[] exclude { get; set; }
-        public bool dns { get; set; default = true; }
-        public bool ipv6 { get; set; default = false; }
-        public string method { get; set; default = "nft"; }
-        public string verbosity { get; set; default = "normal"; }
-        public bool auto_connect { get; set; default = false; }
+        // 仅用于将旧版 Profile 中的网络配置迁移到全局设置，不再写入 Profile。
+        public string[] legacy_routes { get; set; }
+        public string[] legacy_exclude { get; set; }
+        public bool legacy_dns { get; set; default = true; }
+        public bool legacy_ipv6 { get; set; default = false; }
+        public string legacy_verbosity { get; set; default = "normal"; }
+        public bool legacy_auto_connect { get; set; default = false; }
 
         public Profile () {
             if (this.id == "") {
                 this.id = GLib.Uuid.string_random ();
             }
-            this.routes = new string[] { "0.0.0.0/0" };
-            this.exclude = new string[] {};
+            this.legacy_routes = new string[] { "0.0.0.0/0" };
+            this.legacy_exclude = new string[] {};
         }
 
         public string get_ssh_target () {
@@ -88,27 +88,7 @@ namespace Sshuttle {
         }
 
         public string get_summary () {
-            var parts = new GLib.GenericArray<string> ();
-            if (this.routes.length > 0) {
-                parts.add (string.joinv (", ", this.routes));
-            }
-            if (this.dns) {
-                parts.add ("DNS");
-            }
-            if (this.ipv6) {
-                parts.add ("IPv6");
-            }
-            if (this.exclude.length > 0) {
-                parts.add (@"Exclude $(this.exclude.length)");
-            }
-            if (parts.length == 0) {
-                return "No routes";
-            }
-            var arr = new string[parts.length];
-            for (uint i = 0; i < parts.length; i++) {
-                arr[i] = parts[i];
-            }
-            return string.joinv (" · ", arr);
+            return @"$(this.get_ssh_target ()) · $(this.get_login_mode_label ())";
         }
 
         public Json.Node serialize () {
@@ -138,35 +118,6 @@ namespace Sshuttle {
 
             builder.set_member_name ("password");
             builder.add_string_value (this.password);
-
-            builder.set_member_name ("dns");
-            builder.add_boolean_value (this.dns);
-
-            builder.set_member_name ("ipv6");
-            builder.add_boolean_value (this.ipv6);
-
-            builder.set_member_name ("method");
-            builder.add_string_value (this.method);
-
-            builder.set_member_name ("verbosity");
-            builder.add_string_value (this.verbosity);
-
-            builder.set_member_name ("auto_connect");
-            builder.add_boolean_value (this.auto_connect);
-
-            builder.set_member_name ("routes");
-            builder.begin_array ();
-            foreach (var r in this.routes) {
-                builder.add_string_value (r);
-            }
-            builder.end_array ();
-
-            builder.set_member_name ("exclude");
-            builder.begin_array ();
-            foreach (var exc in this.exclude) {
-                builder.add_string_value (exc);
-            }
-            builder.end_array ();
 
             builder.end_object ();
             return builder.get_root ();
@@ -200,20 +151,16 @@ namespace Sshuttle {
                 p.password = obj.get_string_member ("password");
             }
             if (obj.has_member ("dns")) {
-                p.dns = obj.get_boolean_member ("dns");
+                p.legacy_dns = obj.get_boolean_member ("dns");
             }
             if (obj.has_member ("ipv6")) {
-                p.ipv6 = obj.get_boolean_member ("ipv6");
-            }
-            if (obj.has_member ("method")) {
-                // 应用级分流依赖 nftables，旧配置中的 method 仅作兼容读取。
-                p.method = "nft";
+                p.legacy_ipv6 = obj.get_boolean_member ("ipv6");
             }
             if (obj.has_member ("verbosity")) {
-                p.verbosity = obj.get_string_member ("verbosity");
+                p.legacy_verbosity = obj.get_string_member ("verbosity");
             }
             if (obj.has_member ("auto_connect")) {
-                p.auto_connect = obj.get_boolean_member ("auto_connect");
+                p.legacy_auto_connect = obj.get_boolean_member ("auto_connect");
             }
 
             if (obj.has_member ("routes")) {
@@ -226,7 +173,7 @@ namespace Sshuttle {
                 for (uint i = 0; i < r_list.length; i++) {
                     r_arr[i] = r_list[i];
                 }
-                p.routes = r_arr;
+                p.legacy_routes = r_arr;
             }
 
             if (obj.has_member ("exclude")) {
@@ -239,10 +186,24 @@ namespace Sshuttle {
                 for (uint i = 0; i < exc_list.length; i++) {
                     exc_arr[i] = exc_list[i];
                 }
-                p.exclude = exc_arr;
+                p.legacy_exclude = exc_arr;
             }
 
             return p;
+        }
+    }
+
+    public class NetworkSettings : Object {
+        public string[] routes { get; set; }
+        public string[] exclude { get; set; }
+        public bool dns { get; set; default = true; }
+        public bool ipv6 { get; set; default = false; }
+        public string verbosity { get; set; default = "normal"; }
+        public bool auto_connect { get; set; default = false; }
+
+        public NetworkSettings () {
+            this.routes = new string[] { "0.0.0.0/0" };
+            this.exclude = new string[] {};
         }
     }
 }

@@ -16,36 +16,14 @@ namespace Sshuttle {
         private Adw.EntryRow key_row;
         private Adw.PasswordEntryRow password_row;
 
-        private Adw.EntryRow routes_row;
-        private Adw.SwitchRow dns_row;
-        private Adw.SwitchRow ipv6_row;
-
-        private Adw.PreferencesGroup exclude_group;
-        private Gtk.Box exclude_rows_box;
-        private Adw.EntryRow new_exclude_entry;
-        private GLib.GenericArray<string> excludes;
-
-        private Adw.ComboRow verbosity_row;
-        private Adw.SwitchRow auto_connect_row;
-
         private static string[] AUTH_TYPES = { "agent", "key", "password" };
         private static string[] AUTH_LABELS = { "SSH Agent / Default", "Private Key File", "Password" };
-
-        private static string[] VERBOSITIES = { "normal", "verbose", "very_verbose" };
-        private static string[] VERBOSITY_LABELS = { "Normal", "Verbose", "Very Verbose" };
 
         public ProfileEditorWindow (Profile? profile = null) {
             this.original_profile = profile;
             this.is_new = (profile == null);
             this.content_width = 460;
-            this.content_height = 660;
-
-            this.excludes = new GLib.GenericArray<string> ();
-            if (profile != null) {
-                foreach (var exc in profile.exclude) {
-                    this.excludes.add (exc);
-                }
-            }
+            this.content_height = 520;
 
             this.title = this.is_new ? "New Profile" : "Edit Profile";
 
@@ -113,72 +91,6 @@ namespace Sshuttle {
             this.auth_row.notify["selected"].connect (this.update_auth_fields_visibility);
             this.update_auth_fields_visibility ();
 
-            // 路由分组
-            var routing_group = new Adw.PreferencesGroup ();
-            routing_group.title = "Routing";
-            page.add (routing_group);
-
-            this.routes_row = new Adw.EntryRow ();
-            this.routes_row.title = "Remote Routes";
-            string routes_text = (profile != null && profile.routes.length > 0)
-                ? string.joinv (", ", profile.routes)
-                : "0.0.0.0/0";
-            this.routes_row.text = routes_text;
-            routing_group.add (this.routes_row);
-
-            this.dns_row = new Adw.SwitchRow ();
-            this.dns_row.title = "DNS Forwarding";
-            this.dns_row.active = (profile != null) ? profile.dns : true;
-            routing_group.add (this.dns_row);
-
-            this.ipv6_row = new Adw.SwitchRow ();
-            this.ipv6_row.title = "IPv6";
-            this.ipv6_row.active = (profile != null) ? profile.ipv6 : false;
-            routing_group.add (this.ipv6_row);
-
-            // 排除网络分组
-            this.exclude_group = new Adw.PreferencesGroup ();
-            this.exclude_group.title = "Exclude Networks";
-            page.add (this.exclude_group);
-
-            this.exclude_rows_box = new Gtk.Box (Gtk.Orientation.VERTICAL, 6);
-            this.exclude_group.add (this.exclude_rows_box);
-
-            this.new_exclude_entry = new Adw.EntryRow ();
-            this.new_exclude_entry.title = "Add Network";
-            var add_btn = new Gtk.Button.from_icon_name ("list-add-symbolic");
-            add_btn.add_css_class ("flat");
-            add_btn.valign = Gtk.Align.CENTER;
-            add_btn.clicked.connect (this.on_add_exclude);
-            this.new_exclude_entry.add_suffix (add_btn);
-            this.new_exclude_entry.entry_activated.connect (this.on_add_exclude);
-            this.exclude_group.add (this.new_exclude_entry);
-
-            this.refresh_excludes ();
-
-            // 高级选项
-            var adv_group = new Adw.PreferencesGroup ();
-            adv_group.title = "Advanced";
-            page.add (adv_group);
-
-            this.verbosity_row = new Adw.ComboRow ();
-            this.verbosity_row.title = "Verbosity";
-            var verb_model = Native.string_list (VERBOSITY_LABELS);
-            this.verbosity_row.model = verb_model;
-            string cur_verb = (profile != null) ? profile.verbosity : "normal";
-            for (uint i = 0; i < VERBOSITIES.length; i++) {
-                if (VERBOSITIES[i] == cur_verb) {
-                    this.verbosity_row.selected = i;
-                    break;
-                }
-            }
-            adv_group.add (this.verbosity_row);
-
-            this.auto_connect_row = new Adw.SwitchRow ();
-            this.auto_connect_row.title = "Auto Connect";
-            this.auto_connect_row.active = (profile != null) ? profile.auto_connect : false;
-            adv_group.add (this.auto_connect_row);
-
             // 操作按钮
             var actions_group = new Adw.PreferencesGroup ();
             page.add (actions_group);
@@ -225,54 +137,6 @@ namespace Sshuttle {
             });
         }
 
-        private void refresh_excludes () {
-            var child = this.exclude_rows_box.get_first_child ();
-            while (child != null) {
-                var next = child.get_next_sibling ();
-                this.exclude_rows_box.remove (child);
-                child = next;
-            }
-
-            for (uint i = 0; i < this.excludes.length; i++) {
-                string item = this.excludes[i];
-                var row = new Adw.ActionRow ();
-                row.title = item;
-
-                var del_btn = new Gtk.Button.from_icon_name ("user-trash-symbolic");
-                del_btn.add_css_class ("flat");
-                del_btn.valign = Gtk.Align.CENTER;
-                del_btn.clicked.connect (() => {
-                    for (uint j = 0; j < this.excludes.length; j++) {
-                        if (this.excludes[j] == item) {
-                            this.excludes.remove_index (j);
-                            break;
-                        }
-                    }
-                    this.refresh_excludes ();
-                });
-                row.add_suffix (del_btn);
-                this.exclude_rows_box.append (row);
-            }
-        }
-
-        private void on_add_exclude () {
-            string text = this.new_exclude_entry.text.strip ();
-            if (text != "") {
-                bool exists = false;
-                for (uint i = 0; i < this.excludes.length; i++) {
-                    if (this.excludes[i] == text) {
-                        exists = true;
-                        break;
-                    }
-                }
-                if (!exists) {
-                    this.excludes.add (text);
-                    this.new_exclude_entry.text = "";
-                    this.refresh_excludes ();
-                }
-            }
-        }
-
         private void on_save_clicked () {
             if (this.host_row.text.strip () == "") {
                 this.show_validation_error ("Host is required.");
@@ -304,73 +168,8 @@ namespace Sshuttle {
             p.key_path = this.key_row.text.strip ();
             p.password = this.password_row.text;
 
-            string raw_routes = this.routes_row.text.strip ();
-            string[] split_routes = raw_routes.split (",");
-            var r_list = new GLib.GenericArray<string> ();
-            foreach (var r in split_routes) {
-                string trimmed = r.strip ();
-                if (trimmed != "") {
-                    if (!this.is_valid_network (trimmed)) {
-                        this.show_validation_error (@"Invalid remote route: $(trimmed)");
-                        return;
-                    }
-                    r_list.add (trimmed);
-                }
-            }
-            if (r_list.length == 0) {
-                p.routes = new string[] { "0.0.0.0/0" };
-            } else {
-                var r_arr = new string[r_list.length];
-                for (uint i = 0; i < r_list.length; i++) {
-                    r_arr[i] = r_list[i];
-                }
-                p.routes = r_arr;
-            }
-
-            var exc_arr = new string[this.excludes.length];
-            for (uint i = 0; i < this.excludes.length; i++) {
-                if (!this.is_valid_network (this.excludes[i])) {
-                    this.show_validation_error (@"Invalid exclude network: $(this.excludes[i])");
-                    return;
-                }
-                exc_arr[i] = this.excludes[i];
-            }
-            p.exclude = exc_arr;
-
-            p.dns = this.dns_row.active;
-            p.ipv6 = this.ipv6_row.active;
-
-            p.method = "nft";
-
-            uint v_idx = this.verbosity_row.selected;
-            p.verbosity = (v_idx < VERBOSITIES.length) ? VERBOSITIES[v_idx] : "normal";
-
-            p.auto_connect = this.auto_connect_row.active;
-
             this.profile_saved (p);
             this.close ();
-        }
-
-        /**
-         * 校验 IPv4、IPv6 地址及其 CIDR 前缀。
-         */
-        private bool is_valid_network (string value) {
-            string[] parts = value.strip ().split ("/", 2);
-            if (parts.length == 0 || parts[0] == "") {
-                return false;
-            }
-
-            var address = new GLib.InetAddress.from_string (parts[0]);
-            if (address == null) {
-                return false;
-            }
-            if (parts.length == 1) {
-                return true;
-            }
-
-            int prefix;
-            int max_prefix = address.get_family () == GLib.SocketFamily.IPV6 ? 128 : 32;
-            return int.try_parse (parts[1], out prefix) && prefix >= 0 && prefix <= max_prefix;
         }
 
         /**

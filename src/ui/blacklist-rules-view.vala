@@ -21,42 +21,40 @@ namespace Sshuttle {
             this.title = "Network Blacklist";
             this.description = GLib.Markup.escape_text ("Prohibit selected applications and processes from accessing the network completely.");
 
-            // ===== 进程黑名单输入 =====
-            var proc_group_header = new Adw.PreferencesGroup ();
-            proc_group_header.title = "Blocked Processes";
-            proc_group_header.description = "Block standalone processes or background daemons by executable name.";
-            this.add (proc_group_header);
+            var processes_header = new Adw.ActionRow ();
+            processes_header.title = "Processes";
+            processes_header.subtitle = "Block by executable name";
+            this.add (processes_header);
 
             this.procs_list_box = new Gtk.Box (Gtk.Orientation.VERTICAL, 4);
-            proc_group_header.add (this.procs_list_box);
+            this.add (this.procs_list_box);
 
             this.new_proc_row = new Adw.EntryRow ();
-            this.new_proc_row.title = "Add Process Name (e.g. curl, wget)";
+            this.new_proc_row.title = "Process Name";
             var add_btn = new Gtk.Button.from_icon_name ("list-add-symbolic");
             add_btn.add_css_class ("flat");
             add_btn.valign = Gtk.Align.CENTER;
             add_btn.clicked.connect (this.on_add_process);
             this.new_proc_row.add_suffix (add_btn);
             this.new_proc_row.entry_activated.connect (this.on_add_process);
-            proc_group_header.add (this.new_proc_row);
+            this.add (this.new_proc_row);
 
             this.refresh_process_list ();
 
-            // ===== 应用程序黑名单 =====
-            var apps_group_header = new Adw.PreferencesGroup ();
-            apps_group_header.title = "Blocked Applications";
-            apps_group_header.description = "Switch on to completely block an application from internet access.";
-            this.add (apps_group_header);
+            var applications_header = new Adw.ActionRow ();
+            applications_header.title = "Applications";
+            applications_header.subtitle = "Block all network access";
+            this.add (applications_header);
 
             // 搜索框
             this.search_row = new Adw.EntryRow ();
-            this.search_row.title = "Search Applications (e.g. WeChat, Firefox)";
+            this.search_row.title = "Search Applications";
             this.search_row.notify["text"].connect (this.filter_apps);
-            apps_group_header.add (this.search_row);
+            this.add (this.search_row);
 
             this.apps_list_box = new Gtk.Box (Gtk.Orientation.VERTICAL, 4);
             this.apps_list_box.margin_top = 8;
-            apps_group_header.add (this.apps_list_box);
+            this.add (this.apps_list_box);
 
             this.config_manager.blacklist_changed.connect (() => {
                 this.refresh_process_list ();

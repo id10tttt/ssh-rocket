@@ -5,9 +5,10 @@ void test_commands () {
     profile.port = 2200;
     profile.auth_type = "key";
     profile.key_path = "/tmp/key with spaces";
-    profile.ipv6 = true;
+    var settings = new Sshuttle.NetworkSettings ();
+    settings.ipv6 = true;
     try {
-        var args = Sshuttle.CommandBuilder.build_argv (profile, 12300);
+        var args = Sshuttle.CommandBuilder.build_argv (profile, settings, 12300);
         assert (args[0] == "ssh-rocket");
         string command = "";
         for (int i = 1; i < args.length; i++) if (args[i] == "-e") command = args[i + 1];
@@ -21,15 +22,15 @@ void test_commands () {
         assert ("::/0" in args && "0.0.0.0/0" in args);
         profile.auth_type = "password";
         profile.password = "secret-must-not-appear";
-        profile.dns = false;
-        args = Sshuttle.CommandBuilder.build_argv (profile);
+        settings.dns = false;
+        args = Sshuttle.CommandBuilder.build_argv (profile, settings);
         var joined = string.joinv (" ", args);
         assert (!(profile.password in joined));
         assert (!("1.1.1.1:53" in joined));
         assert ("sshpass -e ssh" in joined);
         profile.host = "-oProxyCommand=bad";
         try {
-            Sshuttle.CommandBuilder.build_argv (profile);
+            Sshuttle.CommandBuilder.build_argv (profile, settings);
             assert_not_reached ();
         } catch (GLib.IOError.INVALID_ARGUMENT e) {}
     } catch (GLib.Error e) { GLib.error ("Command test: %s", e.message); }
@@ -39,7 +40,9 @@ void test_rule_compatibility () {
     var config = new Sshuttle.ConfigManager ();
     var profile = new Sshuttle.Profile ();
     profile.host = "test-host";
-    profile.exclude = { "10.0.0.0/8", "10.0.0.0/8" };
+    var settings = config.get_network_settings ();
+    settings.exclude = { "10.0.0.0/8", "10.0.0.0/8" };
+    config.set_network_settings (settings);
     config.save_profile (profile);
     config.set_active_profile (profile.id);
     config.set_domain_rules ({ new Sshuttle.DomainRule ("direct.example.com", "direct"),
@@ -50,9 +53,13 @@ void test_rule_compatibility () {
     assert (resolver.resolve_action_for_domain ("direct.example.com", out matched) == "direct" && matched);
     assert (resolver.resolve_action_for_domain ("unmatched.test", out matched) == "direct" && !matched);
     var restored = Sshuttle.Profile.deserialize (profile.serialize ().get_object ());
-    assert (restored.id == profile.id && restored.host == profile.host && restored.dns == profile.dns);
+    assert (restored.id == profile.id && restored.host == profile.host);
+    var profile_json = profile.serialize ().get_object ();
+    assert (!profile_json.has_member ("routes") && !profile_json.has_member ("dns"));
+    var restored_settings = new Sshuttle.ConfigManager ().get_network_settings ();
+    assert (restored_settings.exclude.length == 2 && restored_settings.exclude[0] == "10.0.0.0/8");
     int count = 0;
-    foreach (var value in Sshuttle.CommandBuilder.get_effective_excludes (profile))
+    foreach (var value in Sshuttle.CommandBuilder.get_effective_excludes (profile, settings))
         if (value == "10.0.0.0/8") count++;
     assert (count == 1);
 }

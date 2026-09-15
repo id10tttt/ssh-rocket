@@ -34,11 +34,13 @@ namespace Sshuttle {
         private string rule_cache_path;
         private DomainRuleMatcher domain_rule_matcher;
         private GLib.HashTable<string, AppTrafficStats> app_traffic;
+        private NetworkSettings network_settings;
 
         public signal void app_rules_changed ();
         public signal void domain_rules_changed ();
         public signal void blacklist_changed ();
         public signal void traffic_stats_changed ();
+        public signal void network_settings_changed ();
 
         public ConfigManager () {
             this.proxy_apps = new GLib.GenericArray<string> ();
@@ -48,6 +50,7 @@ namespace Sshuttle {
             this.imported_domain_rules = new GLib.GenericArray<DomainRule> ();
             this.domain_rule_matcher = new DomainRuleMatcher ({}, this.domain_default_policy);
             this.app_traffic = new GLib.HashTable<string, AppTrafficStats> (GLib.str_hash, GLib.str_equal);
+            this.network_settings = new NetworkSettings ();
 
             string? env_dir = GLib.Environment.get_variable ("SSHUTTLE_CONFIG_DIR");
             string? sudo_user = GLib.Environment.get_variable ("SUDO_USER");
@@ -90,6 +93,7 @@ namespace Sshuttle {
         }
 
         public void load () {
+            bool has_global_network_settings = false;
             this.profiles.remove_range (0, this.profiles.length);
 
             if (GLib.FileUtils.test (this.profiles_path, GLib.FileTest.EXISTS)) {
@@ -137,6 +141,30 @@ namespace Sshuttle {
                         }
                         if (obj.has_member ("window_height")) {
                             this.window_height = (int) obj.get_int_member ("window_height");
+                        }
+                        if (obj.has_member ("routes")) {
+                            this.network_settings.routes = this.read_string_array (obj, "routes");
+                            has_global_network_settings = true;
+                        }
+                        if (obj.has_member ("exclude_networks")) {
+                            this.network_settings.exclude = this.read_string_array (obj, "exclude_networks");
+                            has_global_network_settings = true;
+                        }
+                        if (obj.has_member ("dns")) {
+                            this.network_settings.dns = obj.get_boolean_member ("dns");
+                            has_global_network_settings = true;
+                        }
+                        if (obj.has_member ("ipv6")) {
+                            this.network_settings.ipv6 = obj.get_boolean_member ("ipv6");
+                            has_global_network_settings = true;
+                        }
+                        if (obj.has_member ("verbosity")) {
+                            this.network_settings.verbosity = obj.get_string_member ("verbosity");
+                            has_global_network_settings = true;
+                        }
+                        if (obj.has_member ("auto_connect")) {
+                            this.network_settings.auto_connect = obj.get_boolean_member ("auto_connect");
+                            has_global_network_settings = true;
                         }
                         if (obj.has_member ("app_proxy_enabled")) {
                             this.app_proxy_enabled = obj.get_boolean_member ("app_proxy_enabled");
@@ -200,6 +228,18 @@ namespace Sshuttle {
                     }
                 } catch (GLib.Error e) {
                     // 忽略设置读取异常
+                }
+            }
+
+            if (!has_global_network_settings) {
+                var legacy_profile = this.get_active_profile ();
+                if (legacy_profile != null) {
+                    this.network_settings.routes = legacy_profile.legacy_routes;
+                    this.network_settings.exclude = legacy_profile.legacy_exclude;
+                    this.network_settings.dns = legacy_profile.legacy_dns;
+                    this.network_settings.ipv6 = legacy_profile.legacy_ipv6;
+                    this.network_settings.verbosity = legacy_profile.legacy_verbosity;
+                    this.network_settings.auto_connect = legacy_profile.legacy_auto_connect;
                 }
             }
 
@@ -319,6 +359,21 @@ namespace Sshuttle {
             builder.set_member_name ("window_height");
             builder.add_int_value (this.window_height);
 
+            builder.set_member_name ("routes");
+            this.write_string_array (builder, this.network_settings.routes);
+
+            builder.set_member_name ("exclude_networks");
+            this.write_string_array (builder, this.network_settings.exclude);
+
+            builder.set_member_name ("dns");
+            builder.add_boolean_value (this.network_settings.dns);
+            builder.set_member_name ("ipv6");
+            builder.add_boolean_value (this.network_settings.ipv6);
+            builder.set_member_name ("verbosity");
+            builder.add_string_value (this.network_settings.verbosity);
+            builder.set_member_name ("auto_connect");
+            builder.add_boolean_value (this.network_settings.auto_connect);
+
             builder.set_member_name ("app_proxy_enabled");
             builder.add_boolean_value (this.app_proxy_enabled);
 
@@ -435,9 +490,10 @@ namespace Sshuttle {
         }
 
         /**
-         * 重置分流、黑名单与统计设置，同时保留连接配置和窗口尺寸。
+         * 重置全局设置、规则与统计，同时保留连接 Profile 和窗口尺寸。
          */
         public void reset_rules_and_settings () {
+            this.network_settings = new NetworkSettings ();
             this.app_proxy_enabled = false;
             this.proxy_apps.remove_range (0, this.proxy_apps.length);
             this.blocked_apps.remove_range (0, this.blocked_apps.length);
@@ -457,6 +513,25 @@ namespace Sshuttle {
             this.domain_rules_changed ();
             this.blacklist_changed ();
             this.traffic_stats_changed ();
+            this.network_settings_changed ();
+        }
+
+        public NetworkSettings get_network_settings () {
+            return this.network_settings;
+        }
+
+        /**
+         * 保存所有连接共用的路由与运行设置。
+         */
+        public void set_network_settings (NetworkSettings settings) {
+            this.network_settings.routes = settings.routes;
+            this.network_settings.exclude = settings.exclude;
+            this.network_settings.dns = settings.dns;
+            this.network_settings.ipv6 = settings.ipv6;
+            this.network_settings.verbosity = settings.verbosity;
+            this.network_settings.auto_connect = settings.auto_connect;
+            this.save_settings ();
+            this.network_settings_changed ();
         }
 
         public void set_window_size (int w, int h) {
@@ -786,6 +861,27 @@ namespace Sshuttle {
                 this.get_effective_domain_rules (),
                 this.domain_default_policy
             );
+        }
+
+        private string[] read_string_array (Json.Object obj, string member_name) {
+            var values = new GLib.GenericArray<string> ();
+            var array = obj.get_array_member (member_name);
+            array.foreach_element ((source, index, node) => {
+                values.add (node.get_string ());
+            });
+            var result = new string[values.length];
+            for (uint i = 0; i < values.length; i++) {
+                result[i] = values[i];
+            }
+            return result;
+        }
+
+        private void write_string_array (Json.Builder builder, string[] values) {
+            builder.begin_array ();
+            foreach (var value in values) {
+                builder.add_string_value (value);
+            }
+            builder.end_array ();
         }
 
         private void fix_ownership (string file_path) {

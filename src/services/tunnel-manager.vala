@@ -279,7 +279,9 @@ namespace Sshuttle {
                     throw new GLib.IOError.FAILED ("Failed to start DNS routing service");
                 }
 
-                string[] argv = CommandBuilder.build_argv (profile, this.local_proxy_port);
+                string[] argv = CommandBuilder.build_argv (
+                    profile, this.config_manager.get_network_settings (), this.local_proxy_port
+                );
 
                 string cmd_str = string.joinv (" ", argv);
                 this.emit_log (@"Starting tunnel: $(cmd_str)");
@@ -316,8 +318,8 @@ namespace Sshuttle {
             this.emit_proxy_log (line);
 
             if (line == "SSH Rocket tunnel ready" && this.state == TunnelState.CONNECTING) {
-                var profile = this.active_profile;
-                this.dns_proxy.remote_dns_port = profile != null && profile.dns ? (uint16) (this.local_proxy_port + 1) : 0;
+                this.dns_proxy.remote_dns_port = this.config_manager.get_network_settings ().dns
+                    ? (uint16) (this.local_proxy_port + 1) : 0;
                 this.wait_for_runtime_ready ();
             }
         }
@@ -336,9 +338,9 @@ namespace Sshuttle {
                     return GLib.Source.REMOVE;
                 }
 
-                var profile = this.active_profile;
-                bool ipv6_enabled = profile != null && this.profile_uses_ipv6_routing (profile);
-                bool dns_ready = profile == null || !profile.dns || this.dns_proxy.remote_dns_port > 0;
+                var settings = this.config_manager.get_network_settings ();
+                bool ipv6_enabled = this.uses_ipv6_routing (settings);
+                bool dns_ready = !settings.dns || this.dns_proxy.remote_dns_port > 0;
                 if (dns_ready && this.nft_manager.base_chains_exist (this.local_proxy_port, ipv6_enabled)) {
                     this.runtime_ready_timeout_id = 0;
                     this.finish_connection_setup ();
@@ -789,9 +791,10 @@ namespace Sshuttle {
 
         private bool refresh_proxy_rules () {
             var p = this.active_profile;
-            bool ipv6 = p != null && this.profile_uses_ipv6_routing (p);
+            var settings = this.config_manager.get_network_settings ();
+            bool ipv6 = this.uses_ipv6_routing (settings);
             string[] direct_networks = (p != null)
-                ? CommandBuilder.get_effective_excludes (p)
+                ? CommandBuilder.get_effective_excludes (p, settings)
                 : new string[0];
             bool filter_ready = this.nft_manager.apply_cgroup_filter (
                 this.local_proxy_port,
@@ -808,17 +811,17 @@ namespace Sshuttle {
         }
 
         /**
-         * 判断当前 Profile 是否需要 IPv6 TUN 策略路由。
+         * 判断全局配置是否需要 IPv6 TUN 策略路由。
          */
-        private bool profile_uses_ipv6_routing (Profile profile) {
-            if (!profile.ipv6) {
+        private bool uses_ipv6_routing (NetworkSettings settings) {
+            if (!settings.ipv6) {
                 return false;
             }
-            if (profile.routes.length == 0) {
+            if (settings.routes.length == 0) {
                 return true;
             }
 
-            foreach (var route in profile.routes) {
+            foreach (var route in settings.routes) {
                 string value = route.strip ();
                 if (value == "0.0.0.0/0" || ":" in value) {
                     return true;
