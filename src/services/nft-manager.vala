@@ -134,12 +134,16 @@ namespace Sshuttle {
             var proxy_v4 = new GLib.GenericArray<string> ();
             var direct_v6 = new GLib.GenericArray<string> ();
             var proxy_v6 = new GLib.GenericArray<string> ();
+            var reject_v4 = new GLib.GenericArray<string> ();
+            var reject_v6 = new GLib.GenericArray<string> ();
 
             foreach (var network in direct_networks) {
-                this.append_network (network, "direct", direct_v4, proxy_v4, direct_v6, proxy_v6);
+                this.append_network (network, "direct", direct_v4, proxy_v4, reject_v4,
+                    direct_v6, proxy_v6, reject_v6);
             }
             foreach (var rule in routing_rules) {
-                this.append_network (rule.pattern, rule.action, direct_v4, proxy_v4, direct_v6, proxy_v6);
+                this.append_network (rule.pattern, rule.action, direct_v4, proxy_v4, reject_v4,
+                    direct_v6, proxy_v6, reject_v6);
             }
 
             // 1. 创建用于动态域名 IP 分流的 set (带 300 秒超时)
@@ -177,6 +181,9 @@ namespace Sshuttle {
             for (uint i = 0; i < direct_v4.length; i++) {
                 success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr $(direct_v4[i]) return comment \"sshuttle-gui-network\"") && success;
             }
+            for (uint i = 0; i < reject_v4.length; i++) {
+                success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr $(reject_v4[i]) drop comment \"sshuttle-gui-network\"") && success;
+            }
 
             if (ipv6_enabled) {
                 string table_v6 = @"sshrocket-ipv6-$(port)";
@@ -193,6 +200,9 @@ namespace Sshuttle {
                 success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) ip6 daddr @direct_ips return") && success;
                 for (uint i = 0; i < direct_v6.length; i++) {
                     success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) ip6 daddr $(direct_v6[i]) return comment \"sshuttle-gui-network\"") && success;
+                }
+                for (uint i = 0; i < reject_v6.length; i++) {
+                    success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) ip6 daddr $(reject_v6[i]) drop comment \"sshuttle-gui-network\"") && success;
                 }
             }
 
@@ -214,6 +224,9 @@ namespace Sshuttle {
                 return;
             }
             if (this.active_port <= 0 || ips.length == 0) {
+                return;
+            }
+            if (action == "reject") {
                 return;
             }
 
@@ -297,8 +310,10 @@ namespace Sshuttle {
             string action,
             GLib.GenericArray<string> direct_v4,
             GLib.GenericArray<string> proxy_v4,
+            GLib.GenericArray<string> reject_v4,
             GLib.GenericArray<string> direct_v6,
-            GLib.GenericArray<string> proxy_v6
+            GLib.GenericArray<string> proxy_v6,
+            GLib.GenericArray<string> reject_v6
         ) {
             string normalized;
             bool is_ipv6;
@@ -306,11 +321,15 @@ namespace Sshuttle {
                 return;
             }
 
-            bool is_proxy = action.strip ().down () == "proxy";
+            string normalized_action = action.strip ().down ();
             if (is_ipv6) {
-                (is_proxy ? proxy_v6 : direct_v6).add (normalized);
+                if (normalized_action == "reject") reject_v6.add (normalized);
+                else if (normalized_action == "proxy") proxy_v6.add (normalized);
+                else direct_v6.add (normalized);
             } else {
-                (is_proxy ? proxy_v4 : direct_v4).add (normalized);
+                if (normalized_action == "reject") reject_v4.add (normalized);
+                else if (normalized_action == "proxy") proxy_v4.add (normalized);
+                else direct_v4.add (normalized);
             }
         }
 

@@ -26,7 +26,13 @@ namespace Sshuttle {
         private GLib.GenericArray<string> blocked_apps;
         private GLib.GenericArray<string> blocked_processes;
         private GLib.GenericArray<DomainRule> domain_rules;
+        private GLib.GenericArray<DomainRule> imported_domain_rules;
         private string domain_default_policy = "proxy";
+        private string rule_source_url = "";
+        private string rule_source_name = "";
+        private int64 rule_source_updated_at = 0;
+        private string rule_cache_path;
+        private DomainRuleMatcher domain_rule_matcher;
         private GLib.HashTable<string, AppTrafficStats> app_traffic;
 
         public signal void app_rules_changed ();
@@ -39,6 +45,8 @@ namespace Sshuttle {
             this.blocked_apps = new GLib.GenericArray<string> ();
             this.blocked_processes = new GLib.GenericArray<string> ();
             this.domain_rules = new GLib.GenericArray<DomainRule> ();
+            this.imported_domain_rules = new GLib.GenericArray<DomainRule> ();
+            this.domain_rule_matcher = new DomainRuleMatcher ({}, this.domain_default_policy);
             this.app_traffic = new GLib.HashTable<string, AppTrafficStats> (GLib.str_hash, GLib.str_equal);
 
             string? env_dir = GLib.Environment.get_variable ("SSHUTTLE_CONFIG_DIR");
@@ -62,6 +70,7 @@ namespace Sshuttle {
 
             this.profiles_path = GLib.Path.build_filename (this.config_dir, "profiles.json");
             this.settings_path = GLib.Path.build_filename (this.config_dir, "settings.json");
+            this.rule_cache_path = GLib.Path.build_filename (this.config_dir, "imported-rules.conf");
 
             this.profiles = new GLib.GenericArray<Profile> ();
 
@@ -166,6 +175,15 @@ namespace Sshuttle {
                                 }
                             });
                         }
+                        if (obj.has_member ("rule_source_url")) {
+                            this.rule_source_url = obj.get_string_member ("rule_source_url");
+                        }
+                        if (obj.has_member ("rule_source_name")) {
+                            this.rule_source_name = obj.get_string_member ("rule_source_name");
+                        }
+                        if (obj.has_member ("rule_source_updated_at")) {
+                            this.rule_source_updated_at = obj.get_int_member ("rule_source_updated_at");
+                        }
                         if (obj.has_member ("app_traffic")) {
                             this.app_traffic.remove_all ();
                             var traffic_obj = obj.get_object_member ("app_traffic");
@@ -184,6 +202,9 @@ namespace Sshuttle {
                     // 忽略设置读取异常
                 }
             }
+
+            this.load_rule_cache ();
+            this.rebuild_domain_rule_matcher ();
         }
 
         public void save_profiles () {
@@ -332,6 +353,13 @@ namespace Sshuttle {
             }
             builder.end_array ();
 
+            builder.set_member_name ("rule_source_url");
+            builder.add_string_value (this.rule_source_url);
+            builder.set_member_name ("rule_source_name");
+            builder.add_string_value (this.rule_source_name);
+            builder.set_member_name ("rule_source_updated_at");
+            builder.add_int_value (this.rule_source_updated_at);
+
             builder.set_member_name ("app_traffic");
             builder.begin_object ();
             var iter = GLib.HashTableIter<string, AppTrafficStats> (this.app_traffic);
@@ -415,7 +443,13 @@ namespace Sshuttle {
             this.blocked_apps.remove_range (0, this.blocked_apps.length);
             this.blocked_processes.remove_range (0, this.blocked_processes.length);
             this.domain_rules.remove_range (0, this.domain_rules.length);
+            this.imported_domain_rules.remove_range (0, this.imported_domain_rules.length);
             this.domain_default_policy = "proxy";
+            this.rule_source_url = "";
+            this.rule_source_name = "";
+            this.rule_source_updated_at = 0;
+            GLib.FileUtils.remove (this.rule_cache_path);
+            this.rebuild_domain_rule_matcher ();
             this.app_traffic.remove_all ();
             this.save_settings ();
 
@@ -571,6 +605,7 @@ namespace Sshuttle {
             string p = (policy.down () == "proxy") ? "proxy" : "direct";
             if (this.domain_default_policy != p) {
                 this.domain_default_policy = p;
+                this.rebuild_domain_rule_matcher ();
                 this.save_settings ();
                 this.domain_rules_changed ();
             }
@@ -584,6 +619,32 @@ namespace Sshuttle {
             return arr;
         }
 
+        public DomainRule[] get_effective_domain_rules () {
+            var rules = new DomainRule[this.domain_rules.length + this.imported_domain_rules.length];
+            uint index = 0;
+            for (uint i = 0; i < this.domain_rules.length; i++) rules[index++] = this.domain_rules[i];
+            for (uint i = 0; i < this.imported_domain_rules.length; i++) rules[index++] = this.imported_domain_rules[i];
+            return rules;
+        }
+
+        public DomainRule[] get_network_rules () {
+            var result = new GLib.GenericArray<DomainRule> ();
+            foreach (var rule in this.get_effective_domain_rules ()) {
+                string address_text = rule.pattern.split ("/", 2)[0];
+                if (rule.rule_type == "ip-cidr" ||
+                    new GLib.InetAddress.from_string (address_text) != null) {
+                    result.add (rule);
+                }
+            }
+            var rules = new DomainRule[result.length];
+            for (uint i = 0; i < result.length; i++) rules[i] = result[i];
+            return rules;
+        }
+
+        public string resolve_domain_action (string? domain, out bool matched = null) {
+            return this.domain_rule_matcher.resolve (domain, out matched);
+        }
+
         public void add_domain_rule (string pattern, string action = "proxy") {
             string p = pattern.strip ().down ();
             if (p == "") {
@@ -594,6 +655,7 @@ namespace Sshuttle {
             this.remove_domain_rule (p);
 
             this.domain_rules.add (new DomainRule (p, action));
+            this.rebuild_domain_rule_matcher ();
             this.save_settings ();
             this.domain_rules_changed ();
         }
@@ -601,7 +663,9 @@ namespace Sshuttle {
         public void update_domain_rule (string old_pattern, string new_pattern, string new_action) {
             string op = old_pattern.strip ().down ();
             string np = new_pattern.strip ().down ();
-            string na = (new_action.strip ().down () == "proxy") ? "proxy" : "direct";
+            string requested_action = new_action.strip ().down ();
+            string na = requested_action == "reject" ? "reject" :
+                (requested_action == "proxy" ? "proxy" : "direct");
             if (np == "") {
                 return;
             }
@@ -621,6 +685,7 @@ namespace Sshuttle {
             }
 
             this.save_settings ();
+            this.rebuild_domain_rule_matcher ();
             this.domain_rules_changed ();
         }
 
@@ -635,6 +700,7 @@ namespace Sshuttle {
                 }
             }
             if (removed) {
+                this.rebuild_domain_rule_matcher ();
                 this.save_settings ();
                 this.domain_rules_changed ();
             }
@@ -648,14 +714,78 @@ namespace Sshuttle {
             if (default_policy != "") {
                 this.domain_default_policy = (default_policy.down () == "proxy") ? "proxy" : "direct";
             }
+            this.rebuild_domain_rule_matcher ();
             this.save_settings ();
             this.domain_rules_changed ();
         }
 
         public void clear_domain_rules () {
             this.domain_rules.remove_range (0, this.domain_rules.length);
+            this.rebuild_domain_rule_matcher ();
             this.save_settings ();
             this.domain_rules_changed ();
+        }
+
+        public void set_imported_rule_source (RuleImportResult result, string url, string name) throws GLib.Error {
+            string cache = result.to_cache ();
+            GLib.FileUtils.set_contents (this.rule_cache_path, cache);
+            this.fix_ownership (this.rule_cache_path);
+
+            this.imported_domain_rules.remove_range (0, this.imported_domain_rules.length);
+            for (uint i = 0; i < result.rules.length; i++) {
+                this.imported_domain_rules.add (result.rules[i]);
+            }
+            this.rule_source_url = url;
+            this.rule_source_name = name;
+            this.rule_source_updated_at = new GLib.DateTime.now_local ().to_unix ();
+            this.domain_default_policy = result.default_policy == "proxy" ? "proxy" : "direct";
+            this.rebuild_domain_rule_matcher ();
+            this.save_settings ();
+            this.domain_rules_changed ();
+        }
+
+        public void clear_imported_rule_source () {
+            this.imported_domain_rules.remove_range (0, this.imported_domain_rules.length);
+            this.rule_source_url = "";
+            this.rule_source_name = "";
+            this.rule_source_updated_at = 0;
+            GLib.FileUtils.remove (this.rule_cache_path);
+            this.rebuild_domain_rule_matcher ();
+            this.save_settings ();
+            this.domain_rules_changed ();
+        }
+
+        public string get_rule_source_url () { return this.rule_source_url; }
+        public string get_rule_source_name () { return this.rule_source_name; }
+        public int64 get_rule_source_updated_at () { return this.rule_source_updated_at; }
+        public uint get_imported_rule_count () { return this.imported_domain_rules.length; }
+
+        public void get_imported_rule_counts (out uint direct, out uint proxy, out uint reject) {
+            direct = proxy = reject = 0;
+            for (uint i = 0; i < this.imported_domain_rules.length; i++) {
+                switch (this.imported_domain_rules[i].action) {
+                    case "direct": direct++; break;
+                    case "reject": reject++; break;
+                    default: proxy++; break;
+                }
+            }
+        }
+
+        private void load_rule_cache () {
+            this.imported_domain_rules.remove_range (0, this.imported_domain_rules.length);
+            if (!GLib.FileUtils.test (this.rule_cache_path, GLib.FileTest.EXISTS)) return;
+            var imported = RuleImporter.import_from_file (this.rule_cache_path);
+            if (imported == null) return;
+            for (uint i = 0; i < imported.rules.length; i++) {
+                this.imported_domain_rules.add (imported.rules[i]);
+            }
+        }
+
+        private void rebuild_domain_rule_matcher () {
+            this.domain_rule_matcher = new DomainRuleMatcher (
+                this.get_effective_domain_rules (),
+                this.domain_default_policy
+            );
         }
 
         private void fix_ownership (string file_path) {

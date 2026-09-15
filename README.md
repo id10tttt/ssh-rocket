@@ -9,6 +9,7 @@ SSH Rocket 使用 OpenSSH 建立本地 SOCKS5 和远端 TCP DNS 通道，由 tun
 - SSH Agent、私钥和密码认证
 - 全局或指定 CIDR 路由
 - 按应用、域名和 IP 分流
+- 从 HTTPS URL 或本地文件导入 Shadowrocket 规则，支持直连、代理和拒绝规则
 - DNS 请求通过 SSH TCP 转发，代理规则失败时不回退到本地 DNS
 - IPv4 和可选 IPv6 策略路由
 - 黑名单应用阻断和 QUIC 降级
@@ -19,7 +20,7 @@ SSH Rocket 使用 OpenSSH 建立本地 SOCKS5 和远端 TCP DNS 通道，由 tun
 
 ## 依赖
 
-构建需要 GLib 2.70、GTK 4.10、Libadwaita 1.5、Vala、Meson、Ninja 和 JSON-GLib。运行需要 `ssh`、`sshpass`（密码认证时）、`tun2socks`、`nft`、`ip`、`pkexec` 和桌面 Polkit 认证代理。
+构建需要 GLib 2.70、GTK 4.10、Libadwaita 1.5、Vala、Meson、Ninja、JSON-GLib 和 Libsoup 3。运行需要 `ssh`、`sshpass`（密码认证时）、`tun2socks`、`nft`、`ip`、`pkexec` 和桌面 Polkit 认证代理。
 
 安装 xjasonlyu/tun2socks 2.6.0：
 
@@ -31,7 +32,7 @@ GOBIN="$HOME/.local/bin" go install github.com/xjasonlyu/tun2socks/v2@v2.6.0
 确保 `$HOME/.local/bin` 位于 `PATH`，再安装发行版提供的其余依赖。例如 Fedora：
 
 ```bash
-sudo dnf install meson ninja-build gcc vala gtk4-devel libadwaita-devel json-glib-devel openssh-clients sshpass nftables iproute polkit
+sudo dnf install meson ninja-build gcc vala gtk4-devel libadwaita-devel json-glib-devel libsoup3-devel openssh-clients sshpass nftables iproute polkit
 ```
 
 ## 构建、安装与运行

@@ -64,7 +64,7 @@ namespace Sshuttle {
             var routing_page = new Adw.PreferencesPage ();
             routing_clamp.set_child (routing_page);
 
-            // 域名通配符规则 (Domain Wildcards / Zero Omega)
+            // Shadowrocket 规则源与自定义覆盖规则
             var domain_rules_group = new DomainRulesView (this.config_manager, this.tunnel_manager);
             routing_page.add (domain_rules_group);
 

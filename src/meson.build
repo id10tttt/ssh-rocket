@@ -15,7 +15,7 @@ sources = [
   'services/tun-router.vala',
   'services/app-scanner.vala',
   'services/process-monitor.vala',
-  'services/omega-importer.vala',
+  'services/rule-importer.vala',
   'services/dns-proxy.vala',
   'ui/connection-card.vala',
   'ui/profile-editor.vala',

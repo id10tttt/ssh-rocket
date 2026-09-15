@@ -89,6 +89,9 @@ namespace Sshuttle {
             }
             DomainRule[] rules = new DomainRule[patterns.length];
             for (int i = 0; i < patterns.length; i++) {
+                if (actions[i] != "proxy" && actions[i] != "direct" && actions[i] != "reject") {
+                    throw new GLib.IOError.INVALID_ARGUMENT ("Invalid rule action");
+                }
                 rules[i] = new DomainRule (patterns[i], actions[i]);
             }
             return nft.apply_cgroup_filter (port, ipv6, policy, networks, rules);

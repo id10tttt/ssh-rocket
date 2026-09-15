@@ -57,6 +57,63 @@ void test_rule_compatibility () {
     assert (count == 1);
 }
 
+void test_shadowrocket_rules () {
+    string source = """
+[General]
+skip-proxy = 10.0.0.0/8, *.lan
+[Rule]
+DOMAIN-SUFFIX,ads.example,Reject
+DOMAIN,api.example,Direct
+DOMAIN-KEYWORD,blocked,Proxy
+IP-CIDR,203.0.113.0/24,Reject
+RULE-SET,https://example.com/nested.list,Proxy
+FINAL,direct
+[URL Rewrite]
+^https://example.com https://example.org 302
+""";
+    var imported = Sshuttle.RuleImporter.import_from_string (source);
+    assert (imported.default_policy == "direct");
+    assert (imported.direct_count == 3);
+    assert (imported.proxy_count == 1);
+    assert (imported.reject_count == 2);
+    assert (imported.rule_sets.length == 1);
+    assert (imported.ignored_count == 1);
+
+    var matcher = new Sshuttle.DomainRuleMatcher ({
+        new Sshuttle.DomainRule ("safe.ads.example", "direct"),
+        imported.rules[2],
+        imported.rules[3],
+        imported.rules[4]
+    }, imported.default_policy);
+    bool matched;
+    assert (matcher.resolve ("safe.ads.example", out matched) == "direct" && matched);
+    assert (matcher.resolve ("www.ads.example", out matched) == "reject" && matched);
+    assert (matcher.resolve ("blocked-site.test", out matched) == "proxy" && matched);
+    assert (matcher.resolve ("unmatched.test", out matched) == "direct" && !matched);
+
+    try {
+        var config = new Sshuttle.ConfigManager ();
+        config.set_imported_rule_source (imported, "https://example.com/rules.conf", "Test Rules");
+        config.add_domain_rule ("safe.ads.example", "direct");
+        assert (config.resolve_domain_action ("safe.ads.example", out matched) == "direct" && matched);
+        assert (config.resolve_domain_action ("www.ads.example", out matched) == "reject" && matched);
+        assert (config.get_network_rules ().length == 2);
+
+        var restored_config = new Sshuttle.ConfigManager ();
+        assert (restored_config.get_imported_rule_count () == imported.rules.length);
+        assert (restored_config.resolve_domain_action ("www.ads.example", out matched) == "reject" && matched);
+    } catch (GLib.Error e) {
+        GLib.error ("Rule cache test: %s", e.message);
+    }
+
+    uint8[] query = {
+        0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01, 'a', 0x04, 't', 'e', 's', 't', 0x00, 0x00, 0x01, 0x00, 0x01
+    };
+    var response = Sshuttle.DnsProxy.build_error_response (query, 3);
+    assert (response.length == query.length && (response[3] & 0x0f) == 3);
+}
+
 void test_dns_tcp () {
     try {
         var listener = new GLib.SocketListener ();
@@ -94,6 +151,7 @@ int main (string[] args) {
     } catch (GLib.Error e) { return 1; }
     GLib.Test.add_func ("/ssh/command-auth-and-routes", test_commands);
     GLib.Test.add_func ("/ssh/rules-and-profile-compatibility", test_rule_compatibility);
+    GLib.Test.add_func ("/ssh/shadowrocket-rule-import", test_shadowrocket_rules);
     GLib.Test.add_func ("/ssh/dns-tcp-framing-and-failure", test_dns_tcp);
     return GLib.Test.run ();
 }

@@ -15,9 +15,10 @@ namespace Sshuttle {
     /**
      * DnsProxy
      * 轻量 DNS 分流器，仅处理被代理 cgroup 进程的 DNS 查询。
-     * 解析请求的 QNAME 域名并匹配 Zero Omega 域名通配符规则：
+     * 解析请求的 QNAME 域名并匹配自定义或 Shadowrocket 规则：
      * - 若匹配到 Proxy：解析后将 IP 加入 nftables proxy_ips 集合（走代理）
      * - 若匹配到 Direct：解析后将 IP 加入 nftables direct_ips 集合（走直连）
+     * - 若匹配到 Reject：返回 NXDOMAIN 阻断请求
      * - 若未匹配：依 default_policy 决定
      */
     public class DnsProxy : Object {
@@ -256,6 +257,22 @@ namespace Sshuttle {
                 action = "proxy";
             }
 
+            if (action == "reject") {
+                var rejected_response = build_error_response (query_packet, 3);
+                try {
+                    response_socket.send_to (client_addr, rejected_response);
+                } catch (GLib.Error e) {
+                }
+                if (domain != null && domain != "") {
+                    string rejected_domain = domain;
+                    GLib.Idle.add (() => {
+                        this.dns_resolved (rejected_domain, "reject", {});
+                        return GLib.Source.REMOVE;
+                    });
+                }
+                return;
+            }
+
             // 检查当前节点是否启用了 IPv6 代理
             bool ipv6_enabled = false;
             var active_profile = this.config_manager.get_active_profile ();
@@ -338,15 +355,7 @@ namespace Sshuttle {
                 return this.config_manager.get_domain_default_policy ();
             }
 
-            var rules = this.config_manager.get_domain_rules ();
-            foreach (var rule in rules) {
-                if (rule.matches (domain)) {
-                    matched = true;
-                    return rule.action;
-                }
-            }
-
-            return this.config_manager.get_domain_default_policy ();
+            return this.config_manager.resolve_domain_action (domain, out matched);
         }
 
         public static string? parse_qname (uint8[] data) {
@@ -402,6 +411,11 @@ namespace Sshuttle {
         }
 
         public static uint8[] build_empty_noerror_response (uint8[] query_packet) {
+            return build_error_response (query_packet, 0);
+        }
+
+        /** 保留 DNS Question 并构造指定 RCODE 的无应答响应。 */
+        public static uint8[] build_error_response (uint8[] query_packet, uint8 response_code) {
             if (query_packet.length < 12) {
                 return query_packet;
             }
@@ -426,9 +440,9 @@ namespace Sshuttle {
             uint8[] resp = new uint8[idx];
             GLib.Memory.copy (resp, query_packet, idx);
 
-            // Flags: 0x8180 (Response, Opcode=0, AA=0, TC=0, RD=1, RA=1, RCODE=0 NOERROR)
+            // Response + Recursion Desired/Available，RCODE 由调用方指定。
             resp[2] = 0x81;
-            resp[3] = 0x80;
+            resp[3] = (uint8) (0x80 | (response_code & 0x0f));
 
             // QDCOUNT: 1
             resp[4] = 0x00;

@@ -798,7 +798,7 @@ namespace Sshuttle {
                 ipv6,
                 this.config_manager.get_domain_default_policy (),
                 direct_networks,
-                this.config_manager.get_domain_rules ()
+                this.config_manager.get_network_rules ()
             );
             if (!filter_ready) {
                 this.emit_log ("Failed to install per-app proxy rules.");

@@ -25,6 +25,7 @@ add_project_arguments('-DGETTEXT_PACKAGE="' + meson.project_name() + '"', langua
 gtk_dep = dependency('gtk4', version: '>= 4.10')
 adw_dep = dependency('libadwaita-1', version: '>= 1.5')
 json_dep = dependency('json-glib-1.0')
+soup_dep = dependency('libsoup-3.0', version: '>= 3.0')
 posix_dep = vala_compiler.find_library('posix', required: false)
 
 dependencies = [
@@ -35,6 +36,7 @@ dependencies = [
   gtk_dep,
   adw_dep,
   json_dep,
+  soup_dep,
   posix_dep,
 ]
 
@@ -70,6 +72,7 @@ core_tests = executable('core-tests',
   'tests/core-tests.vala', 'src/config.vapi', 'src/native-bindings.vapi',
   'src/models/profile.vala', 'src/models/domain-rule.vala',
   'src/services/command-builder.vala', 'src/services/config-manager.vala',
+  'src/services/rule-importer.vala',
   'src/services/dns-proxy.vala', 'src/services/nft-manager.vala',
   'src/services/runtime-client.vala',
   include_directories: include_directories('src'),
@@ -80,6 +83,7 @@ test('ssh-core', core_tests, timeout: 30)
 executable('network-tests', 'tests/network-tests.vala', 'src/native-bindings.vapi',
   'src/models/profile.vala', 'src/models/domain-rule.vala',
   'src/services/command-builder.vala', 'src/services/config-manager.vala',
+  'src/services/rule-importer.vala',
   'src/services/dns-proxy.vala', 'src/services/nft-manager.vala',
   'src/services/runtime-client.vala', 'src/services/tun-router.vala',
   dependencies: dependencies, c_args: vala_c_args, install: false)
