@@ -1,6 +1,6 @@
 namespace Sshuttle {
 
-    public class ProfileEditorWindow : Adw.PreferencesWindow {
+    public class ProfileEditorWindow : Adw.PreferencesDialog {
         public signal void profile_saved (Profile profile);
         public signal void profile_deleted (Profile profile);
 
@@ -34,13 +34,11 @@ namespace Sshuttle {
         private static string[] VERBOSITIES = { "normal", "verbose", "very_verbose" };
         private static string[] VERBOSITY_LABELS = { "Normal", "Verbose", "Very Verbose" };
 
-        public ProfileEditorWindow (Profile? profile = null, Gtk.Window? parent = null) {
+        public ProfileEditorWindow (Profile? profile = null) {
             this.original_profile = profile;
             this.is_new = (profile == null);
-            this.transient_for = parent;
-            this.modal = true;
-            this.default_width = 460;
-            this.default_height = 660;
+            this.content_width = 460;
+            this.content_height = 660;
 
             this.excludes = new GLib.GenericArray<string> ();
             if (profile != null) {
@@ -82,7 +80,7 @@ namespace Sshuttle {
             // 认证模式
             this.auth_row = new Adw.ComboRow ();
             this.auth_row.title = "Login Mode";
-            var auth_model = new Gtk.StringList (AUTH_LABELS);
+            var auth_model = Native.string_list (AUTH_LABELS);
             this.auth_row.model = auth_model;
             string cur_auth = (profile != null) ? profile.auth_type : "agent";
             for (uint i = 0; i < AUTH_TYPES.length; i++) {
@@ -165,7 +163,7 @@ namespace Sshuttle {
 
             this.verbosity_row = new Adw.ComboRow ();
             this.verbosity_row.title = "Verbosity";
-            var verb_model = new Gtk.StringList (VERBOSITY_LABELS);
+            var verb_model = Native.string_list (VERBOSITY_LABELS);
             this.verbosity_row.model = verb_model;
             string cur_verb = (profile != null) ? profile.verbosity : "normal";
             for (uint i = 0; i < VERBOSITIES.length; i++) {
@@ -215,7 +213,7 @@ namespace Sshuttle {
             var dialog = new Gtk.FileDialog ();
             dialog.title = "Select SSH Private Key";
 
-            dialog.open.begin (this, null, (obj, res) => {
+            dialog.open.begin (this.get_root () as Gtk.Window, null, (obj, res) => {
                 try {
                     var file = dialog.open.end (res);
                     if (file != null) {
@@ -379,9 +377,9 @@ namespace Sshuttle {
          * 显示连接配置校验错误。
          */
         private void show_validation_error (string message) {
-            var dialog = new Adw.MessageDialog (this, "Invalid Configuration", message);
+            var dialog = new Adw.AlertDialog ("Invalid Configuration", message);
             dialog.add_response ("close", "Close");
-            dialog.present ();
+            dialog.present (this);
         }
 
         private void on_delete_clicked () {

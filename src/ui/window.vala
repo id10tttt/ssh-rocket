@@ -244,8 +244,7 @@ namespace Sshuttle {
          * 确认后重置规则和统计设置，连接 Profile 保持不变。
          */
         private void on_reset_settings () {
-            var dialog = new Adw.MessageDialog (
-                this,
+            var dialog = new Adw.AlertDialog (
                 "Reset Rules and Settings?",
                 "Application rules, domain rules, blacklist entries, and traffic statistics will be cleared. Connection profiles will be kept."
             );
@@ -259,7 +258,7 @@ namespace Sshuttle {
                     this.config_manager.reset_rules_and_settings ();
                 }
             });
-            dialog.present ();
+            dialog.present (this);
         }
 
         private void update_status_display () {
@@ -383,16 +382,16 @@ namespace Sshuttle {
         }
 
         private void on_add_profile () {
-            var editor = new ProfileEditorWindow (null, this);
+            var editor = new ProfileEditorWindow ();
             editor.profile_saved.connect ((new_p) => {
                 this.config_manager.save_profile (new_p);
                 this.refresh_connections ();
             });
-            editor.present ();
+            editor.present (this);
         }
 
         private void on_edit_profile (Profile profile) {
-            var editor = new ProfileEditorWindow (profile, this);
+            var editor = new ProfileEditorWindow (profile);
             editor.profile_saved.connect ((saved_p) => {
                 this.config_manager.save_profile (saved_p);
                 this.refresh_connections ();
@@ -401,7 +400,7 @@ namespace Sshuttle {
                 this.config_manager.delete_profile (deleted_p.id);
                 this.refresh_connections ();
             });
-            editor.present ();
+            editor.present (this);
         }
     }
 }

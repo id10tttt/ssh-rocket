@@ -148,8 +148,12 @@ namespace Sshuttle {
                 // 读取失败或为空
             }
 
-            var arr = new int[result.length];
-            for (uint i = 0; i < result.length; i++) {
+            int length = (int) result.length;
+            if (length <= 0) {
+                return new int[0];
+            }
+            var arr = new int[length];
+            for (int i = 0; i < length; i++) {
                 arr[i] = result[i];
             }
             return arr;
@@ -232,8 +236,12 @@ namespace Sshuttle {
             } catch (GLib.Error e) {
             }
 
-            var arr = new int[result.length];
-            for (uint i = 0; i < result.length; i++) {
+            int length = (int) result.length;
+            if (length <= 0) {
+                return new int[0];
+            }
+            var arr = new int[length];
+            for (int i = 0; i < length; i++) {
                 arr[i] = result[i];
             }
             return arr;

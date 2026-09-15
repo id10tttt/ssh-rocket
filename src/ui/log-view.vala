@@ -60,7 +60,7 @@ namespace Sshuttle {
             filter_label.add_css_class ("dim-label");
             action_bar.append (filter_label);
 
-            this.app_filter_model = new Gtk.StringList (new string[] { "All Applications", "System" });
+            this.app_filter_model = Native.string_list (new string[] { "All Applications", "System" });
             this.app_dropdown = new Gtk.DropDown (this.app_filter_model, null);
             this.app_dropdown.notify["selected"].connect (this.refresh_app_logs);
             action_bar.append (this.app_dropdown);

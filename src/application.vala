@@ -43,8 +43,8 @@ namespace Sshuttle {
             });
             this.add_action (about_action);
 
-            this.set_accels_for_action ("app.quit", { "<Control>q" });
-            this.set_accels_for_action ("win.new-profile", { "<Control>n" });
+            Native.set_accels_for_action (this, "app.quit", { "<Control>q" });
+            Native.set_accels_for_action (this, "win.new-profile", { "<Control>n" });
 
             // 注册系统退出信号，确保异常中断时彻底清理防火墙与 cgroup，无系统残余
             GLib.Unix.signal_add (Posix.Signal.INT, () => {

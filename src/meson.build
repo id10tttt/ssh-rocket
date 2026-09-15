@@ -2,6 +2,7 @@ sources = [
   'main.vala',
   'application.vala',
   'config.vapi',
+  'native-bindings.vapi',
   'models/profile.vala',
   'models/domain-rule.vala',
   'services/command-builder.vala',
@@ -40,6 +41,7 @@ executable(
   meson.project_name(),
   sources,
   dependencies: dependencies,
+  c_args: vala_c_args,
   install: true,
 )
 
@@ -47,11 +49,13 @@ executable(
   'sshuttle-gui-helper',
   'helper-main.vala',
   'config.vapi',
+  'native-bindings.vapi',
   'models/domain-rule.vala',
   'services/runtime-client.vala',
   'services/cgroup-manager.vala',
   'services/nft-manager.vala',
   dependencies: dependencies,
+  c_args: vala_c_args,
   install: true,
   install_dir: get_option('libexecdir'),
 )

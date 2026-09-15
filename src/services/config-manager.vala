@@ -334,7 +334,10 @@ namespace Sshuttle {
 
             builder.set_member_name ("app_traffic");
             builder.begin_object ();
-            this.app_traffic.foreach ((k, v) => {
+            var iter = GLib.HashTableIter<string, AppTrafficStats> (this.app_traffic);
+            string k;
+            AppTrafficStats v;
+            while (iter.next (out k, out v)) {
                 builder.set_member_name (k);
                 builder.begin_object ();
                 builder.set_member_name ("uploaded");
@@ -342,7 +345,7 @@ namespace Sshuttle {
                 builder.set_member_name ("downloaded");
                 builder.add_int_value ((int64) v.bytes_downloaded);
                 builder.end_object ();
-            });
+            }
             builder.end_object ();
 
             builder.end_object ();
@@ -387,10 +390,12 @@ namespace Sshuttle {
         public void get_total_traffic (out uint64 total_uploaded, out uint64 total_downloaded) {
             uint64 up = 0;
             uint64 down = 0;
-            this.app_traffic.foreach ((k, v) => {
+            var iter = GLib.HashTableIter<string, AppTrafficStats> (this.app_traffic);
+            AppTrafficStats v;
+            while (iter.next (null, out v)) {
                 up += v.bytes_uploaded;
                 down += v.bytes_downloaded;
-            });
+            }
             total_uploaded = up;
             total_downloaded = down;
         }

@@ -733,11 +733,13 @@ namespace Sshuttle {
             }
 
             var closed_keys = new GLib.GenericArray<string> ();
-            this.active_sockets.foreach ((k, v) => {
+            var iter = GLib.HashTableIter<string, SocketTrafficEntry> (this.active_sockets);
+            string k;
+            while (iter.next (out k, null)) {
                 if (!seen_sockets.contains (k)) {
                     closed_keys.add (k);
                 }
-            });
+            }
             for (uint i = 0; i < closed_keys.length; i++) {
                 this.active_sockets.remove (closed_keys[i]);
             }

@@ -54,7 +54,8 @@ void test_lifecycle (bool stop) {
     int exits = 0;
     int cleaned_before = Sshuttle.CgroupManager.cleanup_count;
     uint guard = GLib.Timeout.add_seconds (8, () => {
-        GLib.error ("Tunnel lifecycle timed out");
+        GLib.Test.message ("Tunnel lifecycle timed out");
+        assert_not_reached ();
     });
     service.tunnel_exited.connect ((status, signal_number) => {
         assert (!Sshuttle.CgroupManager.proxy_created);

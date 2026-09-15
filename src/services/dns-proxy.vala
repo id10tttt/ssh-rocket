@@ -138,7 +138,10 @@ namespace Sshuttle {
 
             this.resolution_cache_mutex.lock ();
             this.nft_manager.flush_ip_sets ();
-            this.resolution_cache.foreach ((domain, entry) => {
+            var iter = GLib.HashTableIter<string, DnsResolutionEntry> (this.resolution_cache);
+            string domain;
+            DnsResolutionEntry entry;
+            while (iter.next (out domain, out entry)) {
                 if (now - entry.resolved_at <= 300 * GLib.TimeSpan.SECOND) {
                     bool matched;
                     string action = this.resolve_action_for_domain (entry.domain, out matched);
@@ -148,7 +151,7 @@ namespace Sshuttle {
                 } else {
                     expired_domains.add (domain);
                 }
-            });
+            }
             for (uint i = 0; i < expired_domains.length; i++) {
                 this.resolution_cache.remove (expired_domains[i]);
             }

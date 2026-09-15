@@ -200,9 +200,9 @@ namespace Sshuttle {
             if (text != "") {
                 if (!this.is_valid_network (text)) {
                     var root_win = this.get_root () as Gtk.Window;
-                    var dialog = new Adw.MessageDialog (root_win, "Invalid Network", "Enter a valid IPv4 or IPv6 address with an optional CIDR prefix.");
+                    var dialog = new Adw.AlertDialog ("Invalid Network", "Enter a valid IPv4 or IPv6 address with an optional CIDR prefix.");
                     dialog.add_response ("close", "Close");
-                    dialog.present ();
+                    dialog.present (root_win);
                     return;
                 }
                 this.add_exclude_item (text);

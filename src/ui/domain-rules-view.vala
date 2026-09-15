@@ -27,7 +27,7 @@ namespace Sshuttle {
             this.default_policy_row.title = "Default Policy for Unmatched Domains";
             this.default_policy_row.subtitle = "Strategy for unlisted domains";
             string[] policies = { "direct", "proxy" };
-            this.default_policy_row.model = new Gtk.StringList (policies);
+            this.default_policy_row.model = Native.string_list (policies);
 
             bool is_def_proxy = (this.config_manager.get_domain_default_policy () == "proxy");
             this.default_policy_row.selected = is_def_proxy ? 1 : 0;
@@ -62,7 +62,7 @@ namespace Sshuttle {
             this.new_pattern_row.title = "New Domain, IP, or CIDR Rule";
 
             string[] action_labels = { "direct", "proxy" };
-            this.action_dropdown = new Gtk.DropDown.from_strings (action_labels);
+            this.action_dropdown = new Gtk.DropDown (Native.string_list (action_labels), null);
             this.action_dropdown.selected = 0;
             this.action_dropdown.valign = Gtk.Align.CENTER;
             this.new_pattern_row.add_suffix (this.action_dropdown);
@@ -153,7 +153,7 @@ namespace Sshuttle {
 
         private void show_edit_dialog (DomainRule rule) {
             var root_win = this.get_root () as Gtk.Window;
-            var dialog = new Adw.MessageDialog (root_win, "Edit Domain Rule", null);
+            var dialog = new Adw.AlertDialog ("Edit Domain Rule", null);
 
             var group = new Adw.PreferencesGroup ();
 
@@ -165,7 +165,7 @@ namespace Sshuttle {
             var act_row = new Adw.ComboRow ();
             act_row.title = "Action";
             string[] acts = { "direct", "proxy" };
-            act_row.model = new Gtk.StringList (acts);
+            act_row.model = Native.string_list (acts);
             act_row.selected = (rule.action == "proxy") ? 1 : 0;
             group.add (act_row);
 
@@ -185,7 +185,7 @@ namespace Sshuttle {
                 }
             });
 
-            dialog.present ();
+            dialog.present (root_win);
         }
 
         private void refresh_rules_list () {

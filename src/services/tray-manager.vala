@@ -45,6 +45,7 @@ namespace Sshuttle {
         public void scroll (int delta, string orientation) throws GLib.Error {
         }
 
+        [DBus (visible = false)]
         public void emit_icon_changed () {
             this.new_icon ();
         }
@@ -84,6 +85,7 @@ namespace Sshuttle {
             this.manager = manager;
         }
 
+        [DBus (visible = false)]
         public void emit_changed () {
             this.revision++;
             this.layout_updated (this.revision, 0);

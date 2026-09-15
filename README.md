@@ -13,6 +13,11 @@
 
 ## 构建依赖
 
+最低版本：GLib 2.70、GTK 4.10、Libadwaita 1.5。Vala 代码以 GLib 2.70 为目标生成。
+
+对 Vala 自动生成的 C，仅定向忽略未使用变量、未使用函数和生成器的 const 限定符警告；
+弃用 API、指针类型不兼容、返回值和分配大小检查保持开启。
+
 在 Fedora / CentOS Stream / RHEL 上：
 
 ```bash

@@ -1,7 +1,9 @@
+#if !RUNTIME_TESTS
 [CCode (cheader_filename = "grp.h", cname = "initgroups")]
 extern int init_groups (string user, Posix.gid_t group);
 [CCode (cheader_filename = "sys/file.h", cname = "flock")]
 extern int lock_file (int fd, int operation);
+#endif
 
 namespace Sshuttle {
     /** 特权操作只通过已验证用户的私有 D-Bus 连接开放。 */
@@ -192,7 +194,7 @@ namespace Sshuttle {
             launcher.setenv ("SSHPASS", password, true);
             launcher.setenv ("SSH_AUTH_SOCK", agent, true);
             launcher.set_cwd ("/");
-            tunnel = launcher.spawnv (safe_args);
+            tunnel = Native.spawnv (launcher, safe_args);
             port = requested_port;
             stopping = false;
             read_log.begin (tunnel, tunnel.get_stdout_pipe ());
@@ -263,6 +265,7 @@ namespace Sshuttle {
     }
 }
 
+#if !RUNTIME_TESTS
 // 密钥、ssh_config、known_hosts 以及远程命令始终在普通用户身份下访问。
 int run_user_ssh (string[] args) {
     uint uid = 0;
@@ -367,3 +370,5 @@ int main (string[] args) {
     Posix.close (lock_fd);
     return 0;
 }
+
+#endif

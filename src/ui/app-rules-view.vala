@@ -54,7 +54,7 @@ namespace Sshuttle {
             });
 
             string[] sort_options = { "Name", "Usage" };
-            this.sort_dropdown = new Gtk.DropDown.from_strings (sort_options);
+            this.sort_dropdown = new Gtk.DropDown (Native.string_list (sort_options), null);
             this.sort_dropdown.valign = Gtk.Align.CENTER;
             this.sort_dropdown.tooltip_text = "Sort by";
             this.sort_dropdown.notify["selected"].connect (() => {
@@ -98,12 +98,9 @@ namespace Sshuttle {
                 if (app.icon_name != "") {
                     Gtk.Image? img = null;
                     if (app.icon_name.has_prefix ("/") && GLib.FileUtils.test (app.icon_name, GLib.FileTest.EXISTS)) {
-                        try {
-                            var icon_file = GLib.File.new_for_path (app.icon_name);
-                            var gicon = new GLib.FileIcon (icon_file);
-                            img = new Gtk.Image.from_gicon (gicon);
-                        } catch (GLib.Error e) {
-                        }
+                        var icon_file = GLib.File.new_for_path (app.icon_name);
+                        var gicon = new GLib.FileIcon (icon_file);
+                        img = new Gtk.Image.from_gicon (gicon);
                     } else {
                         img = new Gtk.Image.from_icon_name (app.icon_name);
                     }
