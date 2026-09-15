@@ -1,5 +1,20 @@
 datadir = get_option('datadir')
 
+rocket_resources = gnome.compile_resources(
+  'ssh-rocket-resources',
+  'ssh-rocket.gresource.xml',
+  source_dir: meson.current_source_dir(),
+  c_name: 'ssh_rocket',
+)
+
+install_data(
+  'icons/ssh-rocket.svg',
+  'icons/ssh-rocket-symbolic.svg',
+  'icons/ssh-rocket-disconnected-symbolic.svg',
+  'icons/ssh-rocket-acquiring-symbolic.svg',
+  install_dir: datadir / 'icons/hicolor/scalable/apps',
+)
+
 desktop_conf = configuration_data()
 desktop_conf.set('GUI_EXECUTABLE', get_option('prefix') / get_option('bindir') / meson.project_name())
 configure_file(

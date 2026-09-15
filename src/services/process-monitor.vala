@@ -2,7 +2,7 @@ namespace Sshuttle {
 
     /**
      * ProcessMonitor
-     * 监控系统中属于被代理 App 的进程，自动将它们移入 sshuttle-proxy cgroup。
+     * 监控系统中属于被代理 App 的进程，自动将它们移入代理 cgroup。
      * 当应用被取消代理时，将现有进程迁回根 cgroup。
      * 停止监控时全量迁移恢复。
      */

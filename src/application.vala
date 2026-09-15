@@ -16,6 +16,8 @@ namespace Sshuttle {
 
         public override void startup () {
             base.startup ();
+            Gtk.IconTheme.get_for_display (Gdk.Display.get_default ()).add_resource_path ("/io/github/idi0t/SshuttleGUI/icons");
+            Gtk.Window.set_default_icon_name ("ssh-rocket");
 
             this.config_manager = new ConfigManager ();
             this.tunnel_manager = new TunnelManager (this.config_manager);
@@ -90,8 +92,8 @@ namespace Sshuttle {
 
         private void show_about () {
             var about = new Adw.AboutDialog ();
-            about.application_name = "SShuttle";
-            about.application_icon = "network-vpn-symbolic";
+            about.application_name = "SSH Rocket";
+            about.application_icon = "ssh-rocket";
             about.developer_name = "1di0t";
             about.version = Config.VERSION;
             about.copyright = "© 2026 1di0t";

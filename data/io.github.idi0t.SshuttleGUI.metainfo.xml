@@ -3,14 +3,14 @@
   <id>io.github.idi0t.SshuttleGUI</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
-  <name>SShuttle</name>
+  <name>SSH Rocket</name>
   <developer_name>1di0t</developer_name>
-  <summary>Native GTK4 and Libadwaita client for sshuttle</summary>
+  <summary>Transparent SSH proxy for GNOME</summary>
   <description>
-    <p>A modern and native GNOME front-end for managing sshuttle transparent proxy VPN connections.</p>
+    <p>A native GNOME client that routes selected TCP traffic through OpenSSH and tun2socks.</p>
   </description>
   <launchable type="desktop-id">io.github.idi0t.SshuttleGUI.desktop</launchable>
   <provides>
-    <binary>sshuttle-gui</binary>
+    <binary>ssh-rocket</binary>
   </provides>
 </component>

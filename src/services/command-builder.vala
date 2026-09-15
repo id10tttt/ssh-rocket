@@ -61,11 +61,15 @@ namespace Sshuttle {
                 throw new GLib.IOError.INVALID_ARGUMENT ("Host cannot be empty");
             }
 
+            if (local_port < 1024 || local_port > 65534 || profile.port < 0 || profile.port > 65535 ||
+                profile.host.strip ().has_prefix ("-")) {
+                throw new GLib.IOError.INVALID_ARGUMENT ("Invalid SSH endpoint or local port");
+            }
             var argv = new GLib.GenericArray<string> ();
 
-            argv.add ("sshuttle");
+            argv.add ("ssh-rocket");
 
-            // 指定监听端口，便于精准管理对应 nftables 表 (sshuttle-ipv4-<port>)
+            // SOCKS 和 DNS 转发使用相邻端口，连接前由 TunnelManager 一并检查占用。
             argv.add ("-l");
             argv.add (profile.ipv6
                 ? @"127.0.0.1:$(local_port),[::1]:$(local_port)"
@@ -79,17 +83,6 @@ namespace Sshuttle {
                 argv.add ("--disable-ipv6");
             }
 
-            // 强制采用 nftables 模式，支持内核级 cgroup v2 应用过滤
-            argv.add ("--method");
-            argv.add ("nft");
-
-            // 始终启用 -v 确保输出内部 DNS 监听端口供 DnsProxy 捕获
-            if (profile.verbosity == "very_verbose") {
-                argv.add ("-vv");
-            } else {
-                argv.add ("-v");
-            }
-
             // 构造 SSH 命令，确保在后台非终端环境下能够自动接受新 Host Key，并支持读取当前普通用户的 known_hosts / agent
             var ssh_parts = new GLib.GenericArray<string> ();
 
@@ -99,7 +92,23 @@ namespace Sshuttle {
                 ssh_parts.add ("ssh");
             }
 
-            ssh_parts.add ("-o StrictHostKeyChecking=accept-new");
+            ssh_parts.add ("-N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3");
+            ssh_parts.add ("-o ForkAfterAuthentication=no -o ControlMaster=no -o ControlPath=none");
+            ssh_parts.add ("-o StrictHostKeyChecking=accept-new -o ConnectTimeout=15");
+            ssh_parts.add (profile.auth_type == "password" ? "-o NumberOfPasswordPrompts=1" : "-o BatchMode=yes");
+            ssh_parts.add (@"-D 127.0.0.1:$(local_port)");
+            if (profile.dns) {
+                ssh_parts.add (@"-L 127.0.0.1:$(local_port + 1):1.1.1.1:53");
+            }
+            if (profile.port != 0 && profile.port != 22) {
+                ssh_parts.add (@"-p $(profile.port)");
+            }
+            if (profile.username.strip () != "") {
+                ssh_parts.add (@"-l $(GLib.Shell.quote (profile.username))");
+            }
+            if (profile.verbosity == "very_verbose") {
+                ssh_parts.add ("-vv");
+            }
 
             string home_dir = GLib.Environment.get_home_dir ();
 
@@ -133,7 +142,7 @@ namespace Sshuttle {
             argv.add (string.joinv (" ", ssh_arr));
 
             argv.add ("-r");
-            argv.add (profile.get_ssh_target ());
+            argv.add (profile.host.strip ());
 
             // 自动排除 SSH 服务器、用户配置项与全局路由下的本地网段。
             foreach (var network in get_effective_excludes (profile)) {

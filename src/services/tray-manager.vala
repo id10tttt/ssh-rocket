@@ -11,17 +11,17 @@ namespace Sshuttle {
 
         public string category { owned get { return "ApplicationStatus"; } }
         public string id { owned get { return "io.github.idi0t.SshuttleGUI"; } }
-        public string title { owned get { return "SShuttle"; } }
+        public string title { owned get { return "SSH Rocket"; } }
         public string status { owned get { return "Active"; } }
         public string icon_name {
             owned get {
                 var state = this.manager.tunnel_manager.state;
                 if (state == TunnelState.CONNECTED) {
-                    return "network-vpn-symbolic";
+                    return "ssh-rocket-symbolic";
                 } else if (state == TunnelState.CONNECTING || state == TunnelState.DISCONNECTING) {
-                    return "network-vpn-acquiring-symbolic";
+                    return "ssh-rocket-acquiring-symbolic";
                 }
-                return "network-vpn-disconnected-symbolic";
+                return "ssh-rocket-disconnected-symbolic";
             }
         }
         public ObjectPath menu { owned get { return new ObjectPath ("/MenuBar"); } }
@@ -164,7 +164,7 @@ namespace Sshuttle {
             items.add (this.make_separator_variant (202));
 
             // 3. Show Window
-            items.add (this.make_item_variant (203, "Show SShuttle", true));
+            items.add (this.make_item_variant (203, "Show SSH Rocket", true));
 
             // 4. Quit
             items.add (this.make_item_variant (204, "Quit", true));

@@ -1,5 +1,5 @@
 string[] tunnel_args (string remote = "exit") {
-    return { "sshuttle", "-l", "127.0.0.1:12300", "--method", "nft", "-v",
+    return { "ssh-rocket", "-l", "127.0.0.1:12300",
         "-e", "ssh -i '/tmp/key with spaces'", "-r", remote, "0.0.0.0/0" };
 }
 
@@ -173,16 +173,18 @@ int runtime_test_main (string[] args) {
     if (args.length == 3 && args[1] == "--ipc-client") {
         return run_ipc_client (args[2]);
     }
-    // 子进程模拟 sshuttle，仅校验传参和环境，不申请任何权限。
-    if (args.length > 1 && args[1] == "-l") {
+    // 模拟普通用户的两个传输进程，不申请权限或修改系统网络。
+    if (args.length > 3 && args[1] == "--user-ssh") {
+        if ("fake-tun2socks" in args[3]) {
+            stdout.printf ("[STACK] ready\n");
+            stdout.flush ();
+            GLib.Thread.usleep (10000000);
+            return 0;
+        }
         assert (GLib.Environment.get_variable ("SSHPASS") == "test-password");
         assert (GLib.Environment.get_variable ("SSH_AUTH_SOCK") == "test-agent");
-        foreach (var arg in args) {
-            assert (!("test-password" in arg));
-            if (arg == "wait") {
-                GLib.Thread.usleep (10000000);
-            }
-        }
+        foreach (var arg in args) assert (!("test-password" in arg));
+        if ("wait" in args[3]) GLib.Thread.usleep (10000000);
         return 0;
     }
     GLib.Test.init (ref args);

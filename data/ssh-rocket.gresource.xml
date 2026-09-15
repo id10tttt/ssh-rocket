@@ -1,0 +1,8 @@
+<gresources>
+  <gresource prefix="/io/github/idi0t/SshuttleGUI/icons/scalable/apps">
+    <file alias="ssh-rocket.svg">icons/ssh-rocket.svg</file>
+    <file alias="ssh-rocket-symbolic.svg">icons/ssh-rocket-symbolic.svg</file>
+    <file alias="ssh-rocket-disconnected-symbolic.svg">icons/ssh-rocket-disconnected-symbolic.svg</file>
+    <file alias="ssh-rocket-acquiring-symbolic.svg">icons/ssh-rocket-acquiring-symbolic.svg</file>
+  </gresource>
+</gresources>

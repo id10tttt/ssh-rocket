@@ -44,7 +44,7 @@ namespace Sshuttle {
             this.setup_proxy_logs_tab (proxy_tab);
             var proxy_page = this.stack.add_named (proxy_tab, "proxy_logs");
             proxy_page.title = "Proxy Logs";
-            proxy_page.icon_name = "network-vpn-symbolic";
+            proxy_page.icon_name = "ssh-rocket-symbolic";
         }
 
         private void setup_app_logs_tab (Gtk.Box container) {

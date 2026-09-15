@@ -1,82 +1,73 @@
-# SShuttle GUI
+# SSH Rocket
 
-基于 **Vala + GTK4 + Libadwaita + Meson** 的原生 GNOME `sshuttle` 代理客户端（参考 `g4music` 架构）。
+基于 Vala、GTK4 和 Libadwaita 的原生 GNOME SSH 透明代理客户端。
 
-## 特性
+SSH Rocket 使用 OpenSSH 建立本地 SOCKS5 和远端 TCP DNS 通道，由 tun2socks 将 TUN 中的 TCP 流量送入 SSH。远端只需运行允许 TCP 转发的 `sshd`，不需要安装额外程序。
 
-- **纯原生体验**：采用 Vala 编译为本地 ELF 二进制机器码，启动极快，内存占用低，彻底摆脱 Python 解释器与 Conda/virtualenv 动态库（`libstdc++.so`）冲突。
-- **现代化 GNOME HIG 界面**：
-  - 简洁直观的连接状态总览与大按钮切换（Connect / Disconnect / Reconnect / Spinner）；
-  - Profile 列表管理（支持自定义 SSH 主机、端口、用户名、远程 CIDR 路由、排除网络网段、DNS 转发与 IPv6）；
-  - 独立实时流式日志窗口（支持一键复制到剪贴板与清空）。
-- **标准 Meson 构建体系**：采用 GNOME 官方标准的 Meson + Ninja 构建与打包。
+## 功能
 
-## 构建依赖
+- SSH Agent、私钥和密码认证
+- 全局或指定 CIDR 路由
+- 按应用、域名和 IP 分流
+- DNS 请求通过 SSH TCP 转发，代理规则失败时不回退到本地 DNS
+- IPv4 和可选 IPv6 策略路由
+- 黑名单应用阻断和 QUIC 降级
+- 断线重连、实时日志和流量速率
+- 退出后清理 TUN、nftables、策略路由和临时 cgroup
 
-最低版本：GLib 2.70、GTK 4.10、Libadwaita 1.5。Vala 代码以 GLib 2.70 为目标生成。
+当前代理数据通道只支持 TCP。DNS 的 UDP 请求会在本机接收，再通过 SSH 中的 TCP 通道转发；普通 UDP、ICMP 和游戏流量不会通过 SSH。
 
-对 Vala 自动生成的 C，仅定向忽略未使用变量、未使用函数和生成器的 const 限定符警告；
-弃用 API、指针类型不兼容、返回值和分配大小检查保持开启。
+## 依赖
 
-在 Fedora / CentOS Stream / RHEL 上：
+构建需要 GLib 2.70、GTK 4.10、Libadwaita 1.5、Vala、Meson、Ninja 和 JSON-GLib。运行需要 `ssh`、`sshpass`（密码认证时）、`tun2socks`、`nft`、`ip`、`pkexec` 和桌面 Polkit 认证代理。
+
+安装 xjasonlyu/tun2socks 2.6.0：
 
 ```bash
-sudo dnf install -y meson ninja-build gcc vala gtk4-devel libadwaita-devel json-glib-devel sshuttle
+mkdir -p "$HOME/.local/bin"
+GOBIN="$HOME/.local/bin" go install github.com/xjasonlyu/tun2socks/v2@v2.6.0
 ```
 
-在 Ubuntu / Debian 上：
+确保 `$HOME/.local/bin` 位于 `PATH`，再安装发行版提供的其余依赖。例如 Fedora：
 
 ```bash
-sudo apt update && sudo apt install -y meson ninja-build valac libgtk-4-dev libadwaita-1-dev libjson-glib-dev sshuttle
-```
-
-在 Arch Linux / Manjaro 上：
-
-```bash
-sudo pacman -S meson ninja gcc vala gtk4 libadwaita json-glib sshuttle
+sudo dnf install meson ninja-build gcc vala gtk4-devel libadwaita-devel json-glib-devel openssh-clients sshpass nftables iproute polkit
 ```
 
 ## 构建、安装与运行
 
-运行时需要系统已有的 `sshuttle`、`nft`、`pkexec` 和桌面 Polkit 认证代理。
-
-首次安装或更新后，以普通用户执行：
+首次安装或更新后，以普通桌面用户执行：
 
 ```bash
 ./run-gui.sh --install
 ```
 
-脚本以普通用户编译，通过 sudo 安装程序、后台 helper、Polkit 策略和 `.desktop` 应用菜单入口。
-程序默认安装到 `/usr/local`，Polkit 策略安装到系统策略目录 `/usr/share/polkit-1/actions`。
-构建文件保存在 `${XDG_CACHE_HOME:-$HOME/.cache}/sshuttle-gui/build`，不会使用仓库内已有的 `build/`。
+脚本以普通用户编译，通过 sudo 安装程序、特权 helper、Polkit 策略、图标和桌面入口。程序默认安装到 `/usr/local`。更新 helper 代码后需要重新安装。
 
-安装后，从应用菜单打开 **SShuttle**，或执行：
+安装后可从应用菜单打开 **SSH Rocket**，或执行：
 
 ```bash
-/usr/local/bin/sshuttle-gui
+/usr/local/bin/ssh-rocket
 ```
 
-开发时也可以通过 `./run-gui.sh` 编译并启动；更新 helper 代码后需重新安装。
+开发运行：
 
-界面、配置读写和 SSH 均使用当前桌面用户身份。首次连接时通过桌面认证窗口授权，
-仅后台 helper 和 sshuttle 的路由运行时持有管理员权限。
-同一次程序运行中的断线重连、手动断开再连接复用 helper，无需反复输入密码。
-完整退出程序、helper 退出或重启电脑后，下次连接重新授权；不会配置永久免密 sudo。
-
-helper 仅接受当前用户的私有连接，并限制可执行操作、进程归属和隧道参数。
-正常断开时先等待 sshuttle 清理基础路由，再清理应用规则并恢复进程原来的 cgroup；
-退出界面或连接丢失时，helper 同样执行清理后退出。
+```bash
+./run-gui.sh
+```
 
 手动构建安装：
 
 ```bash
-meson setup /tmp/sshuttle-gui-build . --prefix=/usr/local
-meson compile -C /tmp/sshuttle-gui-build
-sudo meson install -C /tmp/sshuttle-gui-build --no-rebuild
+meson setup /tmp/ssh-rocket-build . --prefix=/usr/local
+meson compile -C /tmp/ssh-rocket-build
+sudo meson install -C /tmp/ssh-rocket-build --no-rebuild
 ```
+
+界面、配置、OpenSSH 和 tun2socks 以当前桌面用户身份运行。特权 helper 只负责创建并清理 TUN、nftables、策略路由和 cgroup；每次应用会话首次连接时由 Polkit 请求授权。
 
 ## 快捷键
 
-- `Ctrl + N`: 新建 Profile
-- `Ctrl + L`: 打开日志窗口
-- `Ctrl + Q`: 退出程序
+- `Ctrl + N`：新建 Profile
+- `Ctrl + L`：打开日志窗口
+- `Ctrl + Q`：退出程序

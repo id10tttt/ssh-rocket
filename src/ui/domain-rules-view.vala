@@ -210,7 +210,7 @@ namespace Sshuttle {
                 var icon = new Gtk.Image ();
                 icon.valign = Gtk.Align.CENTER;
                 if (rule.action == "proxy") {
-                    icon.icon_name = "network-vpn-symbolic";
+                    icon.icon_name = "ssh-rocket-symbolic";
                     icon.add_css_class ("success");
                 } else {
                     icon.icon_name = "network-wired-symbolic";

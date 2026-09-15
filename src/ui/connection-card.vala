@@ -35,7 +35,7 @@ namespace Sshuttle {
             var header_box = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 10);
             header_box.margin_bottom = 12;
 
-            this.status_icon = new Gtk.Image.from_icon_name ("network-vpn-disconnected-symbolic");
+            this.status_icon = new Gtk.Image.from_icon_name ("ssh-rocket-disconnected-symbolic");
             this.status_icon.pixel_size = 24;
             this.status_icon.add_css_class ("dim-label");
             header_box.append (this.status_icon);
@@ -162,7 +162,7 @@ namespace Sshuttle {
                         this.action_btn.sensitive = true;
                         this.spinner.visible = false;
                         this.spinner.stop ();
-                        this.status_icon.icon_name = "network-vpn-symbolic";
+                        this.status_icon.icon_name = "ssh-rocket-symbolic";
                         this.status_icon.add_css_class ("success");
                         this.status_label.label = "Connected";
                         break;
@@ -172,7 +172,7 @@ namespace Sshuttle {
                         this.action_btn.sensitive = false;
                         this.spinner.visible = true;
                         this.spinner.start ();
-                        this.status_icon.icon_name = "network-vpn-acquiring-symbolic";
+                        this.status_icon.icon_name = "ssh-rocket-acquiring-symbolic";
                         this.status_icon.add_css_class ("warning");
                         this.status_label.label = "Connecting…";
                         break;
@@ -182,7 +182,7 @@ namespace Sshuttle {
                         this.action_btn.sensitive = false;
                         this.spinner.visible = true;
                         this.spinner.start ();
-                        this.status_icon.icon_name = "network-vpn-acquiring-symbolic";
+                        this.status_icon.icon_name = "ssh-rocket-acquiring-symbolic";
                         this.status_icon.add_css_class ("warning");
                         this.status_label.label = "Disconnecting…";
                         break;
@@ -194,7 +194,7 @@ namespace Sshuttle {
                             this.action_btn.sensitive = true;
                             this.spinner.visible = true;
                             this.spinner.start ();
-                            this.status_icon.icon_name = "network-vpn-acquiring-symbolic";
+                            this.status_icon.icon_name = "ssh-rocket-acquiring-symbolic";
                             this.status_icon.add_css_class ("warning");
                             this.status_label.label = @"Reconnecting (#$(this.tunnel_manager.reconnect_attempt))…";
                         } else {
@@ -215,7 +215,7 @@ namespace Sshuttle {
                         this.action_btn.sensitive = true;
                         this.spinner.visible = false;
                         this.spinner.stop ();
-                        this.status_icon.icon_name = "network-vpn-disconnected-symbolic";
+                        this.status_icon.icon_name = "ssh-rocket-disconnected-symbolic";
                         this.status_icon.add_css_class ("dim-label");
                         this.status_label.label = "Disconnected";
                         break;
@@ -226,7 +226,7 @@ namespace Sshuttle {
                 this.action_btn.sensitive = (state != TunnelState.CONNECTING && state != TunnelState.DISCONNECTING);
                 this.spinner.visible = false;
                 this.spinner.stop ();
-                this.status_icon.icon_name = "network-vpn-disconnected-symbolic";
+                this.status_icon.icon_name = "ssh-rocket-disconnected-symbolic";
                 this.status_icon.add_css_class ("dim-label");
                 this.status_label.label = "Disconnected";
             }

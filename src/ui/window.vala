@@ -28,7 +28,7 @@ namespace Sshuttle {
                 h = 600;
             }
             this.set_default_size (w, h);
-            this.title = "SShuttle";
+            this.title = "SSH Rocket";
 
             this.setup_actions ();
             this.build_ui ();
@@ -102,7 +102,7 @@ namespace Sshuttle {
             sidebar_box.width_request = 200;
             sidebar_box.add_css_class ("sidebar");
 
-            var app_title = new Gtk.Label ("SShuttle");
+            var app_title = new Gtk.Label ("SSH Rocket");
             app_title.add_css_class ("title-2");
             app_title.halign = Gtk.Align.START;
             app_title.margin_start = 18;
@@ -117,7 +117,7 @@ namespace Sshuttle {
             navigation_list.activate_on_single_click = true;
             navigation_list.vexpand = true;
 
-            var connect_nav_row = this.create_navigation_row ("network-vpn-symbolic", "Connect");
+            var connect_nav_row = this.create_navigation_row ("ssh-rocket-symbolic", "Connect");
             var rules_nav_row = this.create_navigation_row ("preferences-system-network-symbolic", "Rules");
             var log_nav_row = this.create_navigation_row ("utilities-terminal-symbolic", "Log");
             navigation_list.append (connect_nav_row);
@@ -158,7 +158,7 @@ namespace Sshuttle {
 
             var menu = new GLib.Menu ();
             menu.append ("Reset Rules and Settings…", "win.reset-settings");
-            menu.append ("About SShuttle", "app.about");
+            menu.append ("About SSH Rocket", "app.about");
             menu.append ("Quit", "app.quit");
             settings_btn.menu_model = menu;
             header_bar.pack_end (settings_btn);
@@ -172,7 +172,7 @@ namespace Sshuttle {
             // Page 1: Connect
             var connect_page = this.build_connect_page ();
             var connect_vs_page = this.view_stack.add_titled (connect_page, "connect", "Connect");
-            connect_vs_page.icon_name = "network-vpn-symbolic";
+            connect_vs_page.icon_name = "ssh-rocket-symbolic";
 
             // Page 2: Rules
             var rules_view = new RulesView (this.config_manager, this.tunnel_manager);
@@ -295,7 +295,7 @@ namespace Sshuttle {
 
             // 空状态占位页
             this.empty_page = new Adw.StatusPage ();
-            this.empty_page.icon_name = "network-vpn-disconnected-symbolic";
+            this.empty_page.icon_name = "ssh-rocket-disconnected-symbolic";
             this.empty_page.title = "No Connections";
             this.empty_page.description = "Add a server to get started.";
             this.empty_page.vexpand = true;

@@ -12,6 +12,9 @@ namespace Sshuttle {
         private NftManager nft = new NftManager ();
         private uint uid;
         private GLib.Subprocess? tunnel;
+        private GLib.Subprocess? forwarder;
+        private TunRouter router = new TunRouter ();
+        private bool forwarder_ready;
         private int port = 0;
         private bool prepared = false;
         private bool stopping = false;
@@ -28,12 +31,12 @@ namespace Sshuttle {
                 return true;
             }
             if (nft.has_active_sshuttle_tables ()) {
-                throw new GLib.IOError.BUSY ("Another sshuttle session is active");
+                throw new GLib.IOError.BUSY ("Another SSH Rocket or sshuttle session is active");
             }
-            if (groups.is_cgroup_created () || groups.is_block_cgroup_created ()) {
-                throw new GLib.IOError.BUSY ("SShuttle cgroups already exist; finish the previous session first");
+            if (groups.is_runtime_cgroup_created () || groups.is_cgroup_created () || groups.is_block_cgroup_created ()) {
+                throw new GLib.IOError.BUSY ("SSH Rocket cgroups already exist; finish the previous session first");
             }
-            if (!groups.ensure_proxy_cgroup () || !groups.ensure_block_cgroup ()) {
+            if (!groups.ensure_runtime_cgroup () || !groups.ensure_proxy_cgroup () || !groups.ensure_block_cgroup ()) {
                 groups.cleanup_and_destroy ();
                 throw new GLib.IOError.FAILED ("Failed to prepare cgroup v2 routing directories");
             }
@@ -52,6 +55,9 @@ namespace Sshuttle {
             if (pid <= 1 || Posix.stat (@"/proc/$(pid)", out process_stat) != 0 || process_stat.st_uid != uid) {
                 return false;
             }
+            string process_group;
+            if (GLib.FileUtils.get_contents (@"/proc/$(pid)/cgroup", out process_group) &&
+                "sshrocket-runtime" in process_group) return false;
             switch (operation) {
                 case "proxy": return groups.move_pid_to_proxy (pid);
                 case "block": return groups.move_pid_to_block (pid);
@@ -104,7 +110,7 @@ namespace Sshuttle {
         }
 
         public void cleanup () throws GLib.Error {
-            // sshuttle 先退出并清理基础表，之后才释放本应用的规则与 cgroup。
+            // OpenSSH 退出后停止 tun2socks，再释放路由、虚拟网卡和 cgroup。
             if (tunnel != null) {
                 stop_tunnel ();
                 return;
@@ -117,89 +123,125 @@ namespace Sshuttle {
                 return;
             }
             nft.cleanup_all_sshuttle_tables (port);
+            router.stop ();
             groups.cleanup_and_destroy ();
             port = 0;
             prepared = false;
         }
 
-        /** 只接受客户端已有的参数集合，SSH 命令在降权后解析执行。 */
+        /** 路由参数严格校验；客户端 SSH 命令只允许在降权后执行。 */
         public void start_tunnel (string[] argv, string password, string agent) throws GLib.Error {
-            if (closing || tunnel != null || !prepared || argv.length < 2 || argv[0] != "sshuttle") {
+            if (closing || tunnel != null || !prepared || argv.length < 2 || argv[0] != "ssh-rocket") {
                 throw new GLib.IOError.BUSY ("Tunnel runtime is not ready");
             }
-            string[] safe_args = { Config.SSHUTTLE_PATH };
-            bool have_ssh = false;
-            bool have_remote = false;
-            bool have_listen = false;
-            bool have_method = false;
+            string ssh_command = "";
+            string remote = "";
             int requested_port = 0;
+            bool ipv6 = true;
+            string[] routes = {};
             for (int i = 1; i < argv.length; i++) {
                 string arg = argv[i];
-                if (arg == "-e" || arg == "-r" || arg == "-l" || arg == "-x" || arg == "--method") {
-                    if (++i >= argv.length) {
-                        throw new GLib.IOError.INVALID_ARGUMENT ("Missing tunnel argument");
-                    }
+                if (arg == "-e" || arg == "-r" || arg == "-l" || arg == "-x") {
+                    if (++i >= argv.length) throw new GLib.IOError.INVALID_ARGUMENT ("Missing tunnel argument");
                     string value = argv[i];
                     if (arg == "-e") {
-                        if (have_ssh) {
-                            throw new GLib.IOError.INVALID_ARGUMENT ("Duplicate SSH command");
-                        }
-                        have_ssh = true;
-                        value = "%s --user-ssh %u %s".printf (
-                            GLib.Shell.quote (Config.HELPER_PATH), uid, GLib.Shell.quote (value));
-                    } else if (arg == "--method") {
-                        if (have_method || value != "nft") {
-                            throw new GLib.IOError.INVALID_ARGUMENT ("Only nft routing is supported");
-                        }
-                        have_method = true;
+                        if (ssh_command != "" || value == "") throw new GLib.IOError.INVALID_ARGUMENT ("Duplicate SSH command");
+                        ssh_command = value;
+                    } else if (arg == "-r") {
+                        if (remote != "" || value == "" || value.has_prefix ("-"))
+                            throw new GLib.IOError.INVALID_ARGUMENT ("Invalid SSH destination");
+                        remote = value;
                     } else if (arg == "-l") {
-                        if (have_listen) {
-                            throw new GLib.IOError.INVALID_ARGUMENT ("Duplicate listen address");
-                        }
-                        have_listen = true;
                         var match = new GLib.Regex ("^127\\.0\\.0\\.1:([0-9]+)(,\\[::1\\]:([0-9]+))?$");
                         GLib.MatchInfo info;
-                        if (!match.match (value, 0, out info) ||
-                            !int.try_parse (info.fetch (1), out requested_port) || requested_port < 1024 || requested_port > 65535 ||
-                            (info.fetch (3) != "" && info.fetch (3) != info.fetch (1))) {
+                        if (!match.match (value, 0, out info) || requested_port != 0 ||
+                            !int.try_parse (info.fetch (1), out requested_port) || requested_port < 1024 || requested_port > 65534 ||
+                            (info.fetch (3) != "" && info.fetch (3) != info.fetch (1)))
                             throw new GLib.IOError.INVALID_ARGUMENT ("Invalid loopback listen address");
-                        }
-                    } else if (arg == "-r") {
-                        if (have_remote || value == "" || value.has_prefix ("-")) {
-                            throw new GLib.IOError.INVALID_ARGUMENT ("Invalid SSH destination");
-                        }
-                        have_remote = true;
                     }
-                    safe_args += arg;
-                    safe_args += value;
-                } else if (arg == "--dns" || arg == "--disable-ipv6" || arg == "-v" || arg == "-vv") {
-                    safe_args += arg;
+                    // 排除网络由 apply_routing 统一规范化，不拼接客户端字符串到特权命令。
+                } else if (arg == "--dns") {
+                    // DNS 本地端口转发已包含在经验证的 SSH 命令中。
+                } else if (arg == "--disable-ipv6") {
+                    ipv6 = false;
                 } else {
                     string[] parts = arg.split ("/", 2);
                     var ip = new GLib.InetAddress.from_string (parts[0]);
                     int prefix = 0;
                     if (ip == null || (parts.length == 2 && (!int.try_parse (parts[1], out prefix) || prefix < 0 ||
-                        prefix > (ip.get_family () == GLib.SocketFamily.IPV6 ? 128 : 32)))) {
+                        prefix > (ip.get_family () == GLib.SocketFamily.IPV6 ? 128 : 32))))
                         throw new GLib.IOError.INVALID_ARGUMENT ("Invalid route");
-                    }
-                    safe_args += arg;
+                    routes += arg;
                 }
             }
-            if (!have_ssh || !have_remote || !have_listen || !have_method) {
+            if (ssh_command == "" || remote == "" || requested_port == 0 || routes.length == 0)
                 throw new GLib.IOError.INVALID_ARGUMENT ("Incomplete tunnel arguments");
-            }
-            var launcher = new GLib.SubprocessLauncher (
-                GLib.SubprocessFlags.STDOUT_PIPE | GLib.SubprocessFlags.STDERR_PIPE);
-            launcher.set_environ ({ "PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C.UTF-8", "HOME=/root" });
-            launcher.setenv ("SSHPASS", password, true);
-            launcher.setenv ("SSH_AUTH_SOCK", agent, true);
-            launcher.set_cwd ("/");
-            tunnel = Native.spawnv (launcher, safe_args);
             port = requested_port;
             stopping = false;
-            read_log.begin (tunnel, tunnel.get_stdout_pipe ());
-            read_log.begin (tunnel, tunnel.get_stderr_pipe ());
-            wait_tunnel.begin (tunnel);
+            forwarder_ready = false;
+            try {
+                router.start (uid, ipv6);
+                if (!nft.create_base_chains (port, ipv6, routes))
+                    throw new GLib.IOError.FAILED ("Failed to create SSH Rocket routing chains");
+                var launcher = new GLib.SubprocessLauncher (
+                    GLib.SubprocessFlags.STDOUT_PIPE | GLib.SubprocessFlags.STDERR_PIPE);
+                launcher.set_environ ({ "PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C.UTF-8", "HOME=/root" });
+                launcher.set_cwd ("/");
+                string tun_command = "%s --device tun://%s --proxy socks5://127.0.0.1:%d --loglevel info".printf (
+                    GLib.Shell.quote (Config.TUN2SOCKS_PATH), TunRouter.DEVICE, port);
+                forwarder = Native.spawnv (launcher, { Config.HELPER_PATH, "--user-ssh", uid.to_string (), tun_command });
+                launcher.setenv ("SSHPASS", password, true);
+                launcher.setenv ("SSH_AUTH_SOCK", agent, true);
+                tunnel = Native.spawnv (launcher, { Config.HELPER_PATH, "--user-ssh", uid.to_string (),
+                    ssh_command + " -- " + GLib.Shell.quote (remote) });
+                read_log.begin (forwarder, forwarder.get_stdout_pipe ());
+                read_log.begin (forwarder, forwarder.get_stderr_pipe ());
+                watch_forwarder.begin (forwarder);
+                read_log.begin (tunnel, tunnel.get_stdout_pipe ());
+                read_log.begin (tunnel, tunnel.get_stderr_pipe ());
+                wait_tunnel.begin (tunnel);
+                probe_ready.begin (tunnel);
+            } catch (GLib.Error e) {
+                if (forwarder != null) {
+                    forwarder.force_exit ();
+                    forwarder.wait (null);
+                    forwarder = null;
+                }
+                cleanup_owned_runtime ();
+                throw e;
+            }
+        }
+
+        /** SOCKS 握手成功且 TUN 协议栈就绪后，才通知界面安装分流规则。 */
+        private async void probe_ready (GLib.Subprocess child) {
+            while (tunnel == child && !stopping) {
+                try {
+                    var client = new GLib.SocketClient ();
+                    client.timeout = 1;
+                    var connection = yield client.connect_to_host_async ("127.0.0.1", (uint16) port);
+                    size_t count;
+                    yield connection.output_stream.write_all_async ({ 5, 1, 0 }, GLib.Priority.DEFAULT, null, out count);
+                    uint8[] reply = new uint8[2];
+                    yield connection.input_stream.read_all_async (reply, GLib.Priority.DEFAULT, null, out count);
+                    connection.close (null);
+                    if (count == 2 && reply[0] == 5 && reply[1] == 0 && forwarder_ready && tunnel == child && !stopping) {
+                        log_line ("SSH Rocket tunnel ready");
+                        return;
+                    }
+                } catch (GLib.Error e) {}
+                GLib.Timeout.add (100, () => { probe_ready.callback (); return false; });
+                yield;
+            }
+        }
+
+        private async void watch_forwarder (GLib.Subprocess child) {
+            try {
+                yield child.wait_async (null);
+                if (forwarder == child && !stopping && tunnel != null) {
+                    log_line ("tun2socks exited; stopping SSH tunnel");
+                    stop_tunnel ();
+                }
+            } catch (GLib.Error e) { warning ("tun2socks wait: %s", e.message); }
         }
 
         private async void read_log (GLib.Subprocess child, GLib.InputStream stream) {
@@ -207,7 +249,8 @@ namespace Sshuttle {
             try {
                 string? line;
                 while ((line = yield input.read_line_async (GLib.Priority.DEFAULT)) != null) {
-                    if (tunnel == child) {
+                    if (forwarder == child && "[STACK]" in line) forwarder_ready = true;
+                    if (tunnel == child || forwarder == child) {
                         log_line (line.make_valid ());
                     }
                 }
@@ -224,6 +267,12 @@ namespace Sshuttle {
                 if (kill_timeout != 0) {
                     GLib.Source.remove (kill_timeout);
                     kill_timeout = 0;
+                }
+                stopping = true;
+                if (forwarder != null) {
+                    forwarder.force_exit ();
+                    yield forwarder.wait_async (null);
+                    forwarder = null;
                 }
                 tunnel = null;
                 cleanup_owned_runtime ();
@@ -279,6 +328,15 @@ int run_user_ssh (string[] args) {
     string user_name = user.pw_name;
     string home_dir = user.pw_dir;
     Posix.gid_t group_id = user.pw_gid;
+    try {
+        var group_file = GLib.File.new_for_path ("/sys/fs/cgroup/sshrocket-runtime/cgroup.procs");
+        var output = group_file.append_to (GLib.FileCreateFlags.NONE);
+        output.write (((int) Posix.getpid ()).to_string ().data);
+        output.close ();
+    } catch (GLib.Error e) {
+        stderr.printf ("Cannot isolate proxy transport: %s\n", e.message);
+        return 1;
+    }
     if (init_groups (user_name, group_id) != 0 || Posix.setgid (group_id) != 0 || Posix.setuid (uid) != 0) {
         return 1;
     }
@@ -323,7 +381,7 @@ int main (string[] args) {
     }
     int lock_fd = Posix.open ("/run/sshuttle-gui.lock", Posix.O_CREAT | Posix.O_RDWR | Posix.O_NOFOLLOW | Posix.O_CLOEXEC, 0600);
     if (lock_fd < 0 || lock_file (lock_fd, 2 | 4) != 0) {
-        stderr.printf ("Another SShuttle runtime helper is active.\n");
+        stderr.printf ("Another SSH Rocket runtime helper is active.\n");
         return 1;
     }
     var loop = new GLib.MainLoop ();

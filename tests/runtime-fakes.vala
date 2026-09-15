@@ -1,17 +1,24 @@
 // 特权服务测试用内存后端，不读写真实防火墙或 cgroup。
 namespace Config {
-    public const string HELPER_PATH = "/usr/local/libexec/sshuttle-gui-helper";
-    public const string SSHUTTLE_PATH = "/proc/self/exe";
+    public const string HELPER_PATH = "/proc/self/exe";
+    public const string TUN2SOCKS_PATH = "fake-tun2socks";
     public const string PKEXEC_PATH = "/usr/bin/false";
 }
 
 namespace Sshuttle {
+    public class TunRouter : Object {
+        public const string DEVICE = "sshrocket0";
+        public void start (uint uid, bool ipv6) throws GLib.Error {}
+        public void stop () {}
+    }
     public class CgroupManager : Object {
         public static bool proxy_created;
         public static bool block_created;
         public static int cleanup_count;
         public bool is_cgroup_created () { return proxy_created; }
         public bool is_block_cgroup_created () { return block_created; }
+        public bool ensure_runtime_cgroup () { return true; }
+        public bool is_runtime_cgroup_created () { return false; }
         public bool ensure_proxy_cgroup () { proxy_created = true; return true; }
         public bool ensure_block_cgroup () { block_created = true; return true; }
         public bool move_pid_to_proxy (int pid) { return true; }
@@ -25,6 +32,7 @@ namespace Sshuttle {
     }
 
     public class NftManager : Object {
+        public bool create_base_chains (int port, bool ipv6, string[] routes) { return true; }
         public bool has_active_sshuttle_tables () { return false; }
         public bool base_chains_exist (int port, bool ipv6) { return true; }
         public bool apply_cgroup_filter (int port, bool ipv6, string policy, string[] networks, DomainRule[] rules) {

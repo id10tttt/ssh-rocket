@@ -15,9 +15,19 @@ namespace Sshuttle {
         public const string PROXY_PROCS_PATH = "/sys/fs/cgroup/sshuttle-proxy/cgroup.procs";
         public const string BLOCK_PROCS_PATH = "/sys/fs/cgroup/sshuttle-block/cgroup.procs";
         private GLib.HashTable<int, string> original_cgroups;
+        private bool runtime_created;
 
         public CgroupManager () {
             this.original_cgroups = new GLib.HashTable<int, string> (GLib.direct_hash, GLib.direct_equal);
+        }
+
+        public bool ensure_runtime_cgroup () {
+            runtime_created = Posix.mkdir ("/sys/fs/cgroup/sshrocket-runtime", 0755) == 0;
+            return runtime_created;
+        }
+
+        public bool is_runtime_cgroup_created () {
+            return GLib.FileUtils.test ("/sys/fs/cgroup/sshrocket-runtime", GLib.FileTest.IS_DIR);
         }
 
         public bool is_cgroup_created () {
@@ -254,6 +264,10 @@ namespace Sshuttle {
         public void cleanup_and_destroy () {
             if (Posix.geteuid () != 0) {
                 return;
+            }
+            if (runtime_created) {
+                Posix.rmdir ("/sys/fs/cgroup/sshrocket-runtime");
+                runtime_created = false;
             }
             // 1. 清理代理 cgroup
             if (this.is_cgroup_created ()) {

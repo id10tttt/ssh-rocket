@@ -1,5 +1,5 @@
 project(
-  'sshuttle-gui', ['vala', 'c'],
+  'ssh-rocket', ['vala', 'c'],
   version: '1.0.0',
   license: 'GPL3',
   meson_version: '>= 0.59.0',
@@ -47,7 +47,7 @@ vala_c_args = c_compiler.get_supported_arguments(
   '-Wno-discarded-qualifiers',
 )
 
-helper_path = get_option('prefix') / get_option('libexecdir') / 'sshuttle-gui-helper'
+helper_path = get_option('prefix') / get_option('libexecdir') / 'ssh-rocket-helper'
 
 subdir('data')
 subdir('src')
@@ -65,6 +65,24 @@ runtime_tests = executable(
   install: false,
 )
 test('runtime-session', runtime_tests, timeout: 30)
+
+core_tests = executable('core-tests',
+  'tests/core-tests.vala', 'src/config.vapi', 'src/native-bindings.vapi',
+  'src/models/profile.vala', 'src/models/domain-rule.vala',
+  'src/services/command-builder.vala', 'src/services/config-manager.vala',
+  'src/services/dns-proxy.vala', 'src/services/nft-manager.vala',
+  'src/services/runtime-client.vala',
+  include_directories: include_directories('src'),
+  dependencies: dependencies, c_args: vala_c_args, install: false)
+test('ssh-core', core_tests, timeout: 30)
+
+# 手动在 pasta 网络命名空间运行；需要用户指定的真实 SSH 节点。
+executable('network-tests', 'tests/network-tests.vala', 'src/native-bindings.vapi',
+  'src/models/profile.vala', 'src/models/domain-rule.vala',
+  'src/services/command-builder.vala', 'src/services/config-manager.vala',
+  'src/services/dns-proxy.vala', 'src/services/nft-manager.vala',
+  'src/services/runtime-client.vala', 'src/services/tun-router.vala',
+  dependencies: dependencies, c_args: vala_c_args, install: false)
 
 gnome.post_install(
   gtk_update_icon_cache: true,

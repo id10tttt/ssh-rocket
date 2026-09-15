@@ -211,6 +211,36 @@ namespace Sshuttle {
             return null;
         }
 
+        /** DNS 使用两字节长度帧，通过 SSH 本地端口转发访问远端解析器。 */
+        public static uint8[]? query_tcp (uint16 port, uint8[] packet) {
+            try {
+                var client = new GLib.SocketClient ();
+                client.timeout = 5;
+                var connection = client.connect_to_host ("127.0.0.1", port);
+                try {
+                    uint8[] frame = new uint8[packet.length + 2];
+                    frame[0] = (uint8) (packet.length >> 8);
+                    frame[1] = (uint8) packet.length;
+                    GLib.Memory.copy ((uint8*) frame + 2, packet, packet.length);
+                    size_t count;
+                    connection.output_stream.write_all (frame, out count);
+                    uint8[] header = new uint8[2];
+                    connection.input_stream.read_all (header, out count);
+                    if (count != 2) return null;
+                    int length = ((int) header[0] << 8) | header[1];
+                    if (length < 12) return null;
+                    uint8[] response = new uint8[length];
+                    connection.input_stream.read_all (response, out count);
+                    if (count != length || packet.length < 2 || response[0] != packet[0] || response[1] != packet[1]) return null;
+                    return response;
+                } finally {
+                    try { connection.close (null); } catch (GLib.Error e) {}
+                }
+            } catch (GLib.Error e) {
+                return null;
+            }
+        }
+
         private void handle_dns_query (
             uint8[] query_packet,
             GLib.SocketAddress client_addr,
@@ -248,9 +278,9 @@ namespace Sshuttle {
             uint8[]? resp_packet = null;
 
             if (action == "proxy") {
-                // 代理规则只允许经 sshuttle 的远端 DNS 查询，避免失败时泄漏到本地网络。
+                // 代理规则只允许经 SSH 的远端 TCP DNS 查询，避免失败时泄漏到本地网络。
                 if (this.remote_dns_port > 0) {
-                    resp_packet = this.query_udp ("127.0.0.1", this.remote_dns_port, query_packet, forward_port);
+                    resp_packet = query_tcp (this.remote_dns_port, query_packet);
                 } else if (active_profile != null && !active_profile.dns) {
                     // 配置明确关闭远端 DNS 时保留本地解析，否则域名规则与应用联网均无法工作。
                     resp_packet = this.query_udp ("127.0.0.53", 53, query_packet, forward_port);
@@ -281,7 +311,7 @@ namespace Sshuttle {
                     }
                     // 注：若未匹配规则且全局默认策略为 direct，切勿将 IP 加入 direct_ips 集合。
                     // 否则 direct_ips 在 nftables 首部优先放行，会导致已勾选 App 的未匹配域名被错误放行走直连。
-                    // 不加入 direct_ips 时，已勾选 App 命中 sshuttle-proxy 规则全量代理，未勾选 App 命中 != sshuttle-proxy 直连放行。
+                    // 不加入 direct_ips 时，已勾选 App 由 cgroup 规则全量代理，未勾选 App 按默认策略处理。
                 }
 
                 if (domain != null && domain != "") {

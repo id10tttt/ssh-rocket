@@ -1,11 +1,11 @@
 [Unit]
-Description=SShuttle GUI Backend Helper Service
+Description=SSH Rocket GUI Backend Helper Service
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/libexec/sshuttle-gui-helper
+ExecStart=/usr/libexec/ssh-rocket-helper
 Restart=on-failure
 RestartSec=3
 

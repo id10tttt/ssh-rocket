@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BUILD_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/sshuttle-gui/build"
+BUILD_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/ssh-rocket/build"
 
 if [ "$(id -u)" -eq 0 ]; then
     echo "Run this script as your desktop user. Administrator access is requested separately." >&2
@@ -19,9 +19,9 @@ if [ "${1:-}" = "--install" ]; then
     exit 0
 fi
 
-if [ ! -x /usr/local/libexec/sshuttle-gui-helper ]; then
+if [ ! -x /usr/local/libexec/ssh-rocket-helper ]; then
     echo "Install the runtime helper and application menu entry first: ./run-gui.sh --install" >&2
     exit 1
 fi
 
-exec "${BUILD_DIR}/src/sshuttle-gui" "$@"
+exec "${BUILD_DIR}/src/ssh-rocket" "$@"

@@ -206,6 +206,9 @@ namespace Sshuttle {
                     var s = new GLib.Socket (GLib.SocketFamily.IPV4, GLib.SocketType.STREAM, GLib.SocketProtocol.TCP);
                     var addr = new GLib.InetSocketAddress (new GLib.InetAddress.from_string ("127.0.0.1"), (uint16) port);
                     s.bind (addr, false);
+                    var dns_socket = new GLib.Socket (GLib.SocketFamily.IPV4, GLib.SocketType.STREAM, GLib.SocketProtocol.TCP);
+                    dns_socket.bind (new GLib.InetSocketAddress (new GLib.InetAddress.loopback (GLib.SocketFamily.IPV4), (uint16) (port + 1)), false);
+                    dns_socket.close ();
                     s.close ();
                     return port;
                 } catch (GLib.Error e) {
@@ -252,7 +255,7 @@ namespace Sshuttle {
             }
 
             if (this.nft_manager.has_active_sshuttle_tables ()) {
-                this.emit_log ("Another sshuttle session is active. Stop it before connecting with SShuttle.");
+                this.emit_log ("Another SSH Rocket or sshuttle session is active. Stop it before connecting.");
                 this.change_state (TunnelState.ERROR);
                 return;
             }
@@ -295,7 +298,7 @@ namespace Sshuttle {
                 });
 
             } catch (GLib.Error e) {
-                this.emit_log (@"Failed to spawn sshuttle: $(e.message)");
+                this.emit_log (@"Failed to start OpenSSH/tun2socks: $(e.message)");
                 this.cleanup_proxy_runtime ();
                 this.change_state (TunnelState.ERROR);
                 this.schedule_auto_reconnect ();
@@ -312,32 +315,15 @@ namespace Sshuttle {
 
             this.emit_proxy_log (line);
 
-            if ("dns listening on" in lower) {
-                // 捕获 sshuttle 内部安全 DNS 端口 (例如 "c : DNS listening on ('127.0.0.1', 12299).")
-                try {
-                    var r = new GLib.Regex ("dns listening on \\([^,]+,\\s*(\\d+)\\)", GLib.RegexCompileFlags.CASELESS);
-                    GLib.MatchInfo info;
-                    if (r.match (line, 0, out info)) {
-                        string port_str = info.fetch (1);
-                        uint16 port = (uint16) int.parse (port_str);
-                        if (port > 0) {
-                            this.dns_proxy.remote_dns_port = port;
-                            this.emit_log (@"Tunnel remote DNS ready on port $(port)");
-                        }
-                    }
-                } catch (GLib.RegexError e) {
-                }
-            }
-
-            if ("connected to server" in lower || "c : connected" in lower || "tunnel ready" in lower || (lower.has_prefix ("connected") && !("not connected" in lower))) {
-                if (this.state == TunnelState.CONNECTING) {
-                    this.wait_for_runtime_ready ();
-                }
+            if (line == "SSH Rocket tunnel ready" && this.state == TunnelState.CONNECTING) {
+                var profile = this.active_profile;
+                this.dns_proxy.remote_dns_port = profile != null && profile.dns ? (uint16) (this.local_proxy_port + 1) : 0;
+                this.wait_for_runtime_ready ();
             }
         }
 
         /**
-         * 等待 sshuttle 防火墙进程完成 nftables 基础表和链的创建。
+         * 等待 OpenSSH SOCKS、tun2socks 和 nftables 基础表全部就绪。
          */
         private void wait_for_runtime_ready () {
             if (this.runtime_ready_timeout_id != 0) {
@@ -822,7 +808,7 @@ namespace Sshuttle {
         }
 
         /**
-         * 判断当前 Profile 是否会让 sshuttle 创建 IPv6 路由表。
+         * 判断当前 Profile 是否需要 IPv6 TUN 策略路由。
          */
         private bool profile_uses_ipv6_routing (Profile profile) {
             if (!profile.ipv6) {

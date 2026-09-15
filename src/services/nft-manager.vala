@@ -10,8 +10,32 @@ namespace Sshuttle {
         public int active_port { get; set; default = 12300; }
         private bool active_ipv6 = false;
 
+        /** 建立独立路由链；DNS 重定向仍位于 NAT 链，TCP 通过标记进入 TUN。 */
+        public bool create_base_chains (int port, bool ipv6, string[] routes) {
+            for (int family = 4; family <= (ipv6 ? 6 : 4); family += 2) {
+                string table = @"sshrocket-ipv$(family)-$(port)";
+                string address = family == 4 ? "ip" : "ip6";
+                string nfproto = family == 4 ? "ipv4" : "ipv6";
+                if (!run_nft_command (@"nft add table inet $(table)") ||
+                    !run_nft_command (@"nft 'add chain inet $(table) output { type nat hook output priority -100; policy accept; }'") ||
+                    !run_nft_command (@"nft 'add chain inet $(table) route_output { type route hook output priority -150; policy accept; }'") ||
+                    !run_nft_command (@"nft add chain inet $(table) $(table)") ||
+                    !run_nft_command (@"nft add rule inet $(table) route_output meta nfproto != $(nfproto) return") ||
+                    !run_nft_command (@"nft add rule inet $(table) route_output socket cgroupv2 level 1 sshrocket-runtime return") ||
+                    !run_nft_command (@"nft add rule inet $(table) route_output fib daddr type local return") ||
+                    !run_nft_command (@"nft add rule inet $(table) route_output jump $(table)")) return false;
+                foreach (var route in routes) {
+                    string normalized;
+                    bool is_v6;
+                    if (!normalize_network (route, out normalized, out is_v6) || is_v6 != (family == 6)) continue;
+                    if (!run_nft_command (@"nft add rule inet $(table) $(table) $(address) daddr $(normalized) meta l4proto tcp meta mark set 0x5352 return")) return false;
+                }
+            }
+            return true;
+        }
+
         /**
-         * 检查 sshuttle 已创建当前端口对应的基础表和链。
+         * 检查 SSH Rocket 已创建当前端口对应的基础表和链。
          */
         public bool base_chains_exist (int port, bool ipv6_enabled) {
             if (Posix.geteuid () != 0) {
@@ -22,14 +46,14 @@ namespace Sshuttle {
                     return false;
                 }
             }
-            string table_v4 = @"sshuttle-ipv4-$(port)";
+            string table_v4 = @"sshrocket-ipv4-$(port)";
             if (!this.chain_exists ("inet", table_v4, "output") ||
                 !this.chain_exists ("inet", table_v4, table_v4)) {
                 return false;
             }
 
             if (ipv6_enabled) {
-                string table_v6 = @"sshuttle-ipv6-$(port)";
+                string table_v6 = @"sshrocket-ipv6-$(port)";
                 if (!this.chain_exists ("inet", table_v6, "output") ||
                     !this.chain_exists ("inet", table_v6, table_v6)) {
                     return false;
@@ -40,7 +64,7 @@ namespace Sshuttle {
         }
 
         /**
-         * 检查系统中是否已有其他 sshuttle nftables 会话。
+         * 检查系统中是否已有 SSH Rocket 或 sshuttle nftables 会话。
          */
         public bool has_active_sshuttle_tables () {
             if (Posix.geteuid () != 0) {
@@ -69,15 +93,15 @@ namespace Sshuttle {
                 if (exit_status != 0 || stdout_text == null) {
                     return false;
                 }
-                return "sshuttle-ipv4-" in stdout_text || "sshuttle-ipv6-" in stdout_text;
+                return "sshrocket-ipv4-" in stdout_text || "sshrocket-ipv6-" in stdout_text || "sshuttle-ipv4-" in stdout_text || "sshuttle-ipv6-" in stdout_text;
             } catch (GLib.Error e) {
-                warning ("Failed to inspect active sshuttle tables: %s", e.message);
+                warning ("Failed to inspect active tunnel tables: %s", e.message);
                 return false;
             }
         }
 
         /**
-         * 向 sshuttle 的 nftables 表插入 cgroup 与域名分流规则
+         * 向 SSH Rocket 的 nftables 表插入 cgroup 与域名分流规则
          */
         public bool apply_cgroup_filter (
             int port,
@@ -105,7 +129,7 @@ namespace Sshuttle {
             }
             bool success = true;
 
-            string table_v4 = @"sshuttle-ipv4-$(port)";
+            string table_v4 = @"sshrocket-ipv4-$(port)";
             var direct_v4 = new GLib.GenericArray<string> ();
             var proxy_v4 = new GLib.GenericArray<string> ();
             var direct_v6 = new GLib.GenericArray<string> ();
@@ -134,20 +158,20 @@ namespace Sshuttle {
             success = this.run_nft_command (@"nft insert rule inet $(table_v4) output meta nfproto ipv4 udp sport 15356 return") && success;
             success = this.run_nft_command (@"nft insert rule inet $(table_v4) output meta nfproto ipv4 udp sport 15354 return") && success;
 
-            // 4. 在 sshuttle 子链首部插入分流与裁决规则 (倒序插入)：
+            // 4. 在独立子链首部插入分流与裁决规则（倒序插入）：
             // 最终期望执行顺序：
             //   1) ip daddr @direct_ips return (直连域名/IP 集合优先放行，无论哪个 App 访问均直连)
-            //   2) ip daddr @proxy_ips meta l4proto tcp redirect to :$(port) (显式代理规则)
-            //   3) socket cgroupv2 level 1 "sshuttle-proxy" meta l4proto tcp redirect to :$(port) (勾选应用未命中显式规则时全量走代理)
+            //   2) ip daddr @proxy_ips meta l4proto tcp meta mark set 0x5352 return (显式代理规则)
+            //   3) socket cgroupv2 level 1 "sshuttle-proxy" meta l4proto tcp meta mark set 0x5352 return (勾选应用未命中显式规则时全量走代理)
             //   4) [默认 direct] socket cgroupv2 level 1 != "sshuttle-proxy" return (未勾选应用未命中规则时直连)
-            //   5) [默认 proxy] 继续执行 sshuttle 原有规则，使未勾选应用的其余 TCP 流量也走代理
+            //   5) [默认 proxy] 继续执行基础路由规则，使未勾选应用的其余 TCP 流量也走代理
             if (default_policy == "direct") {
                 success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) socket cgroupv2 level 1 != \"sshuttle-proxy\" return") && success;
             }
-            success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) socket cgroupv2 level 1 \"sshuttle-proxy\" meta l4proto tcp redirect to :$(port)") && success;
-            success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr @proxy_ips meta l4proto tcp redirect to :$(port)") && success;
+            success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) socket cgroupv2 level 1 \"sshuttle-proxy\" meta l4proto tcp meta mark set 0x5352 return") && success;
+            success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr @proxy_ips meta l4proto tcp meta mark set 0x5352 return") && success;
             for (uint i = 0; i < proxy_v4.length; i++) {
-                success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr $(proxy_v4[i]) meta l4proto tcp redirect to :$(port) comment \"sshuttle-gui-network\"") && success;
+                success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr $(proxy_v4[i]) meta l4proto tcp meta mark set 0x5352 return comment \"sshuttle-gui-network\"") && success;
             }
             success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr @direct_ips return") && success;
             for (uint i = 0; i < direct_v4.length; i++) {
@@ -155,16 +179,16 @@ namespace Sshuttle {
             }
 
             if (ipv6_enabled) {
-                string table_v6 = @"sshuttle-ipv6-$(port)";
+                string table_v6 = @"sshrocket-ipv6-$(port)";
                 success = this.ensure_ip_set (table_v6, "proxy_ips", "ipv6_addr") && success;
                 success = this.ensure_ip_set (table_v6, "direct_ips", "ipv6_addr") && success;
                 if (default_policy == "direct") {
                     success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) socket cgroupv2 level 1 != \"sshuttle-proxy\" return") && success;
                 }
-                success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) socket cgroupv2 level 1 \"sshuttle-proxy\" meta l4proto tcp redirect to :$(port)") && success;
-                success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) ip6 daddr @proxy_ips meta l4proto tcp redirect to :$(port)") && success;
+                success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) socket cgroupv2 level 1 \"sshuttle-proxy\" meta l4proto tcp meta mark set 0x5352 return") && success;
+                success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) ip6 daddr @proxy_ips meta l4proto tcp meta mark set 0x5352 return") && success;
                 for (uint i = 0; i < proxy_v6.length; i++) {
-                    success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) ip6 daddr $(proxy_v6[i]) meta l4proto tcp redirect to :$(port) comment \"sshuttle-gui-network\"") && success;
+                    success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) ip6 daddr $(proxy_v6[i]) meta l4proto tcp meta mark set 0x5352 return comment \"sshuttle-gui-network\"") && success;
                 }
                 success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) ip6 daddr @direct_ips return") && success;
                 for (uint i = 0; i < direct_v6.length; i++) {
@@ -211,9 +235,9 @@ namespace Sshuttle {
             }
 
             string set_name = (action == "proxy") ? "proxy_ips" : "direct_ips";
-            this.add_elements_to_set (@"sshuttle-ipv4-$(this.active_port)", set_name, elements_v4);
+            this.add_elements_to_set (@"sshrocket-ipv4-$(this.active_port)", set_name, elements_v4);
             if (this.active_ipv6) {
-                this.add_elements_to_set (@"sshuttle-ipv6-$(this.active_port)", set_name, elements_v6);
+                this.add_elements_to_set (@"sshrocket-ipv6-$(this.active_port)", set_name, elements_v6);
             }
         }
 
@@ -228,11 +252,11 @@ namespace Sshuttle {
                 }
                 return;
             }
-            this.run_nft_command (@"nft flush set inet sshuttle-ipv4-$(this.active_port) proxy_ips");
-            this.run_nft_command (@"nft flush set inet sshuttle-ipv4-$(this.active_port) direct_ips");
+            this.run_nft_command (@"nft flush set inet sshrocket-ipv4-$(this.active_port) proxy_ips");
+            this.run_nft_command (@"nft flush set inet sshrocket-ipv4-$(this.active_port) direct_ips");
             if (this.active_ipv6) {
-                this.run_nft_command (@"nft flush set inet sshuttle-ipv6-$(this.active_port) proxy_ips");
-                this.run_nft_command (@"nft flush set inet sshuttle-ipv6-$(this.active_port) direct_ips");
+                this.run_nft_command (@"nft flush set inet sshrocket-ipv6-$(this.active_port) proxy_ips");
+                this.run_nft_command (@"nft flush set inet sshrocket-ipv6-$(this.active_port) direct_ips");
             }
         }
 
@@ -250,21 +274,21 @@ namespace Sshuttle {
             if (Posix.geteuid () != 0) {
                 return;
             }
-            this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", "output", "15354");
-            this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", "output", "15355");
-            this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", "output", "15356");
-            this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", "output", "15353");
-            this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", "output", "@proxy_ips");
-            this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", @"sshuttle-ipv4-$(port)", "@direct_ips");
-            this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", @"sshuttle-ipv4-$(port)", "@proxy_ips");
-            this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", @"sshuttle-ipv4-$(port)", "sshuttle-proxy");
-            this.delete_matching_rules ("inet", @"sshuttle-ipv4-$(port)", @"sshuttle-ipv4-$(port)", "sshuttle-gui-network");
+            this.delete_matching_rules ("inet", @"sshrocket-ipv4-$(port)", "output", "15354");
+            this.delete_matching_rules ("inet", @"sshrocket-ipv4-$(port)", "output", "15355");
+            this.delete_matching_rules ("inet", @"sshrocket-ipv4-$(port)", "output", "15356");
+            this.delete_matching_rules ("inet", @"sshrocket-ipv4-$(port)", "output", "15353");
+            this.delete_matching_rules ("inet", @"sshrocket-ipv4-$(port)", "output", "@proxy_ips");
+            this.delete_matching_rules ("inet", @"sshrocket-ipv4-$(port)", @"sshrocket-ipv4-$(port)", "@direct_ips");
+            this.delete_matching_rules ("inet", @"sshrocket-ipv4-$(port)", @"sshrocket-ipv4-$(port)", "@proxy_ips");
+            this.delete_matching_rules ("inet", @"sshrocket-ipv4-$(port)", @"sshrocket-ipv4-$(port)", "sshuttle-proxy");
+            this.delete_matching_rules ("inet", @"sshrocket-ipv4-$(port)", @"sshrocket-ipv4-$(port)", "sshuttle-gui-network");
 
             if (ipv6_enabled) {
-                this.delete_matching_rules ("inet", @"sshuttle-ipv6-$(port)", @"sshuttle-ipv6-$(port)", "@direct_ips");
-                this.delete_matching_rules ("inet", @"sshuttle-ipv6-$(port)", @"sshuttle-ipv6-$(port)", "@proxy_ips");
-                this.delete_matching_rules ("inet", @"sshuttle-ipv6-$(port)", @"sshuttle-ipv6-$(port)", "sshuttle-proxy");
-                this.delete_matching_rules ("inet", @"sshuttle-ipv6-$(port)", @"sshuttle-ipv6-$(port)", "sshuttle-gui-network");
+                this.delete_matching_rules ("inet", @"sshrocket-ipv6-$(port)", @"sshrocket-ipv6-$(port)", "@direct_ips");
+                this.delete_matching_rules ("inet", @"sshrocket-ipv6-$(port)", @"sshrocket-ipv6-$(port)", "@proxy_ips");
+                this.delete_matching_rules ("inet", @"sshrocket-ipv6-$(port)", @"sshrocket-ipv6-$(port)", "sshuttle-proxy");
+                this.delete_matching_rules ("inet", @"sshrocket-ipv6-$(port)", @"sshrocket-ipv6-$(port)", "sshuttle-gui-network");
             }
         }
 
@@ -438,7 +462,7 @@ namespace Sshuttle {
         }
 
         /**
-         * 清理当前连接使用的 sshuttle nftables 表。
+         * 清理当前连接使用的 SSH Rocket nftables 表。
          */
         public void cleanup_all_sshuttle_tables (int port = 0) {
             if (Posix.geteuid () != 0) {
@@ -454,8 +478,8 @@ namespace Sshuttle {
             this.cleanup_blacklist_filter ();
 
             if (port > 0) {
-                this.run_nft_command (@"nft delete table inet sshuttle-ipv4-$(port)");
-                this.run_nft_command (@"nft delete table inet sshuttle-ipv6-$(port)");
+                this.run_nft_command (@"nft delete table inet sshrocket-ipv4-$(port)");
+                this.run_nft_command (@"nft delete table inet sshrocket-ipv6-$(port)");
             }
         }
 
