@@ -1,4 +1,4 @@
-namespace Sshuttle {
+namespace SshRocket {
 
     public class AppRuleRow : Adw.ActionRow {
         public AppInfo app { get; private set; }
@@ -15,9 +15,8 @@ namespace Sshuttle {
         private ConfigManager config_manager;
         private TunnelManager tunnel_manager;
 
-        private Adw.ActionRow summary_row;
-        private Adw.EntryRow search_row;
-        private Gtk.DropDown sort_dropdown;
+        private Gtk.SearchEntry search_entry;
+        private Gtk.DropDown sort_drop;
         private Gtk.ListBox apps_list_box;
         private GLib.GenericArray<AppRuleRow> app_rows;
         private GLib.GenericArray<AppInfo> apps;
@@ -28,40 +27,32 @@ namespace Sshuttle {
             this.app_rows = new GLib.GenericArray<AppRuleRow> ();
             this.apps = new GLib.GenericArray<AppInfo> ();
 
-            this.title = "App Proxy Rules";
-            this.description = GLib.Markup.escape_text ("Checked applications route through proxy. Domains configured under Domain & IP route according to their rules.");
+            // 搜索与排序放在同一行
+            var toolbar = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 8);
+            toolbar.margin_top = 4;
+            toolbar.margin_bottom = 4;
 
-            // 流量统计总览卡片
-            this.summary_row = new Adw.ActionRow ();
-            this.summary_row.title = "Proxy Traffic Statistics";
-            this.summary_row.subtitle = "↑ 0 B   ↓ 0 B   (Total: 0 B)";
-
-            var reset_btn = new Gtk.Button.from_icon_name ("edit-clear-all-symbolic");
-            reset_btn.add_css_class ("flat");
-            reset_btn.valign = Gtk.Align.CENTER;
-            reset_btn.tooltip_text = "Reset Statistics";
-            reset_btn.clicked.connect (() => {
-                this.config_manager.reset_traffic_stats ();
-            });
-            this.summary_row.add_suffix (reset_btn);
-            this.add (this.summary_row);
-
-            // 搜索与排序栏
-            this.search_row = new Adw.EntryRow ();
-            this.search_row.title = "Search Applications";
-            this.search_row.notify["text"].connect (() => {
+            this.search_entry = new Gtk.SearchEntry ();
+            this.search_entry.placeholder_text = "Search";
+            this.search_entry.hexpand = true;
+            this.search_entry.search_changed.connect (() => {
                 this.apps_list_box.invalidate_filter ();
             });
+            toolbar.append (this.search_entry);
 
-            string[] sort_options = { "Name", "Usage" };
-            this.sort_dropdown = new Gtk.DropDown (Native.string_list (sort_options), null);
-            this.sort_dropdown.valign = Gtk.Align.CENTER;
-            this.sort_dropdown.tooltip_text = "Sort by";
-            this.sort_dropdown.notify["selected"].connect (() => {
+            this.sort_drop = new Gtk.DropDown (Native.string_list ({ "Name", "Usage" }), null);
+            this.sort_drop.notify["selected"].connect (() => {
                 this.apps_list_box.invalidate_sort ();
             });
-            this.search_row.add_suffix (this.sort_dropdown);
-            this.add (this.search_row);
+
+            var sort_box = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 6);
+            var sort_label = new Gtk.Label ("Sort");
+            sort_label.add_css_class ("dim-label");
+            sort_box.append (sort_label);
+            sort_box.append (this.sort_drop);
+            toolbar.append (sort_box);
+
+            this.add (toolbar);
 
             this.apps_list_box = new Gtk.ListBox ();
             this.apps_list_box.add_css_class ("boxed-list");
@@ -129,10 +120,6 @@ namespace Sshuttle {
         }
 
         public void update_traffic_display () {
-            uint64 total_up, total_down;
-            this.config_manager.get_total_traffic (out total_up, out total_down);
-            this.summary_row.subtitle = @"↑ $(TunnelManager.format_bytes (total_up))   ↓ $(TunnelManager.format_bytes (total_down))   (Total: $(TunnelManager.format_bytes (total_up + total_down)))";
-
             for (uint i = 0; i < this.app_rows.length; i++) {
                 var row = this.app_rows[i];
                 var app = row.app;
@@ -149,7 +136,7 @@ namespace Sshuttle {
                 }
             }
 
-            if (this.sort_dropdown.selected == 1) {
+            if (this.sort_drop.selected == 1) {
                 this.apps_list_box.invalidate_sort ();
             }
         }
@@ -181,7 +168,7 @@ namespace Sshuttle {
             }
 
             // 2. 勾选状态相同时，根据排序选项排序 (0: Name, 1: Usage)
-            if (this.sort_dropdown.selected == 1) {
+            if (this.sort_drop.selected == 1) {
                 if (a.total_traffic != b.total_traffic) {
                     return (a.total_traffic > b.total_traffic) ? -1 : 1;
                 }
@@ -196,7 +183,7 @@ namespace Sshuttle {
                 return true;
             }
 
-            string query = this.search_row.text.strip ().down ();
+            string query = this.search_entry.text.strip ().down ();
             if (query == "") {
                 return true;
             }

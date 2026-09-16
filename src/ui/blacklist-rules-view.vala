@@ -1,4 +1,4 @@
-namespace Sshuttle {
+namespace SshRocket {
 
     public class BlacklistRulesView : Adw.PreferencesGroup {
         private ConfigManager config_manager;
@@ -18,8 +18,8 @@ namespace Sshuttle {
             this.app_rows = new GLib.GenericArray<Adw.ActionRow> ();
             this.apps = new GLib.GenericArray<AppInfo> ();
 
-            this.title = "Network Blacklist";
-            this.description = GLib.Markup.escape_text ("Prohibit selected applications and processes from accessing the network completely.");
+
+
 
             var processes_header = new Adw.ActionRow ();
             processes_header.title = "Processes";
