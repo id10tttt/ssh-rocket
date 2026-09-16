@@ -7,10 +7,27 @@ use ssh_rocket_core::{
     AppConfig, AppRule, DomainRule, DomainRuleKind, IpRule, Profile, RuleAction, RuleImportResult,
     parse_rule_set, parse_shadowrocket_rules,
 };
-use ssh_rocket_runtime::SshSession;
+use ssh_rocket_runtime::{PrivilegedHelperSession, SshSession};
 use tray::{TrayConnectionState, TrayManager};
-use std::{cell::RefCell, collections::HashSet, fs, path::{Path, PathBuf}, process::{Command as StdCommand, Stdio}, rc::Rc, sync::mpsc, thread, time::{Duration, SystemTime, UNIX_EPOCH}};
-use tokio::{io::{AsyncBufReadExt, BufReader}, process::Command, sync::oneshot};
+use std::{
+    cell::RefCell,
+    collections::HashSet,
+    fs,
+    path::{Path, PathBuf},
+    process::Command as StdCommand,
+    rc::Rc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    process::Command,
+    sync::{oneshot, Mutex},
+};
 
 const APP_ID: &str = "io.github.idi0t.SshRocket";
 const SOCKS_PORT: u16 = 17880;
@@ -18,12 +35,23 @@ const DEFAULT_RULE_SOURCE: &str = "https://johnshall.github.io/Shadowrocket-ADBl
 const MAX_RULE_SOURCE_SIZE: usize = 16 * 1024 * 1024;
 const RULE_BATCH_SIZE: usize = 20;
 
+#[derive(Clone, Debug, Default)]
+struct AppTrafficStat {
+    id: String,
+    name: String,
+    icon: String,
+    upload: u64,
+    download: u64,
+}
+
 enum RuntimeEvent {
     Connected,
     Disconnected,
+    Status(String),
     Error(String),
     Log(String),
     Speed { upload: u64, download: u64 },
+    AppTraffic(Vec<AppTrafficStat>),
     RuleImportFailed(String),
     RulesImported {
         result: RuleImportResult,
@@ -31,9 +59,11 @@ enum RuntimeEvent {
     },
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct RuntimeController {
-    stop: Option<oneshot::Sender<()>>,
+    stop: Rc<RefCell<Option<oneshot::Sender<()>>>>,
+    helper: Arc<Mutex<Option<PrivilegedHelperSession>>>,
+    is_running: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -535,130 +565,202 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 impl RuntimeController {
+    fn is_running(&self) -> bool {
+        self.is_running.load(Ordering::SeqCst)
+    }
+
+    fn stop(&self) {
+        self.is_running.store(false, Ordering::SeqCst);
+        if let Some(stop) = self.stop.borrow_mut().take() {
+            let _ = stop.send(());
+        }
+    }
+
+    fn shutdown(&self) {
+        self.stop();
+        let helper = self.helper.clone();
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
+            if let Ok(rt) = runtime {
+                rt.block_on(async {
+                    let mut guard = helper.lock().await;
+                    if let Some(mut h) = guard.take() {
+                        h.shutdown().await;
+                    }
+                });
+            }
+        });
+    }
+
+    fn sync_rules(&self) {
+        let helper = self.helper.clone();
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
+            if let Ok(rt) = runtime {
+                rt.block_on(async {
+                    let mut guard = helper.lock().await;
+                    if let Some(h) = guard.as_mut() {
+                        let _ = h.sync_rules().await;
+                    }
+                });
+            }
+        });
+    }
+
     fn start(
-        &mut self,
+        &self,
         profile: Profile,
         config: AppConfig,
         config_path: PathBuf,
         events: mpsc::Sender<RuntimeEvent>,
     ) {
         self.stop();
-        let (stop_tx, stop_rx) = oneshot::channel();
-        self.stop = Some(stop_tx);
+        self.is_running.store(true, Ordering::SeqCst);
+        let (stop_tx, mut stop_rx) = oneshot::channel();
+        *self.stop.borrow_mut() = Some(stop_tx);
+
+        let helper = self.helper.clone();
+        let is_running_flag = self.is_running.clone();
 
         thread::spawn(move || {
+            let desktop_apps = scan_desktop_apps();
             let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build();
             let Ok(runtime) = runtime else {
                 let _ = events.send(RuntimeEvent::Error("Failed to create runtime".into()));
+                is_running_flag.store(false, Ordering::SeqCst);
                 return;
             };
             runtime.block_on(async move {
-                let mut ssh = match SshSession::start(&profile, SOCKS_PORT, config.settings.dns_server).await {
-                    Ok(session) => session,
-                    Err(error) => {
-                        let _ = events.send(RuntimeEvent::Error(error.to_string()));
-                        return;
-                    }
-                };
-                if let Some(stderr) = ssh.take_stderr() {
-                    spawn_log_reader(stderr, "ssh", events.clone());
-                }
+                let user_cancelled = Arc::new(AtomicBool::new(false));
+                let mut retry_attempt = 0;
+                let mut app_tracker = AppTrafficTracker::default();
 
-                let helper = helper_path();
-                let uid = unsafe { libc::getuid() };
-                let mut helper_command = Command::new("pkexec");
-                helper_command
-                    .arg(helper)
-                    .arg("run")
-                    .arg(config_path)
-                    .arg(uid.to_string())
-                    .arg(ssh.socks_port.to_string())
-                    .arg(ssh.dns_port.to_string())
-                    .arg(ssh.server_port.to_string());
-                for address in &ssh.server_addresses {
-                    helper_command.arg(address.to_string());
-                }
-                let mut process = match helper_command
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::piped())
-                    .kill_on_drop(true)
-                    .spawn()
-                {
-                    Ok(process) => process,
-                    Err(error) => {
-                        let _ = ssh.stop().await;
-                        let _ = events.send(RuntimeEvent::Error(format!("Failed to start helper: {error}")));
-                        return;
-                    }
-                };
-                let Some(stderr) = process.stderr.take() else {
-                    let _ = ssh.stop().await;
-                    let _ = events.send(RuntimeEvent::Error("Failed to capture helper output".into()));
-                    return;
-                };
-                let mut helper_lines = BufReader::new(stderr).lines();
-                let mut stop_rx = stop_rx;
-                let mut traffic_interval = tokio::time::interval(Duration::from_secs(1));
-                let startup_timeout = tokio::time::sleep(Duration::from_secs(20));
-                tokio::pin!(startup_timeout);
-                let mut previous_traffic = None;
-                let mut helper_ready = false;
-                let mut helper_stderr_open = true;
-                let mut last_helper_line = None;
-                let mut had_error = false;
                 loop {
-                    tokio::select! {
-                        _ = &mut stop_rx => {
-                            break;
-                        }
-                        status = process.wait() => {
-                            let message = match status {
-                                Ok(status) => last_helper_line.unwrap_or_else(|| format!("Helper exited with {status}")),
-                                Err(error) => format!("Helper failed: {error}"),
-                            };
-                            let _ = events.send(RuntimeEvent::Error(message));
-                            had_error = true;
-                            break;
-                        }
-                        status = ssh.wait() => {
-                            let message = match status {
-                                Ok(status) => format!("SSH connection exited with {status}"),
-                                Err(error) => error.to_string(),
-                            };
-                            let _ = events.send(RuntimeEvent::Error(message));
-                            had_error = true;
-                            break;
-                        }
-                        line = helper_lines.next_line(), if helper_stderr_open => {
-                            match line {
-                                Ok(Some(line)) => {
-                                    if !line.trim().is_empty() {
-                                        last_helper_line = Some(line.clone());
-                                    }
-                                    let _ = events.send(RuntimeEvent::Log(format!("[helper] {line}")));
-                                    if !helper_ready && line.contains("routing is active") {
-                                        helper_ready = true;
-                                        let _ = events.send(RuntimeEvent::Connected);
-                                    }
+                    if user_cancelled.load(Ordering::SeqCst) {
+                        break;
+                    }
+
+                    if retry_attempt > 0 {
+                        let _ = events.send(RuntimeEvent::Status(format!("Reconnecting ({retry_attempt})…")));
+                        let _ = events.send(RuntimeEvent::Log(format!("[reconnect] Reconnecting SSH tunnel (attempt {retry_attempt})...")));
+                    }
+
+                    // 1. Establish OpenSSH session
+                    let mut ssh = match SshSession::start(&profile, SOCKS_PORT, config.settings.dns_server).await {
+                        Ok(session) => session,
+                        Err(error) => {
+                            if user_cancelled.load(Ordering::SeqCst) {
+                                break;
+                            }
+                            retry_attempt += 1;
+                            let _ = events.send(RuntimeEvent::Log(format!(
+                                "[reconnect] SSH failed: {error}. Retrying in 1s (attempt {retry_attempt})..."
+                            )));
+                            let _ = events.send(RuntimeEvent::Status("Reconnecting in 1s…".into()));
+                            tokio::select! {
+                                _ = &mut stop_rx => {
+                                    user_cancelled.store(true, Ordering::SeqCst);
+                                    break;
                                 }
-                                Ok(None) => helper_stderr_open = false,
-                                Err(error) => {
-                                    let _ = events.send(RuntimeEvent::Error(format!("Failed to read helper output: {error}")));
-                                    had_error = true;
+                                _ = tokio::time::sleep(Duration::from_secs(1)) => continue,
+                            }
+                        }
+                    };
+
+                    if let Some(stderr) = ssh.take_stderr() {
+                        spawn_log_reader(stderr, "ssh", events.clone());
+                    }
+
+                    // 2. Check and start privileged helper
+                    let mut helper_guard = helper.lock().await;
+                    if helper_guard.as_mut().map_or(true, |h| !h.is_alive()) {
+                        let _ = events.send(RuntimeEvent::Log("[helper] Requesting privileged helper authorization...".into()));
+                        let _ = events.send(RuntimeEvent::Status("Authorizing helper…".into()));
+                        match PrivilegedHelperSession::ensure_started(&helper_path()).await {
+                            Ok((h, stderr)) => {
+                                if let Some(stderr) = stderr {
+                                    spawn_log_reader(stderr, "helper", events.clone());
+                                }
+                                *helper_guard = Some(h);
+                                let _ = events.send(RuntimeEvent::Log("[helper] Privileged helper authenticated and ready".into()));
+                            }
+                            Err(err) => {
+                                let _ = ssh.stop().await;
+                                if user_cancelled.load(Ordering::SeqCst) {
+                                    break;
+                                }
+                                let _ = events.send(RuntimeEvent::Error(format!("Helper authorization failed: {err}")));
+                                let _ = events.send(RuntimeEvent::Log(format!("[helper] Authorization failed: {err}")));
+                                break;
+                            }
+                        }
+                    }
+
+                    let uid = unsafe { libc::getuid() };
+                    let helper_session = helper_guard.as_mut().unwrap();
+                    let start_res = helper_session.start(
+                        config_path.clone(),
+                        uid,
+                        ssh.socks_port,
+                        ssh.dns_port,
+                        ssh.server_port,
+                        ssh.server_addresses.clone(),
+                    ).await;
+
+                    if let Err(err) = start_res {
+                        let _ = ssh.stop().await;
+                        if user_cancelled.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        retry_attempt += 1;
+                        let _ = events.send(RuntimeEvent::Log(format!(
+                            "[reconnect] Transparent proxy startup failed: {err}. Retrying in 1s (attempt {retry_attempt})..."
+                        )));
+                        let _ = events.send(RuntimeEvent::Status("Reconnecting in 1s…".into()));
+                        drop(helper_guard);
+                        tokio::select! {
+                            _ = &mut stop_rx => {
+                                user_cancelled.store(true, Ordering::SeqCst);
+                                break;
+                            }
+                            _ = tokio::time::sleep(Duration::from_secs(1)) => continue,
+                        }
+                    }
+
+                    // Connected successfully!
+                    if retry_attempt > 0 {
+                        let _ = events.send(RuntimeEvent::Log("[reconnect] Connection successfully restored".into()));
+                    }
+                    retry_attempt = 0;
+                    let _ = events.send(RuntimeEvent::Connected);
+
+                    // 3. Monitor active connection
+                    let mut traffic_interval = tokio::time::interval(Duration::from_secs(1));
+                    let mut previous_traffic = None;
+                    let mut disconnect_reason = String::new();
+
+                    loop {
+                        tokio::select! {
+                            _ = &mut stop_rx => {
+                                user_cancelled.store(true, Ordering::SeqCst);
+                                break;
+                            }
+                            status = ssh.wait() => {
+                                disconnect_reason = match status {
+                                    Ok(status) => format!("SSH connection exited with {status}"),
+                                    Err(error) => error.to_string(),
+                                };
+                                let _ = events.send(RuntimeEvent::Log(format!("[reconnect] {disconnect_reason}")));
+                                break;
+                            }
+                            _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                                if !helper_guard.as_mut().map_or(false, |h| h.is_alive()) {
+                                    disconnect_reason = "Privileged helper process died unexpectedly".into();
+                                    let _ = events.send(RuntimeEvent::Log(format!("[helper] {disconnect_reason}")));
                                     break;
                                 }
                             }
-                        }
-                        _ = &mut startup_timeout, if !helper_ready => {
-                            let _ = events.send(RuntimeEvent::Error(
-                                last_helper_line.unwrap_or_else(|| "Timed out waiting for network routing".into()),
-                            ));
-                            had_error = true;
-                            break;
-                        }
-                        _ = traffic_interval.tick() => {
-                            if helper_ready {
+                            _ = traffic_interval.tick() => {
                                 if let Some((sent, received)) = read_ssh_traffic(&profile.host).await {
                                     let (upload, download) = previous_traffic
                                         .map(|(old_sent, old_received)| {
@@ -668,34 +770,48 @@ impl RuntimeController {
                                     previous_traffic = Some((sent, received));
                                     let _ = events.send(RuntimeEvent::Speed { upload, download });
                                 }
+                                if let Some(stats) = app_tracker.sample(&desktop_apps).await {
+                                    let _ = events.send(RuntimeEvent::AppTraffic(stats));
+                                }
                             }
                         }
                     }
-                }
-                if let Some(pid) = process.id() {
-                    unsafe {
-                        libc::kill(pid as i32, libc::SIGTERM);
+
+                    // Stop transparent routing and ssh
+                    if let Some(h) = helper_guard.as_mut() {
+                        let _ = h.stop().await;
+                    }
+                    drop(helper_guard);
+                    let _ = ssh.stop().await;
+                    let _ = events.send(RuntimeEvent::Speed { upload: 0, download: 0 });
+                    app_tracker.clear();
+
+                    if user_cancelled.load(Ordering::SeqCst) {
+                        let _ = events.send(RuntimeEvent::Disconnected);
+                        break;
+                    }
+
+                    // Auto-reconnect triggered!
+                    retry_attempt += 1;
+                    let _ = events.send(RuntimeEvent::Status("Reconnecting in 1s…".into()));
+                    let _ = events.send(RuntimeEvent::Log(format!(
+                        "[reconnect] Connection lost: {disconnect_reason}. Reconnecting in 1s (attempt {retry_attempt})..."
+                    )));
+
+                    tokio::select! {
+                        _ = &mut stop_rx => {
+                            user_cancelled.store(true, Ordering::SeqCst);
+                            let _ = events.send(RuntimeEvent::Disconnected);
+                            break;
+                        }
+                        _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                            // Loop back to reconnect
+                        }
                     }
                 }
-                process.stdin.take();
-                if process.id().is_some()
-                    && tokio::time::timeout(Duration::from_secs(3), process.wait()).await.is_err()
-                {
-                    let _ = process.kill().await;
-                }
-                let _ = ssh.stop().await;
-                let _ = events.send(RuntimeEvent::Speed { upload: 0, download: 0 });
-                if !had_error {
-                    let _ = events.send(RuntimeEvent::Disconnected);
-                }
+                is_running_flag.store(false, Ordering::SeqCst);
             });
         });
-    }
-
-    fn stop(&mut self) {
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
-        }
     }
 }
 
@@ -730,6 +846,118 @@ fn format_speed(bytes_per_second: u64) -> String {
         format!("{:.1} MB/s", value / (1024.0 * 1024.0))
     } else {
         format!("{:.1} GB/s", value / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+fn create_app_icon(icon_name: &str) -> gtk::Image {
+    let icon = if !icon_name.is_empty() {
+        if icon_name.starts_with('/') {
+            gtk::Image::from_file(icon_name)
+        } else {
+            gtk::Image::from_icon_name(icon_name)
+        }
+    } else {
+        gtk::Image::from_icon_name("application-x-executable-symbolic")
+    };
+    icon.set_pixel_size(28);
+    icon
+}
+
+#[derive(Default)]
+struct AppTrafficTracker {
+    active_sockets: std::collections::HashMap<String, (u64, u64)>,
+    app_traffic: std::collections::HashMap<String, (u64, u64)>,
+}
+
+impl AppTrafficTracker {
+    fn clear(&mut self) {
+        self.active_sockets.clear();
+        self.app_traffic.clear();
+    }
+
+    async fn sample(&mut self, desktop_apps: &[DesktopApp]) -> Option<Vec<AppTrafficStat>> {
+        let output = Command::new("ss").args(["-tinp", "-H"]).output().await.ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut seen_sockets = std::collections::HashSet::new();
+        let mut current_sock_key = String::new();
+        let mut current_proc_name = String::new();
+
+        for line in text.lines() {
+            if !line.starts_with([' ', '\t']) {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 5 {
+                    let local = parts[3];
+                    let peer = parts[4];
+                    current_sock_key = format!("{local}->{peer}");
+                    seen_sockets.insert(current_sock_key.clone());
+
+                    current_proc_name = if let Some(idx) = line.find("users:((\"") {
+                        let start = idx + 9;
+                        if let Some(end) = line[start..].find('"') {
+                            line[start..start + end].to_string()
+                        } else {
+                            String::new()
+                        }
+                    } else {
+                        String::new()
+                    };
+                } else {
+                    current_sock_key.clear();
+                    current_proc_name.clear();
+                }
+            } else if !current_sock_key.is_empty() && !current_proc_name.is_empty() {
+                let cur_sent = sum_ss_counter(line, "bytes_sent:");
+                let cur_received = sum_ss_counter(line, "bytes_received:");
+                if cur_sent > 0 || cur_received > 0 {
+                    let (delta_up, delta_down) = if let Some((prev_sent, prev_rcv)) = self.active_sockets.get(&current_sock_key) {
+                        (cur_sent.saturating_sub(*prev_sent), cur_received.saturating_sub(*prev_rcv))
+                    } else {
+                        (cur_sent, cur_received)
+                    };
+                    self.active_sockets.insert(current_sock_key.clone(), (cur_sent, cur_received));
+                    if delta_up > 0 || delta_down > 0 {
+                        let entry = self.app_traffic.entry(current_proc_name.clone()).or_insert((0, 0));
+                        entry.0 += delta_up;
+                        entry.1 += delta_down;
+                    }
+                }
+            }
+        }
+
+        self.active_sockets.retain(|k, _| seen_sockets.contains(k));
+
+        let mut stats: Vec<AppTrafficStat> = self
+            .app_traffic
+            .iter()
+            .map(|(proc, (up, down))| {
+                let matching_app = desktop_apps.iter().find(|app| {
+                    app.executable.eq_ignore_ascii_case(proc)
+                        || app.name.eq_ignore_ascii_case(proc)
+                        || Path::new(&app.executable)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.eq_ignore_ascii_case(proc))
+                });
+                let (name, icon) = if let Some(app) = matching_app {
+                    (app.name.clone(), app.icon.clone())
+                } else {
+                    (proc.clone(), String::new())
+                };
+                AppTrafficStat {
+                    id: proc.clone(),
+                    name,
+                    icon,
+                    upload: *up,
+                    download: *down,
+                }
+            })
+            .collect();
+
+        stats.sort_by(|a, b| (b.upload + b.download).cmp(&(a.upload + a.download)));
+        Some(stats)
     }
 }
 
@@ -953,6 +1181,10 @@ fn build_ui(app: &adw::Application) {
     rules_page.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     rules_page.append(&rules_stack);
 
+    let refresh_rule_views: RefreshRules = Rc::new(RefCell::new(None));
+    let refresh_blocked_views: RefreshRules = Rc::new(RefCell::new(None));
+    let refresh_traffic_rule_counts: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+
     let applications_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let app_toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     app_toolbar.set_margin_start(18);
@@ -984,17 +1216,12 @@ fn build_ui(app: &adw::Application) {
             })
             .build();
         row.set_use_markup(false);
-        if !app_info.icon.is_empty() {
-            let icon = if app_info.icon.starts_with('/') {
-                gtk::Image::from_file(&app_info.icon)
-            } else {
-                gtk::Image::from_icon_name(&app_info.icon)
-            };
-            icon.set_pixel_size(28);
-            row.add_prefix(&icon);
-        }
+        row.add_prefix(&create_app_icon(&app_info.icon));
         let executable = app_info.executable.clone();
         let config_ref = config.clone();
+        let controller_ref = controller.clone();
+        let refresh_blocked_ref = refresh_blocked_views.clone();
+        let refresh_traffic_counts_ref = refresh_traffic_rule_counts.clone();
         row.connect_selected_notify(move |row| {
             let action = match row.selected() {
                 1 => RuleAction::Proxy,
@@ -1002,6 +1229,13 @@ fn build_ui(app: &adw::Application) {
                 _ => RuleAction::Direct,
             };
             set_app_action(&config_ref, &executable, action);
+            controller_ref.borrow().sync_rules();
+            if let Some(refresh) = refresh_blocked_ref.borrow().as_ref() {
+                refresh();
+            }
+            if let Some(refresh) = refresh_traffic_counts_ref.borrow().as_ref() {
+                refresh();
+            }
         });
         applications_group.add(&row);
         app_rows.borrow_mut().push((
@@ -1048,7 +1282,6 @@ fn build_ui(app: &adw::Application) {
     domain_stack.set_transition_type(gtk::StackTransitionType::SlideLeftRight);
     domain_stack.set_vexpand(true);
     routing_page.append(&domain_stack);
-    let refresh_rule_views: RefreshRules = Rc::new(RefCell::new(None));
 
     let overview_page = adw::PreferencesPage::new();
     let routing_group = adw::PreferencesGroup::builder().title("Default Policy").build();
@@ -1305,6 +1538,8 @@ fn build_ui(app: &adw::Application) {
         let clear_rules = clear_rules.clone();
         let parent = window.clone();
         let refresh_rule_views = refresh_rule_views.clone();
+        let refresh_blocked_views = refresh_blocked_views.clone();
+        let refresh_traffic_rule_counts = refresh_traffic_rule_counts.clone();
         Rc::new(move || {
             let current = config.borrow();
             let imported = imported_rules(&current);
@@ -1364,6 +1599,12 @@ fn build_ui(app: &adw::Application) {
                 &config,
                 &refresh_rule_views,
             );
+            if let Some(refresh) = refresh_blocked_views.borrow().as_ref() {
+                refresh();
+            }
+            if let Some(refresh) = refresh_traffic_rule_counts.borrow().as_ref() {
+                refresh();
+            }
         })
     };
     *refresh_rule_views.borrow_mut() = Some(refresh_rule_views_impl.clone());
@@ -1499,18 +1740,57 @@ fn build_ui(app: &adw::Application) {
     }
     rules_stack.add_titled(&routing_page, Some("routing"), "Domains & IPs");
 
+    // --- Blocked Page ---
     let blocked_page = adw::PreferencesPage::new();
-    let blocked_group = adw::PreferencesGroup::builder().title("Blocked Applications").build();
-    for app_info in scan_desktop_apps().into_iter().filter(|app_info| {
-        current_app_action(&config.borrow(), &app_info.executable) == RuleAction::Block
-    }) {
-        let row = adw::ActionRow::builder().title(&app_info.name).subtitle(&app_info.executable).build();
-        blocked_group.add(&row);
-    }
-    blocked_page.add(&blocked_group);
+
+    // 1. Processes group
+    let procs_group = adw::PreferencesGroup::builder()
+        .title("Processes")
+        .description("Block network access by executable name")
+        .build();
+    let new_proc_row = adw::EntryRow::builder().title("Process Name").build();
+    let add_proc_btn = gtk::Button::from_icon_name("list-add-symbolic");
+    add_proc_btn.add_css_class("flat");
+    add_proc_btn.set_valign(gtk::Align::Center);
+    new_proc_row.add_suffix(&add_proc_btn);
+    procs_group.add(&new_proc_row);
+
+    let procs_list_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    procs_group.add(&procs_list_box);
+    blocked_page.add(&procs_group);
+
+    // 2. Custom Blocked Targets (Domains & IPs)
+    let blocked_targets_group = adw::PreferencesGroup::builder()
+        .title("Blocked Domains & IPs")
+        .description("Target rules set to REJECT")
+        .build();
+    let new_target_row = adw::EntryRow::builder().title("Domain or IP").build();
+    let add_target_btn = gtk::Button::from_icon_name("list-add-symbolic");
+    add_target_btn.add_css_class("flat");
+    add_target_btn.set_valign(gtk::Align::Center);
+    new_target_row.add_suffix(&add_target_btn);
+    blocked_targets_group.add(&new_target_row);
+
+    let blocked_targets_list_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    blocked_targets_group.add(&blocked_targets_list_box);
+    blocked_page.add(&blocked_targets_group);
+
+    // 3. Applications group
+    let blocked_apps_group = adw::PreferencesGroup::builder()
+        .title("Applications")
+        .description("Block all network access")
+        .build();
+    let app_search_row = adw::EntryRow::builder().title("Search Applications").build();
+    blocked_apps_group.add(&app_search_row);
+
+    let blocked_apps_list_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    blocked_apps_group.add(&blocked_apps_list_box);
+    blocked_page.add(&blocked_apps_group);
+
     rules_stack.add_titled(&page_scroller(&blocked_page), Some("blocked"), "Blocked");
     view_stack.add_named(&rules_page, Some("rules"));
 
+    // --- Traffic Page ---
     let traffic_page = adw::PreferencesPage::new();
     let traffic_group = adw::PreferencesGroup::builder().title("Current Session").build();
     let uploaded_row = adw::ActionRow::builder().title("Uploaded").subtitle("0 B").build();
@@ -1520,21 +1800,450 @@ fn build_ui(app: &adw::Application) {
     traffic_group.add(&downloaded_row);
     traffic_group.add(&total_row);
     traffic_page.add(&traffic_group);
+
     let traffic_rules_group = adw::PreferencesGroup::builder().title("Application Rules").build();
     let proxy_apps_row = adw::ActionRow::builder().title("PROXY").build();
     let direct_apps_row = adw::ActionRow::builder().title("DIRECT").build();
     let blocked_apps_row = adw::ActionRow::builder().title("REJECT").build();
-    let app_count = scan_desktop_apps().len();
-    let proxy_count = config.borrow().settings.app_rules.iter().filter(|rule| rule.action == RuleAction::Proxy).count();
-    let block_count = config.borrow().settings.app_rules.iter().filter(|rule| rule.action == RuleAction::Block).count();
-    proxy_apps_row.set_subtitle(&format!("{proxy_count} applications"));
-    blocked_apps_row.set_subtitle(&format!("{block_count} applications"));
-    direct_apps_row.set_subtitle(&format!("{} applications", app_count.saturating_sub(proxy_count + block_count)));
     traffic_rules_group.add(&proxy_apps_row);
     traffic_rules_group.add(&direct_apps_row);
     traffic_rules_group.add(&blocked_apps_row);
     traffic_page.add(&traffic_rules_group);
+
+    let app_usage_group = adw::PreferencesGroup::builder().title("Application Usage").build();
+    let app_traffic_toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let app_traffic_search = gtk::SearchEntry::builder().placeholder_text("Search").hexpand(true).build();
+    app_traffic_toolbar.append(&app_traffic_search);
+    let app_traffic_sort_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let app_traffic_sort_label = gtk::Label::new(Some("Sort"));
+    app_traffic_sort_label.add_css_class("dim-label");
+    app_traffic_sort_box.append(&app_traffic_sort_label);
+    let app_traffic_sort = gtk::DropDown::from_strings(&["Traffic", "Name"]);
+    app_traffic_sort_box.append(&app_traffic_sort);
+    app_traffic_toolbar.append(&app_traffic_sort_box);
+    app_usage_group.add(&app_traffic_toolbar);
+
+    let app_traffic_list_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    app_usage_group.add(&app_traffic_list_box);
+    traffic_page.add(&app_usage_group);
     view_stack.add_named(&page_scroller(&traffic_page), Some("traffic"));
+
+    let refresh_traffic_rule_counts_impl = {
+        let config = config.clone();
+        let proxy_apps_row = proxy_apps_row.clone();
+        let direct_apps_row = direct_apps_row.clone();
+        let blocked_apps_row = blocked_apps_row.clone();
+        Rc::new(move || {
+            let app_count = scan_desktop_apps().len();
+            let current = config.borrow();
+            let proxy_count = current.settings.app_rules.iter().filter(|r| r.action == RuleAction::Proxy).count();
+            let block_count = current.settings.app_rules.iter().filter(|r| r.action == RuleAction::Block).count();
+            proxy_apps_row.set_subtitle(&format!("{proxy_count} applications"));
+            blocked_apps_row.set_subtitle(&format!("{block_count} applications"));
+            direct_apps_row.set_subtitle(&format!("{} applications", app_count.saturating_sub(proxy_count + block_count)));
+        })
+    };
+    *refresh_traffic_rule_counts.borrow_mut() = Some(refresh_traffic_rule_counts_impl.clone());
+    refresh_traffic_rule_counts_impl();
+
+    let app_traffic_data = Rc::new(RefCell::new(Vec::<AppTrafficStat>::new()));
+    let refresh_app_traffic = {
+        let app_traffic_data = app_traffic_data.clone();
+        let app_traffic_search = app_traffic_search.clone();
+        let app_traffic_sort = app_traffic_sort.clone();
+        let app_traffic_list_box = app_traffic_list_box.clone();
+        Rc::new(move || {
+            let query = app_traffic_search.text().trim().to_lowercase();
+            let mut items: Vec<AppTrafficStat> = app_traffic_data
+                .borrow()
+                .iter()
+                .filter(|item| {
+                    query.is_empty()
+                        || item.name.to_lowercase().contains(&query)
+                        || item.id.to_lowercase().contains(&query)
+                })
+                .cloned()
+                .collect();
+
+            if app_traffic_sort.selected() == 0 {
+                items.sort_by(|a, b| (b.upload + b.download).cmp(&(a.upload + a.download)));
+            } else {
+                items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            }
+
+            while let Some(child) = app_traffic_list_box.first_child() {
+                app_traffic_list_box.remove(&child);
+            }
+
+            for item in items {
+                let row = adw::ActionRow::builder()
+                    .title(&item.name)
+                    .subtitle(&format!(
+                        "↑ {} · ↓ {} · Total {}",
+                        format_bytes(item.upload),
+                        format_bytes(item.download),
+                        format_bytes(item.upload + item.download),
+                    ))
+                    .build();
+                row.add_prefix(&create_app_icon(&item.icon));
+                app_traffic_list_box.append(&row);
+            }
+        })
+    };
+
+    {
+        let refresh = refresh_app_traffic.clone();
+        app_traffic_search.connect_search_changed(move |_| refresh());
+    }
+    {
+        let refresh = refresh_app_traffic.clone();
+        app_traffic_sort.connect_selected_notify(move |_| refresh());
+    }
+
+    // Wiring up Blocked Page logic
+    let on_add_proc = {
+        let new_proc_row = new_proc_row.clone();
+        let config = config.clone();
+        let controller = controller.clone();
+        let refresh_blocked = refresh_blocked_views.clone();
+        let refresh_rules = refresh_rule_views.clone();
+        let refresh_counts = refresh_traffic_rule_counts.clone();
+        Rc::new(move || {
+            let proc_name = new_proc_row.text().trim().to_string();
+            if proc_name.is_empty() {
+                return;
+            }
+            let mut current = config.borrow_mut();
+            current.settings.app_rules.retain(|r| {
+                r.executable.file_name().and_then(|n| n.to_str()) != Some(&proc_name)
+            });
+            current.settings.app_rules.push(AppRule {
+                executable: PathBuf::from(&proc_name),
+                action: RuleAction::Block,
+            });
+            let _ = current.save();
+            drop(current);
+            controller.borrow().sync_rules();
+            new_proc_row.set_text("");
+            if let Some(refresh) = refresh_blocked.borrow().as_ref() {
+                refresh();
+            }
+            if let Some(refresh) = refresh_rules.borrow().as_ref() {
+                refresh();
+            }
+            if let Some(refresh) = refresh_counts.borrow().as_ref() {
+                refresh();
+            }
+        })
+    };
+
+    {
+        let on_add = on_add_proc.clone();
+        add_proc_btn.connect_clicked(move |_| on_add());
+    }
+    {
+        let on_add = on_add_proc.clone();
+        new_proc_row.connect_entry_activated(move |_| on_add());
+    }
+
+    let on_add_target = {
+        let new_target_row = new_target_row.clone();
+        let config = config.clone();
+        let controller = controller.clone();
+        let refresh_blocked = refresh_blocked_views.clone();
+        let refresh_rules = refresh_rule_views.clone();
+        let refresh_counts = refresh_traffic_rule_counts.clone();
+        Rc::new(move || {
+            let target = new_target_row.text().trim().to_string();
+            if target.is_empty() {
+                return;
+            }
+            let mut current = config.borrow_mut();
+            if target.contains('/') || target.parse::<std::net::IpAddr>().is_ok() {
+                let parsed = parse_rule_set(&format!("IP-CIDR,{target}"), RuleAction::Block);
+                for rule in parsed.ip_rules {
+                    current.settings.ip_rules.retain(|r| r.network != rule.network);
+                    current.settings.ip_rules.push(rule);
+                }
+            } else {
+                let parsed = parse_rule_set(&format!("DOMAIN-SUFFIX,{target}"), RuleAction::Block);
+                for rule in parsed.domain_rules {
+                    current.settings.domain_rules.retain(|r| !(r.pattern == rule.pattern && r.kind == rule.kind));
+                    current.settings.domain_rules.push(rule);
+                }
+            }
+            let _ = current.save();
+            drop(current);
+            controller.borrow().sync_rules();
+            new_target_row.set_text("");
+            if let Some(refresh) = refresh_blocked.borrow().as_ref() {
+                refresh();
+            }
+            if let Some(refresh) = refresh_rules.borrow().as_ref() {
+                refresh();
+            }
+            if let Some(refresh) = refresh_counts.borrow().as_ref() {
+                refresh();
+            }
+        })
+    };
+
+    {
+        let on_add = on_add_target.clone();
+        add_target_btn.connect_clicked(move |_| on_add());
+    }
+    {
+        let on_add = on_add_target.clone();
+        new_target_row.connect_entry_activated(move |_| on_add());
+    }
+
+    let all_desktop_apps = scan_desktop_apps();
+    let app_switches = Rc::new(RefCell::new(Vec::<(String, adw::ActionRow, gtk::Switch)>::new()));
+
+    for app in &all_desktop_apps {
+        let row = adw::ActionRow::builder()
+            .title(&app.name)
+            .subtitle(&app.executable)
+            .build();
+        row.add_prefix(&create_app_icon(&app.icon));
+
+        let sw = gtk::Switch::builder().valign(gtk::Align::Center).build();
+        let is_blocked = current_app_action(&config.borrow(), &app.executable) == RuleAction::Block;
+        sw.set_active(is_blocked);
+
+        let config_ref = config.clone();
+        let controller_ref = controller.clone();
+        let executable = app.executable.clone();
+        let refresh_rules = refresh_rule_views.clone();
+        let refresh_counts = refresh_traffic_rule_counts.clone();
+        sw.connect_active_notify(move |sw| {
+            let currently_blocked = current_app_action(&config_ref.borrow(), &executable) == RuleAction::Block;
+            if sw.is_active() == currently_blocked {
+                return;
+            }
+            let mut current = config_ref.borrow_mut();
+            if sw.is_active() {
+                current.settings.app_rules.retain(|r| {
+                    r.executable.file_name().and_then(|n| n.to_str()) != Some(&executable)
+                });
+                current.settings.app_rules.push(AppRule {
+                    executable: PathBuf::from(&executable),
+                    action: RuleAction::Block,
+                });
+            } else {
+                current.settings.app_rules.retain(|r| {
+                    r.executable.file_name().and_then(|n| n.to_str()) != Some(&executable)
+                });
+            }
+            let _ = current.save();
+            drop(current);
+            controller_ref.borrow().sync_rules();
+            if let Some(refresh) = refresh_rules.borrow().as_ref() {
+                refresh();
+            }
+            if let Some(refresh) = refresh_counts.borrow().as_ref() {
+                refresh();
+            }
+        });
+
+        row.add_suffix(&sw);
+        row.set_activatable_widget(Some(&sw));
+        blocked_apps_list_box.append(&row);
+
+        app_switches.borrow_mut().push((
+            format!("{} {}", app.name, app.executable).to_lowercase(),
+            row,
+            sw,
+        ));
+    }
+
+    {
+        let app_switches = app_switches.clone();
+        app_search_row.connect_changed(move |entry| {
+            let query = entry.text().trim().to_lowercase();
+            for (key, row, _) in app_switches.borrow().iter() {
+                row.set_visible(query.is_empty() || key.contains(&query));
+            }
+        });
+    }
+
+    let refresh_blocked_impl: Rc<dyn Fn()> = {
+        let procs_list_box = procs_list_box.clone();
+        let blocked_targets_list_box = blocked_targets_list_box.clone();
+        let app_switches = app_switches.clone();
+        let config = config.clone();
+        let controller = controller.clone();
+        let refresh_blocked = refresh_blocked_views.clone();
+        let refresh_rules = refresh_rule_views.clone();
+        let refresh_counts = refresh_traffic_rule_counts.clone();
+
+        Rc::new(move || {
+            while let Some(child) = procs_list_box.first_child() {
+                procs_list_box.remove(&child);
+            }
+            let current = config.borrow();
+            let procs: Vec<String> = current
+                .settings
+                .app_rules
+                .iter()
+                .filter(|r| r.action == RuleAction::Block)
+                .filter_map(|r| r.executable.file_name().and_then(|n| n.to_str()).map(ToString::to_string))
+                .collect();
+
+            while let Some(child) = blocked_targets_list_box.first_child() {
+                blocked_targets_list_box.remove(&child);
+            }
+            let blocked_domains: Vec<DomainRule> = current
+                .settings
+                .domain_rules
+                .iter()
+                .filter(|r| r.action == RuleAction::Block)
+                .cloned()
+                .collect();
+            let blocked_ips: Vec<IpRule> = current
+                .settings
+                .ip_rules
+                .iter()
+                .filter(|r| r.action == RuleAction::Block)
+                .cloned()
+                .collect();
+            drop(current);
+
+            for proc_name in procs {
+                let row = adw::ActionRow::builder()
+                    .title(&proc_name)
+                    .subtitle("Blocked from network")
+                    .build();
+                let icon = gtk::Image::from_icon_name("network-offline-symbolic");
+                icon.set_valign(gtk::Align::Center);
+                row.add_prefix(&icon);
+
+                let del_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+                del_btn.add_css_class("flat");
+                del_btn.add_css_class("destructive-action");
+                del_btn.set_valign(gtk::Align::Center);
+
+                let target = proc_name.clone();
+                let config_ref = config.clone();
+                let controller_ref = controller.clone();
+                let refresh_blocked_ref = refresh_blocked.clone();
+                let refresh_rules_ref = refresh_rules.clone();
+                let refresh_counts_ref = refresh_counts.clone();
+                del_btn.connect_clicked(move |_| {
+                    let mut current = config_ref.borrow_mut();
+                    current.settings.app_rules.retain(|r| {
+                        r.executable.file_name().and_then(|n| n.to_str()) != Some(&target)
+                    });
+                    let _ = current.save();
+                    drop(current);
+                    controller_ref.borrow().sync_rules();
+                    if let Some(refresh) = refresh_blocked_ref.borrow().as_ref() {
+                        refresh();
+                    }
+                    if let Some(refresh) = refresh_rules_ref.borrow().as_ref() {
+                        refresh();
+                    }
+                    if let Some(refresh) = refresh_counts_ref.borrow().as_ref() {
+                        refresh();
+                    }
+                });
+                row.add_suffix(&del_btn);
+                procs_list_box.append(&row);
+            }
+
+            for rule in blocked_domains {
+                let row = adw::ActionRow::builder()
+                    .title(&rule.pattern)
+                    .subtitle(&format!("{} · REJECT", domain_kind_label(rule.kind)))
+                    .build();
+                let icon = gtk::Image::from_icon_name("network-server-symbolic");
+                icon.set_valign(gtk::Align::Center);
+                row.add_prefix(&icon);
+
+                let del_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+                del_btn.add_css_class("flat");
+                del_btn.add_css_class("destructive-action");
+                del_btn.set_valign(gtk::Align::Center);
+
+                let pattern = rule.pattern.clone();
+                let kind = rule.kind;
+                let config_ref = config.clone();
+                let controller_ref = controller.clone();
+                let refresh_blocked_ref = refresh_blocked.clone();
+                let refresh_rules_ref = refresh_rules.clone();
+                let refresh_counts_ref = refresh_counts.clone();
+                del_btn.connect_clicked(move |_| {
+                    let mut current = config_ref.borrow_mut();
+                    current.settings.domain_rules.retain(|r| !(r.pattern == pattern && r.kind == kind));
+                    let _ = current.save();
+                    drop(current);
+                    controller_ref.borrow().sync_rules();
+                    if let Some(refresh) = refresh_blocked_ref.borrow().as_ref() {
+                        refresh();
+                    }
+                    if let Some(refresh) = refresh_rules_ref.borrow().as_ref() {
+                        refresh();
+                    }
+                    if let Some(refresh) = refresh_counts_ref.borrow().as_ref() {
+                        refresh();
+                    }
+                });
+                row.add_suffix(&del_btn);
+                blocked_targets_list_box.append(&row);
+            }
+
+            for rule in blocked_ips {
+                let row = adw::ActionRow::builder()
+                    .title(&rule.network.to_string())
+                    .subtitle("IP-CIDR · REJECT")
+                    .build();
+                let icon = gtk::Image::from_icon_name("network-server-symbolic");
+                icon.set_valign(gtk::Align::Center);
+                row.add_prefix(&icon);
+
+                let del_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+                del_btn.add_css_class("flat");
+                del_btn.add_css_class("destructive-action");
+                del_btn.set_valign(gtk::Align::Center);
+
+                let network = rule.network;
+                let config_ref = config.clone();
+                let controller_ref = controller.clone();
+                let refresh_blocked_ref = refresh_blocked.clone();
+                let refresh_rules_ref = refresh_rules.clone();
+                let refresh_counts_ref = refresh_counts.clone();
+                del_btn.connect_clicked(move |_| {
+                    let mut current = config_ref.borrow_mut();
+                    current.settings.ip_rules.retain(|r| r.network != network);
+                    let _ = current.save();
+                    drop(current);
+                    controller_ref.borrow().sync_rules();
+                    if let Some(refresh) = refresh_blocked_ref.borrow().as_ref() {
+                        refresh();
+                    }
+                    if let Some(refresh) = refresh_rules_ref.borrow().as_ref() {
+                        refresh();
+                    }
+                    if let Some(refresh) = refresh_counts_ref.borrow().as_ref() {
+                        refresh();
+                    }
+                });
+                row.add_suffix(&del_btn);
+                blocked_targets_list_box.append(&row);
+            }
+
+            for (_, row, sw) in app_switches.borrow().iter() {
+                if let Some(exec) = row.subtitle().map(|s| s.to_string()) {
+                    let is_blocked = current_app_action(&config.borrow(), &exec) == RuleAction::Block;
+                    if sw.is_active() != is_blocked {
+                        sw.set_active(is_blocked);
+                    }
+                }
+            }
+        })
+    };
+    *refresh_blocked_views.borrow_mut() = Some(refresh_blocked_impl.clone());
+    refresh_blocked_impl();
 
     let log_page = gtk::Box::new(gtk::Orientation::Vertical, 12);
     log_page.set_margin_start(18);
@@ -1543,8 +2252,8 @@ fn build_ui(app: &adw::Application) {
     log_page.set_margin_bottom(18);
     log_page.set_hexpand(true);
     log_page.set_vexpand(true);
-    let log_group = adw::PreferencesGroup::builder().title("Proxy Logs").build();
-    let log_actions = adw::ActionRow::builder().title("SSH and routing output").build();
+    let log_group = adw::PreferencesGroup::builder().title("Connection Logs").build();
+    let log_actions = adw::ActionRow::builder().title("Proxy and direct routing output").build();
     let copy_logs = gtk::Button::from_icon_name("edit-copy-symbolic");
     copy_logs.add_css_class("flat");
     copy_logs.set_tooltip_text(Some("Copy logs"));
@@ -1555,30 +2264,73 @@ fn build_ui(app: &adw::Application) {
     log_actions.add_suffix(&clear_logs);
     log_group.add(&log_actions);
     log_page.append(&log_group);
-    let log_view = gtk::TextView::builder()
+
+    let log_stack = gtk::Stack::new();
+    log_stack.set_vexpand(true);
+    log_stack.set_hexpand(true);
+    let log_switcher = gtk::StackSwitcher::new();
+    log_switcher.set_stack(Some(&log_stack));
+    log_switcher.set_halign(gtk::Align::Center);
+    log_switcher.set_margin_top(4);
+    log_switcher.set_margin_bottom(4);
+    log_page.append(&log_switcher);
+
+    let proxy_log_view = gtk::TextView::builder()
         .editable(false)
         .cursor_visible(false)
         .monospace(true)
         .wrap_mode(gtk::WrapMode::WordChar)
         .build();
-    let log_buffer = log_view.buffer();
-    let log_scroller = gtk::ScrolledWindow::builder()
-        .child(&log_view)
+    let proxy_log_buffer = proxy_log_view.buffer();
+    let proxy_log_scroller = gtk::ScrolledWindow::builder()
+        .child(&proxy_log_view)
         .min_content_height(180)
         .hexpand(true)
         .vexpand(true)
         .build();
-    log_page.append(&log_scroller);
+    log_stack.add_titled(&proxy_log_scroller, Some("proxy"), "Proxy");
+
+    let direct_log_view = gtk::TextView::builder()
+        .editable(false)
+        .cursor_visible(false)
+        .monospace(true)
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .build();
+    let direct_log_buffer = direct_log_view.buffer();
+    let direct_log_scroller = gtk::ScrolledWindow::builder()
+        .child(&direct_log_view)
+        .min_content_height(180)
+        .hexpand(true)
+        .vexpand(true)
+        .build();
+    log_stack.add_titled(&direct_log_scroller, Some("direct"), "Direct");
+
+    log_page.append(&log_stack);
     view_stack.add_named(&log_page, Some("logs"));
 
     {
-        let log_buffer = log_buffer.clone();
-        clear_logs.connect_clicked(move |_| log_buffer.set_text(""));
+        let proxy_buffer = proxy_log_buffer.clone();
+        let direct_buffer = direct_log_buffer.clone();
+        let stack = log_stack.clone();
+        clear_logs.connect_clicked(move |_| {
+            if stack.visible_child_name().as_deref() == Some("direct") {
+                direct_buffer.set_text("");
+            } else {
+                proxy_buffer.set_text("");
+            }
+        });
     }
     {
-        let log_buffer = log_buffer.clone();
+        let proxy_buffer = proxy_log_buffer.clone();
+        let direct_buffer = direct_log_buffer.clone();
+        let stack = log_stack.clone();
         copy_logs.connect_clicked(move |_| {
-            let text = log_buffer.text(&log_buffer.start_iter(), &log_buffer.end_iter(), false);
+            let target_buffer = if stack.visible_child_name().as_deref() == Some("direct") {
+                &direct_buffer
+            } else {
+                &proxy_buffer
+            };
+            let text = target_buffer.text(&target_buffer.start_iter(), &target_buffer.end_iter(), false);
             if let Some(display) = gtk::gdk::Display::default() {
                 display.clipboard().set_text(&text);
             }
@@ -1800,13 +2552,13 @@ fn build_ui(app: &adw::Application) {
                     let connect_button_ref = connect_button.clone();
                     connect_button.connect_clicked(move |_| {
                         let is_active = config.borrow().active_profile == Some(profile.id);
-                        if *is_connected.borrow() && is_active {
+                        if (*is_connected.borrow() || controller.borrow().is_running()) && is_active {
                             bottom_status.set_text("Disconnecting…");
                             connect_button_ref.set_sensitive(false);
                             if let Some(tray) = tray_manager.borrow().as_ref() {
                                 tray.set_state(TrayConnectionState::Disconnecting);
                             }
-                            controller.borrow_mut().stop();
+                            controller.borrow().stop();
                             return;
                         }
                         {
@@ -1830,7 +2582,7 @@ fn build_ui(app: &adw::Application) {
                         if let Some(tray) = tray_manager.borrow().as_ref() {
                             tray.set_state(TrayConnectionState::Connecting);
                         }
-                        controller.borrow_mut().start(
+                        controller.borrow().start(
                             profile.clone(),
                             config.borrow().clone(),
                             config_path,
@@ -1867,7 +2619,7 @@ fn build_ui(app: &adw::Application) {
         let quit_app = app.clone();
         let quit_controller = controller.clone();
         let quitting_ref = quitting.clone();
-        let log_buffer_ref = log_buffer.clone();
+        let log_buffer_ref = proxy_log_buffer.clone();
         match TrayManager::new(
             Rc::new(move || {
                 let current = profiles_config.borrow();
@@ -1914,7 +2666,7 @@ fn build_ui(app: &adw::Application) {
             Rc::new(move || show_window.present()),
             Rc::new(move || {
                 *quitting_ref.borrow_mut() = true;
-                quit_controller.borrow_mut().stop();
+                quit_controller.borrow().shutdown();
                 quit_app.quit();
             }),
         ) {
@@ -1982,8 +2734,10 @@ fn build_ui(app: &adw::Application) {
         let import_rules = import_rules.clone();
         let import_button = import_button.clone();
         let refresh_rule_views = refresh_rule_views.clone();
-        let log_buffer = log_buffer.clone();
-        let log_view = log_view.clone();
+        let proxy_log_buffer = proxy_log_buffer.clone();
+        let proxy_log_view = proxy_log_view.clone();
+        let direct_log_buffer = direct_log_buffer.clone();
+        let direct_log_view = direct_log_view.clone();
         let bottom_status = bottom_status.clone();
         let speed_label = speed_label.clone();
         let uploaded_row = uploaded_row.clone();
@@ -1992,12 +2746,17 @@ fn build_ui(app: &adw::Application) {
         let session_upload = session_upload.clone();
         let session_download = session_download.clone();
         let tray_manager = tray_manager.clone();
+        let controller_ref = controller.clone();
+        let app_traffic_data = app_traffic_data.clone();
+        let refresh_app_traffic = refresh_app_traffic.clone();
         gtk::glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
             while let Ok(event) = event_rx.try_recv() {
                 match event {
                     RuntimeEvent::Connected => {
                         *session_upload.borrow_mut() = 0;
                         *session_download.borrow_mut() = 0;
+                        app_traffic_data.borrow_mut().clear();
+                        refresh_app_traffic();
                         uploaded_row.set_subtitle("0 B");
                         downloaded_row.set_subtitle("0 B");
                         total_row.set_subtitle("0 B");
@@ -2025,6 +2784,23 @@ fn build_ui(app: &adw::Application) {
                             button.set_sensitive(true);
                         }
                     }
+                    RuntimeEvent::Status(status) => {
+                        bottom_status.set_text(&status);
+                        if let Some(tray) = tray_manager.borrow().as_ref() {
+                            tray.set_state(TrayConnectionState::Connecting);
+                        }
+                        let active_id = config.borrow().active_profile.map(|id| id.to_string());
+                        for (profile_id, button) in connection_buttons.borrow().iter() {
+                            let is_active = active_id.as_ref() == Some(profile_id);
+                            if is_active {
+                                button.set_label("Disconnect");
+                                button.set_sensitive(true);
+                            } else {
+                                button.set_label("Connect");
+                                button.set_sensitive(false);
+                            }
+                        }
+                    }
                     RuntimeEvent::Error(error) => {
                         *is_connected.borrow_mut() = false;
                         bottom_status.set_text(&error);
@@ -2040,11 +2816,17 @@ fn build_ui(app: &adw::Application) {
                         import_button.set_sensitive(true);
                     }
                     RuntimeEvent::Log(line) => {
-                        let mut end = log_buffer.end_iter();
-                        log_buffer.insert(&mut end, &format!("{line}\n"));
-                        let end = log_buffer.end_iter();
-                        let mark = log_buffer.create_mark(None, &end, false);
-                        log_view.scroll_mark_onscreen(&mark);
+                        let is_direct = line.contains("-> Direct") || line.contains("Direct (");
+                        let (target_buffer, target_view) = if is_direct {
+                            (&direct_log_buffer, &direct_log_view)
+                        } else {
+                            (&proxy_log_buffer, &proxy_log_view)
+                        };
+                        let mut end = target_buffer.end_iter();
+                        target_buffer.insert(&mut end, &format!("{line}\n"));
+                        let end = target_buffer.end_iter();
+                        let mark = target_buffer.create_mark(None, &end, false);
+                        target_view.scroll_mark_onscreen(&mark);
                     }
                     RuntimeEvent::Speed { upload, download } => {
                         *session_upload.borrow_mut() += upload;
@@ -2059,6 +2841,10 @@ fn build_ui(app: &adw::Application) {
                             format_speed(upload), format_bytes(up_total),
                             format_speed(download), format_bytes(down_total)
                         ));
+                    }
+                    RuntimeEvent::AppTraffic(stats) => {
+                        *app_traffic_data.borrow_mut() = stats;
+                        refresh_app_traffic();
                     }
                     RuntimeEvent::RuleImportFailed(error) => {
                         rule_status.set_subtitle(&format!("Import failed: {error}"));
@@ -2094,20 +2880,21 @@ fn build_ui(app: &adw::Application) {
                             "{total} rules · {direct} direct · {proxy} proxy · {block} block · {} ignored",
                             result.ignored_count
                         ));
-                        let mut end = log_buffer.end_iter();
-                        log_buffer.insert(
+                        let mut end = proxy_log_buffer.end_iter();
+                        proxy_log_buffer.insert(
                             &mut end,
                             &format!("[rules] imported {total} rules ({direct} direct, {proxy} proxy, {block} block)\n"),
                         );
                         for warning in result.warnings.iter().take(3) {
-                            let mut end = log_buffer.end_iter();
-                            log_buffer.insert(&mut end, &format!("[rules] warning: {warning}\n"));
+                            let mut end = proxy_log_buffer.end_iter();
+                            proxy_log_buffer.insert(&mut end, &format!("[rules] warning: {warning}\n"));
                         }
                         import_rules.set_sensitive(true);
                         import_button.set_sensitive(true);
                         if let Some(refresh) = refresh_rule_views.borrow().as_ref() {
                             refresh();
                         }
+                        controller_ref.borrow().sync_rules();
                     }
                 }
             }

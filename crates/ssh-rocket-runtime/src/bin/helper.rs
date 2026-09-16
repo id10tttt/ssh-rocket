@@ -1,8 +1,23 @@
 use anyhow::{Context, Result, bail};
 use ipnet::IpNet;
 use ssh_rocket_core::{AppConfig, FlowContext, MatchSource, RoutingEngine, RuleAction};
-use std::{collections::HashMap, env, net::{IpAddr, Ipv4Addr, Ipv6Addr}, path::{Path, PathBuf}, process::Stdio, time::Duration};
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpStream, UdpSocket}, process::Command, signal, time::{interval, sleep, timeout}};
+use ssh_rocket_runtime::ipc::{HelperCommand, HelperEvent};
+use std::{
+    collections::HashMap,
+    env,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    net::{TcpStream, UdpSocket},
+    process::Command,
+    signal,
+    task::JoinHandle,
+    time::{interval, sleep, timeout},
+};
 use tokio_util::sync::CancellationToken;
 use tun2proxy::{ArgDns, ArgProxy, Args};
 
@@ -11,26 +26,11 @@ const MARK: &str = "0x5352";
 const TABLE: &str = "21330";
 const NFT_TABLE: &str = "ssh_rocket";
 const DNS_LISTEN_PORT: u16 = 15353;
+const MAX_TUN_RETRIES: usize = 3;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let mut args = env::args().skip(1);
-    let command = args.next().unwrap_or_default();
-    if command != "run" {
-        bail!("usage: ssh-rocket-helper run <config.json> <uid> <socks-port> <dns-port> <ssh-port> <ssh-address>...");
-    }
-    let config_path = args.next().context("missing config path")?;
-    let uid: u32 = args.next().context("missing uid")?.parse().context("invalid uid")?;
-    let socks_port: u16 = args.next().context("missing SOCKS port")?.parse().context("invalid SOCKS port")?;
-    let dns_port: u16 = args.next().context("missing DNS port")?.parse().context("invalid DNS port")?;
-    let ssh_port: u16 = args.next().context("missing SSH port")?.parse().context("invalid SSH port")?;
-    let ssh_addresses = args
-        .map(|value| value.parse::<IpAddr>().context("invalid SSH address"))
-        .collect::<Result<Vec<_>>>()?;
-    if ssh_addresses.is_empty() {
-        bail!("at least one SSH server address is required");
-    }
 
     if unsafe { libc::geteuid() } != 0 {
         bail!("ssh-rocket-helper must run as root");
@@ -39,13 +39,217 @@ async fn main() -> Result<()> {
         return Err(std::io::Error::last_os_error()).context("failed to monitor the GUI process");
     }
     if unsafe { libc::getppid() } == 1 {
-        bail!("SSH Rocket exited before the helper started");
+        bail!("parent process exited before the helper started");
     }
 
-    let config: AppConfig = serde_json::from_slice(&tokio::fs::read(&config_path).await?)?;
+    let mut args = env::args().skip(1);
+    let command = args.next().unwrap_or_else(|| "daemon".to_string());
+
+    if command == "daemon" {
+        run_daemon().await
+    } else if command == "run" {
+        let config_path = args.next().context("missing config path")?;
+        let uid: u32 = args.next().context("missing uid")?.parse().context("invalid uid")?;
+        let socks_port: u16 = args.next().context("missing SOCKS port")?.parse().context("invalid SOCKS port")?;
+        let dns_port: u16 = args.next().context("missing DNS port")?.parse().context("invalid DNS port")?;
+        let ssh_port: u16 = args.next().context("missing SSH port")?.parse().context("invalid SSH port")?;
+        let ssh_addresses = args
+            .map(|value| value.parse::<IpAddr>().context("invalid SSH address"))
+            .collect::<Result<Vec<_>>>()?;
+        if ssh_addresses.is_empty() {
+            bail!("at least one SSH server address is required");
+        }
+        run_oneshot(
+            PathBuf::from(config_path),
+            uid,
+            socks_port,
+            dns_port,
+            ssh_port,
+            ssh_addresses,
+        )
+        .await
+    } else {
+        bail!("usage: ssh-rocket-helper daemon | run <config.json> <uid> <socks-port> <dns-port> <ssh-port> <ssh-address>...");
+    }
+}
+
+struct ActiveSession {
+    shutdown: CancellationToken,
+    tun_task: JoinHandle<std::io::Result<usize>>,
+    dns_task: JoinHandle<Result<()>>,
+    system: SystemState,
+}
+
+impl ActiveSession {
+    async fn stop(self) {
+        self.shutdown.cancel();
+        let _ = self.dns_task.await;
+        let _ = self.tun_task.await;
+        self.system.cleanup().await;
+        clean_stale_resources().await;
+        eprintln!("[helper] routing stopped");
+    }
+}
+
+async fn run_daemon() -> Result<()> {
+    eprintln!("[helper] starting helper daemon");
+    clean_stale_resources().await;
+
+    let mut stdout = tokio::io::stdout();
+    let stdin = tokio::io::stdin();
+    let mut stdin_lines = BufReader::new(stdin).lines();
+
+    send_event(&mut stdout, &HelperEvent::Ready).await?;
+
+    let mut active_session: Option<ActiveSession> = None;
+    let mut app_scan = interval(Duration::from_secs(2));
+
+    let mut terminate = signal::unix::signal(signal::unix::SignalKind::terminate())
+        .context("failed to listen for termination")?;
+    let ctrl_c = signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+
+    loop {
+        tokio::select! {
+            _ = &mut ctrl_c => {
+                eprintln!("[helper] received interrupt, exiting");
+                break;
+            }
+            _ = terminate.recv() => {
+                eprintln!("[helper] received SIGTERM, exiting");
+                break;
+            }
+            line = stdin_lines.next_line() => {
+                let Some(line) = line? else {
+                    eprintln!("[helper] stdin closed by client, exiting");
+                    break;
+                };
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let command: HelperCommand = match serde_json::from_str(line) {
+                    Ok(cmd) => cmd,
+                    Err(err) => {
+                        eprintln!("[helper] invalid JSON command: {err}");
+                        send_event(&mut stdout, &HelperEvent::Error { message: format!("invalid command: {err}") }).await?;
+                        continue;
+                    }
+                };
+
+                match command {
+                    HelperCommand::Start {
+                        config_path,
+                        uid,
+                        socks_port,
+                        dns_port,
+                        ssh_port,
+                        ssh_addresses,
+                    } => {
+                        if let Some(session) = active_session.take() {
+                            session.stop().await;
+                        }
+                        match start_proxy_session(
+                            config_path,
+                            uid,
+                            socks_port,
+                            dns_port,
+                            ssh_port,
+                            ssh_addresses,
+                        ).await {
+                            Ok(session) => {
+                                active_session = Some(session);
+                                send_event(&mut stdout, &HelperEvent::Active).await?;
+                            }
+                            Err(err) => {
+                                eprintln!("[helper] failed to start proxy session: {err}");
+                                clean_stale_resources().await;
+                                send_event(&mut stdout, &HelperEvent::Error { message: err.to_string() }).await?;
+                            }
+                        }
+                    }
+                    HelperCommand::Stop => {
+                        if let Some(session) = active_session.take() {
+                            session.stop().await;
+                        } else {
+                            clean_stale_resources().await;
+                        }
+                        send_event(&mut stdout, &HelperEvent::Stopped).await?;
+                    }
+                    HelperCommand::SyncRules => {
+                        if let Some(session) = active_session.as_mut() {
+                            if let Err(err) = session.system.assign_apps().await {
+                                eprintln!("[helper] failed to sync app rules: {err}");
+                            }
+                        }
+                        send_event(&mut stdout, &HelperEvent::RulesSynced).await?;
+                    }
+                    HelperCommand::Status => {
+                        send_event(&mut stdout, &HelperEvent::Status { active: active_session.is_some() }).await?;
+                    }
+                    HelperCommand::Quit => {
+                        eprintln!("[helper] quit command received");
+                        break;
+                    }
+                }
+            }
+            tun_res = async {
+                match active_session.as_mut() {
+                    Some(session) => (&mut session.tun_task).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let msg = match tun_res {
+                    Ok(Err(e)) => format!("tun runtime failed: {e}"),
+                    Ok(Ok(_)) => "tun runtime exited".to_string(),
+                    Err(e) => format!("tun task panicked: {e}"),
+                };
+                eprintln!("[helper] {msg}");
+                if let Some(session) = active_session.take() {
+                    session.stop().await;
+                }
+                send_event(&mut stdout, &HelperEvent::Error { message: msg }).await?;
+            }
+            _ = app_scan.tick() => {
+                if let Some(session) = active_session.as_mut() {
+                    if let Err(error) = session.system.assign_apps().await {
+                        eprintln!("app rule synchronization failed: {error}");
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(session) = active_session.take() {
+        session.stop().await;
+    }
+    clean_stale_resources().await;
+    eprintln!("[helper] helper daemon exited cleanly");
+    Ok(())
+}
+
+async fn send_event<W: tokio::io::AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    event: &HelperEvent,
+) -> Result<()> {
+    let mut json = serde_json::to_string(event)?;
+    json.push('\n');
+    writer.write_all(json.as_bytes()).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// 启动透明代理会话。严格遵循顺序：清理残留 -> 创建 TUN -> 确认 tun2proxy 健康 -> 启用系统 routing -> 失败原子回滚
+async fn start_proxy_session(
+    config_path: PathBuf,
+    uid: u32,
+    socks_port: u16,
+    dns_port: u16,
+    ssh_port: u16,
+    ssh_addresses: Vec<IpAddr>,
+) -> Result<ActiveSession> {
     eprintln!("[helper] starting transparent proxy");
-    let routing_engine = RoutingEngine::new(config.settings.clone());
-    let shutdown = CancellationToken::new();
+    let config: AppConfig = serde_json::from_slice(&tokio::fs::read(&config_path).await?)?;
     let proxy = ArgProxy::try_from(format!("socks5://127.0.0.1:{socks_port}").as_str())?;
     let mut proxy_args = Args::default();
     proxy_args
@@ -55,48 +259,165 @@ async fn main() -> Result<()> {
         .ipv6_enabled(config.settings.ipv6)
         .setup(false);
 
-    let tun_shutdown = shutdown.clone();
-    let mut tun_task = tokio::spawn(async move {
-        tun2proxy::general_run_async(proxy_args, 1500, true, tun_shutdown).await
-    });
+    // 1. 创建 TUN 并重试解决 EBUSY
+    let mut tun_task = None;
+    let mut shutdown = CancellationToken::new();
+    let mut last_error = String::new();
 
-    wait_for_interface().await?;
-    let dns_socket = UdpSocket::bind(("127.0.0.1", DNS_LISTEN_PORT))
-        .await
-        .context("failed to bind local DNS router")?;
+    for attempt in 1..=MAX_TUN_RETRIES {
+        clean_stale_resources().await;
+        sleep(Duration::from_millis(100)).await;
+
+        let cur_shutdown = CancellationToken::new();
+        let tun_shutdown_clone = cur_shutdown.clone();
+        let cur_args = proxy_args.clone();
+
+        let mut task = tokio::spawn(async move {
+            tun2proxy::general_run_async(cur_args, 1500, true, tun_shutdown_clone).await
+        });
+
+        let startup_check = tokio::select! {
+            res = &mut task => {
+                match res {
+                    Ok(Err(e)) => Err(e.to_string()),
+                    Ok(Ok(_)) => Err("tun2proxy terminated prematurely".to_string()),
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+            res = wait_for_interface() => {
+                match res {
+                    Ok(_) => {
+                        // 确认设备健康建立且未立即崩溃
+                        sleep(Duration::from_millis(150)).await;
+                        if task.is_finished() {
+                            match (&mut task).await {
+                                Ok(Err(e)) => Err(e.to_string()),
+                                Ok(Ok(_)) => Err("tun2proxy closed immediately".to_string()),
+                                Err(e) => Err(e.to_string()),
+                            }
+                        } else {
+                            Ok(())
+                        }
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+            _ = sleep(Duration::from_secs(4)) => {
+                Err(format!("timed out waiting for interface {TUN_NAME}"))
+            }
+        };
+
+        match startup_check {
+            Ok(()) => {
+                tun_task = Some(task);
+                shutdown = cur_shutdown;
+                eprintln!("[helper] TUN interface {TUN_NAME} ready");
+                break;
+            }
+            Err(err) => {
+                cur_shutdown.cancel();
+                let _ = (&mut task).await;
+                last_error = err;
+                let is_busy = last_error.contains("Device or resource busy") || last_error.contains("os error 16");
+                if is_busy && attempt < MAX_TUN_RETRIES {
+                    eprintln!(
+                        "[helper] TUN interface {TUN_NAME} is busy (os error 16), cleaning up and retrying in 1s (attempt {attempt}/{MAX_TUN_RETRIES})..."
+                    );
+                    clean_stale_resources().await;
+                    sleep(Duration::from_millis(1000)).await;
+                } else if attempt < MAX_TUN_RETRIES {
+                    eprintln!(
+                        "[helper] TUN startup attempt {attempt}/{MAX_TUN_RETRIES} failed: {last_error}, retrying in 1s..."
+                    );
+                    clean_stale_resources().await;
+                    sleep(Duration::from_millis(1000)).await;
+                }
+            }
+        }
+    }
+
+    let Some(tun_task) = tun_task else {
+        clean_stale_resources().await;
+        bail!("failed to create TUN {TUN_NAME} after {MAX_TUN_RETRIES} attempts: {last_error}");
+    };
+
+    // 2. 绑定 DNS 路由
+    let dns_socket = match UdpSocket::bind(("127.0.0.1", DNS_LISTEN_PORT)).await {
+        Ok(socket) => socket,
+        Err(error) => {
+            shutdown.cancel();
+            let _ = tun_task.await;
+            clean_stale_resources().await;
+            return Err(error).context("failed to bind local DNS router");
+        }
+    };
+
+    // 3. 启用系统 routing
     let mut system = SystemState::new(
         uid,
         socks_port,
         dns_port,
         ssh_port,
         ssh_addresses,
-        PathBuf::from(config_path),
-        config,
+        config_path,
+        config.clone(),
     );
     if let Err(error) = system.setup().await {
+        eprintln!("[helper] system routing setup failed: {error}");
         shutdown.cancel();
         let _ = tun_task.await;
         system.cleanup().await;
+        clean_stale_resources().await;
         return Err(error);
     }
     eprintln!("[helper] routing is active on {TUN_NAME}");
 
     let dns_shutdown = shutdown.clone();
+    let routing_engine = RoutingEngine::new(config.settings.clone());
     let dns_task = tokio::spawn(async move {
         run_dns_router(dns_socket, dns_port, routing_engine, dns_shutdown).await
     });
-    let mut app_scan = interval(Duration::from_secs(2));
+
+    Ok(ActiveSession {
+        shutdown,
+        tun_task,
+        dns_task,
+        system,
+    })
+}
+
+async fn run_oneshot(
+    config_path: PathBuf,
+    uid: u32,
+    socks_port: u16,
+    dns_port: u16,
+    ssh_port: u16,
+    ssh_addresses: Vec<IpAddr>,
+) -> Result<()> {
+    let session = start_proxy_session(
+        config_path,
+        uid,
+        socks_port,
+        dns_port,
+        ssh_port,
+        ssh_addresses,
+    )
+    .await?;
+
     let ctrl_c = signal::ctrl_c();
     tokio::pin!(ctrl_c);
     let mut terminate = signal::unix::signal(signal::unix::SignalKind::terminate())
         .context("failed to listen for termination")?;
 
+    let mut session = session;
+    let mut app_scan = interval(Duration::from_secs(2));
+
     loop {
         tokio::select! {
             _ = &mut ctrl_c => break,
             _ = terminate.recv() => break,
-            result = &mut tun_task => {
-                match result {
+            tun_res = &mut session.tun_task => {
+                match tun_res {
                     Ok(Ok(_)) => {},
                     Ok(Err(error)) => eprintln!("tun runtime failed: {error}"),
                     Err(error) => eprintln!("tun task failed: {error}"),
@@ -104,18 +425,32 @@ async fn main() -> Result<()> {
                 break;
             }
             _ = app_scan.tick() => {
-                if let Err(error) = system.assign_apps().await {
+                if let Err(error) = session.system.assign_apps().await {
                     eprintln!("app rule synchronization failed: {error}");
                 }
             }
         }
     }
 
-    shutdown.cancel();
-    let _ = dns_task.await;
-    system.cleanup().await;
-    eprintln!("[helper] routing stopped");
+    session.stop().await;
     Ok(())
+}
+
+async fn clean_stale_resources() {
+    let _ = command("nft", &["delete", "table", "inet", NFT_TABLE]).await;
+    let _ = command("ip", &["-4", "rule", "del", "priority", TABLE]).await;
+    let _ = command("ip", &["-6", "rule", "del", "priority", TABLE]).await;
+    let _ = command("ip", &["-4", "route", "flush", "table", TABLE]).await;
+    let _ = command("ip", &["-6", "route", "flush", "table", TABLE]).await;
+    let _ = command("ip", &["link", "delete", "dev", TUN_NAME]).await;
+    for group in ["sshrocket-proxy", "sshrocket-direct", "sshrocket-block"] {
+        if let Ok(pids) = tokio::fs::read_to_string(format!("/sys/fs/cgroup/{group}/cgroup.procs")).await {
+            for pid in pids.lines() {
+                let _ = tokio::fs::write("/sys/fs/cgroup/cgroup.procs", pid).await;
+            }
+        }
+        let _ = tokio::fs::remove_dir(format!("/sys/fs/cgroup/{group}")).await;
+    }
 }
 
 struct SystemState {
