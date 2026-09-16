@@ -12,8 +12,8 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::{TcpStream, UdpSocket},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::UdpSocket,
     process::Command,
     signal,
     task::JoinHandle,
@@ -287,7 +287,7 @@ async fn start_proxy_session(
     proxy_args
         .proxy(proxy)
         .tun(TUN_NAME.to_string())
-        .dns(ArgDns::OverTcp)
+        .dns(ArgDns::Virtual)
         .ipv6_enabled(config.settings.ipv6)
         .setup(false);
 
@@ -487,6 +487,7 @@ async fn clean_stale_resources() {
         }
     }
     let _ = command("nft", &["delete", "table", "inet", NFT_TABLE]).await;
+    let _ = command("ip", &["-4", "rule", "del", "priority", "21329"]).await;
     let _ = command("ip", &["-4", "rule", "del", "priority", TABLE]).await;
     let _ = command("ip", &["-6", "rule", "del", "priority", TABLE]).await;
     let _ = command("ip", &["-4", "route", "flush", "table", TABLE]).await;
@@ -534,11 +535,16 @@ impl SystemState {
     }
 
     async fn setup(&mut self) -> Result<()> {
+        let _ = self.run_ip(&["-4", "rule", "del", "priority", "21329"]).await;
         let _ = self.run_ip(&["-4", "rule", "del", "priority", TABLE]).await;
         let _ = self.run_ip(&["-6", "rule", "del", "priority", TABLE]).await;
         self.run_ip(&["link", "set", "dev", TUN_NAME, "up"]).await?;
+        let _ = self.run_ip(&["-4", "addr", "replace", "10.0.0.33/24", "dev", TUN_NAME]).await;
+        let _ = self.run_ip(&["-4", "route", "replace", "10.0.0.0/24", "dev", TUN_NAME]).await;
+        let _ = self.run_ip(&["-4", "route", "replace", "198.18.0.0/15", "dev", TUN_NAME, "table", TABLE]).await;
         self.run_ip(&["-4", "route", "replace", "default", "dev", TUN_NAME, "table", TABLE]).await?;
         self.run_ip(&["-4", "rule", "add", "priority", TABLE, "fwmark", MARK, "lookup", TABLE]).await?;
+        let _ = self.run_ip(&["-4", "rule", "add", "priority", "21329", "to", "198.18.0.0/15", "lookup", TABLE]).await;
         if self.config.settings.ipv6 {
             self.run_ip(&["-6", "route", "replace", "default", "dev", TUN_NAME, "table", TABLE]).await?;
             self.run_ip(&["-6", "rule", "add", "priority", TABLE, "fwmark", MARK, "lookup", TABLE]).await?;
@@ -551,6 +557,7 @@ impl SystemState {
 
     async fn cleanup(&self) {
         let _ = command("nft", &["delete", "table", "inet", NFT_TABLE]).await;
+        let _ = command("ip", &["-4", "rule", "del", "priority", "21329"]).await;
         let _ = command("ip", &["-4", "rule", "del", "priority", TABLE]).await;
         let _ = command("ip", &["-6", "rule", "del", "priority", TABLE]).await;
         let _ = command("ip", &["-4", "route", "flush", "table", TABLE]).await;
@@ -664,6 +671,7 @@ impl SystemState {
             )
             .await?;
         }
+        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip", "daddr", "198.18.0.0/15", "meta", "l4proto", "tcp", "meta", "mark", "set", MARK, "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "dns_output", "meta", "skuid", "0", "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "dns_output", "udp", "dport", "53", "redirect", "to", &format!(":{DNS_LISTEN_PORT}")]).await?;
 
@@ -805,7 +813,7 @@ async fn handle_dns_query(
     socket: Arc<UdpSocket>,
     peer: SocketAddr,
     packet: Vec<u8>,
-    remote_dns_port: u16,
+    _remote_dns_port: u16,
     routing_engine: Arc<RoutingEngine>,
     ipv6_enabled: bool,
 ) {
@@ -836,7 +844,7 @@ async fn handle_dns_query(
     let resolve_result = if decision.action == RuleAction::Direct {
         forward_dns_local(&packet).await
     } else {
-        forward_dns_over_tcp(remote_dns_port, &packet).await
+        forward_dns_virtual(&packet).await
     };
 
     let response = match resolve_result {
@@ -880,6 +888,10 @@ async fn forward_dns_local(packet: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
+async fn forward_dns_virtual(packet: &[u8]) -> Result<Vec<u8>> {
+    forward_dns_over_udp("10.0.0.1:53", packet, Duration::from_millis(1500)).await
+}
+
 async fn forward_dns_over_udp(server: &str, packet: &[u8], timeout_dur: Duration) -> Result<Vec<u8>> {
     timeout(timeout_dur, async move {
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
@@ -890,23 +902,6 @@ async fn forward_dns_over_udp(server: &str, packet: &[u8], timeout_dur: Duration
     })
     .await
     .context("UDP DNS query timed out")?
-}
-
-async fn forward_dns_over_tcp(port: u16, packet: &[u8]) -> Result<Vec<u8>> {
-    timeout(Duration::from_secs(6), async move {
-        let mut stream = TcpStream::connect(("127.0.0.1", port)).await?;
-        let length = u16::try_from(packet.len()).context("DNS packet too large")?;
-        stream.write_all(&length.to_be_bytes()).await?;
-        stream.write_all(packet).await?;
-        let mut header = [0_u8; 2];
-        stream.read_exact(&mut header).await?;
-        let response_length = u16::from_be_bytes(header) as usize;
-        let mut response = vec![0_u8; response_length];
-        stream.read_exact(&mut response).await?;
-        Ok::<_, anyhow::Error>(response)
-    })
-    .await
-    .context("DNS forwarding timed out")?
 }
 
 fn parse_dns_query(packet: &[u8]) -> Option<(String, u16)> {
