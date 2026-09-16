@@ -633,7 +633,11 @@ impl SystemState {
 
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "meta", "skuid", "!=", &self.uid.to_string(), "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip", "daddr", "127.0.0.0/8", "return"]).await?;
+        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip", "daddr", "224.0.0.0/4", "return"]).await?;
+        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip", "daddr", "255.255.255.255", "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip6", "daddr", "::1", "return"]).await?;
+        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip6", "daddr", "fe80::/10", "return"]).await?;
+        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip6", "daddr", "ff00::/8", "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "tcp", "dport", &self.socks_port.to_string(), "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "tcp", "dport", &self.dns_port.to_string(), "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip", "daddr", "223.5.5.5", "return"]).await?;
@@ -1038,11 +1042,6 @@ async fn update_domain_addresses(addresses: &[IpAddr], action: RuleAction) {
     for address in addresses {
         let suffix = if address.is_ipv4() { "4" } else { "6" };
         let value = address.to_string();
-        for category in ["proxy", "direct", "block"] {
-            if category != target_cat {
-                batch.push_str(&format!("destroy element inet {NFT_TABLE} domain_{category}{suffix} {{ {value} }}\n"));
-            }
-        }
         batch.push_str(&format!("add element inet {NFT_TABLE} domain_{target_cat}{suffix} {{ {value} timeout 300s }}\n"));
     }
     if let Ok(mut child) = Command::new("nft")
@@ -1059,7 +1058,9 @@ async fn update_domain_addresses(addresses: &[IpAddr], action: RuleAction) {
         if let Ok(output) = child.wait_with_output().await {
             if !output.status.success() {
                 let err = String::from_utf8_lossy(&output.stderr);
-                eprintln!("[error] [nft] update_domain_addresses failed: {err}");
+                if !err.contains("No such file or directory") {
+                    eprintln!("[error] [nft] update_domain_addresses failed: {err}");
+                }
             }
         }
     }

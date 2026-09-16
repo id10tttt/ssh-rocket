@@ -22,6 +22,8 @@ impl SshSession {
         }
 
         let dns_port = socks_port + 1;
+        clean_stale_ssh(socks_port, dns_port).await;
+
         let (server_host, server_port) = effective_server(profile).await;
         let server_addresses = lookup_host((server_host.as_str(), server_port))
             .await
@@ -54,6 +56,12 @@ impl SshSession {
         }
         if let Some(identity_file) = &profile.identity_file {
             command.arg("-i").arg(identity_file);
+        }
+        unsafe {
+            command.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                Ok(())
+            });
         }
         command
             .arg(profile.host.trim())
@@ -141,4 +149,27 @@ pub async fn wait_for_tcp(port: u16, deadline: Duration) -> Result<()> {
     .await
     .context("timed out waiting for local SSH tunnel")?;
     Ok(())
+}
+
+async fn clean_stale_ssh(socks_port: u16, dns_port: u16) {
+    let my_uid = unsafe { libc::getuid() };
+    let my_pid = std::process::id() as i32;
+    if let Ok(mut entries) = tokio::fs::read_dir("/proc").await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else { continue; };
+            if pid == my_pid { continue; }
+            let status = tokio::fs::read_to_string(format!("/proc/{pid}/status")).await.unwrap_or_default();
+            if !status.lines().any(|line| line == format!("Uid:\t{}\t{}\t{}\t{}", my_uid, my_uid, my_uid, my_uid))
+                && !status.lines().any(|line| line.starts_with(&format!("Uid:\t{}\t", my_uid)))
+            {
+                continue;
+            }
+            if let Ok(cmdline) = tokio::fs::read_to_string(format!("/proc/{pid}/cmdline")).await {
+                if cmdline.contains("ssh") && (cmdline.contains(&format!(":{socks_port}")) || cmdline.contains(&format!(":{dns_port}"))) {
+                    unsafe { libc::kill(pid, libc::SIGKILL); }
+                }
+            }
+        }
+    }
+    sleep(Duration::from_millis(50)).await;
 }
