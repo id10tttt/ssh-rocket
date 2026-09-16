@@ -1,4 +1,4 @@
-namespace Sshuttle {
+namespace SshRocket {
 
     public class MainWindow : Adw.ApplicationWindow {
         private TunnelManager tunnel_manager;
@@ -45,7 +45,7 @@ namespace Sshuttle {
 
             this.tunnel_manager.speed_updated.connect ((up_speed, down_speed) => {
                 uint64 total_up, total_down;
-                this.config_manager.get_total_traffic (out total_up, out total_down);
+                this.tunnel_manager.get_session_total_traffic (out total_up, out total_down);
                 if (total_up > 0 || total_down > 0) {
                     this.speed_label.label = @"↑ $(up_speed) ($(TunnelManager.format_bytes (total_up)))   ↓ $(down_speed) ($(TunnelManager.format_bytes (total_down)))";
                 } else {
@@ -53,9 +53,9 @@ namespace Sshuttle {
                 }
             });
 
-            this.config_manager.traffic_stats_changed.connect (() => {
+            this.tunnel_manager.traffic_stats_updated.connect (() => {
                 uint64 total_up, total_down;
-                this.config_manager.get_total_traffic (out total_up, out total_down);
+                this.tunnel_manager.get_session_total_traffic (out total_up, out total_down);
                 if (total_up > 0 || total_down > 0) {
                     this.speed_label.label = @"↑ $(this.tunnel_manager.current_up_speed) ($(TunnelManager.format_bytes (total_up)))   ↓ $(this.tunnel_manager.current_down_speed) ($(TunnelManager.format_bytes (total_down)))";
                 } else {
@@ -116,10 +116,12 @@ namespace Sshuttle {
 
             var connect_nav_row = this.create_navigation_row ("ssh-rocket-symbolic", "Connect");
             var rules_nav_row = this.create_navigation_row ("preferences-system-network-symbolic", "Rules");
+            var traffic_nav_row = this.create_navigation_row ("ssh-rocket-traffic-symbolic", "Traffic");
             var log_nav_row = this.create_navigation_row ("utilities-terminal-symbolic", "Logs");
             var settings_nav_row = this.create_navigation_row ("preferences-system-symbolic", "Settings");
             navigation_list.append (connect_nav_row);
             navigation_list.append (rules_nav_row);
+            navigation_list.append (traffic_nav_row);
             navigation_list.append (log_nav_row);
             navigation_list.append (settings_nav_row);
             navigation_list.row_selected.connect ((row) => {
@@ -127,6 +129,8 @@ namespace Sshuttle {
                     this.view_stack.visible_child_name = "connect";
                 } else if (row == rules_nav_row) {
                     this.view_stack.visible_child_name = "rules";
+                } else if (row == traffic_nav_row) {
+                    this.view_stack.visible_child_name = "traffic";
                 } else if (row == log_nav_row) {
                     this.view_stack.visible_child_name = "log";
                 } else if (row == settings_nav_row) {
@@ -181,12 +185,17 @@ namespace Sshuttle {
             var rules_vs_page = this.view_stack.add_titled (rules_view, "rules", "Rules");
             rules_vs_page.icon_name = "preferences-system-network-symbolic";
 
-            // Page 3: Logs
+            // Page 3: Traffic
+            var traffic_view = new TrafficView (this.tunnel_manager);
+            var traffic_vs_page = this.view_stack.add_titled (traffic_view, "traffic", "Traffic");
+            traffic_vs_page.icon_name = "ssh-rocket-traffic-symbolic";
+
+            // Page 4: Logs
             var log_view = new LogView (this.tunnel_manager);
             var log_vs_page = this.view_stack.add_titled (log_view, "log", "Logs");
             log_vs_page.icon_name = "utilities-terminal-symbolic";
 
-            // Page 4: Settings
+            // Page 5: Settings
             var settings_view = new SettingsView (this.config_manager);
             var settings_vs_page = this.view_stack.add_titled (settings_view, "settings", "Settings");
             settings_vs_page.icon_name = "preferences-system-symbolic";

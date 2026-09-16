@@ -18,12 +18,12 @@ namespace SshRocket {
         private Adw.ActionRow reject_row;
         private Adw.ActionRow apps_row;
         private Adw.ActionRow domains_row;
-        private Adw.EntryRow app_search_row;
-        private Adw.ComboRow app_sort_row;
+        private Gtk.SearchEntry app_search_row;
+        private Gtk.DropDown app_sort_row;
         private Adw.PreferencesGroup app_list_group;
         private Gtk.Button app_load_more;
-        private Adw.EntryRow domain_search_row;
-        private Adw.ComboRow domain_sort_row;
+        private Gtk.SearchEntry domain_search_row;
+        private Gtk.DropDown domain_sort_row;
         private Adw.PreferencesGroup domain_list_group;
         private Gtk.Button domain_load_more;
         private GLib.GenericArray<Gtk.Widget> app_rows;
@@ -139,21 +139,26 @@ namespace SshRocket {
 
         private Gtk.Widget build_app_page () {
             var body = this.create_list_body ();
-            var search_group = new Adw.PreferencesGroup ();
-            search_group.title = "Search";
-            this.app_search_row = new Adw.EntryRow ();
-            this.app_search_row.title = "Application Name";
-            this.app_search_row.notify["text"].connect (this.refresh_apps);
-            search_group.add (this.app_search_row);
-            body.append (search_group);
-            var sort_group = new Adw.PreferencesGroup ();
-            sort_group.title = "Sort";
-            this.app_sort_row = new Adw.ComboRow ();
-            this.app_sort_row.title = "Sort By";
-            this.app_sort_row.model = Native.string_list ({ "Traffic", "Name" });
+            // 搜索与排序放在同一行
+            var app_toolbar = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 8);
+
+            this.app_search_row = new Gtk.SearchEntry ();
+            this.app_search_row.placeholder_text = "Search";
+            this.app_search_row.hexpand = true;
+            this.app_search_row.search_changed.connect (this.refresh_apps);
+            app_toolbar.append (this.app_search_row);
+
+            this.app_sort_row = new Gtk.DropDown (Native.string_list ({ "Traffic", "Name" }), null);
             this.app_sort_row.notify["selected"].connect (this.refresh_apps);
-            sort_group.add (this.app_sort_row);
-            body.append (sort_group);
+
+            var app_sort_box = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 6);
+            var app_sort_label = new Gtk.Label ("Sort");
+            app_sort_label.add_css_class ("dim-label");
+            app_sort_box.append (app_sort_label);
+            app_sort_box.append (this.app_sort_row);
+            app_toolbar.append (app_sort_box);
+
+            body.append (app_toolbar);
             this.app_list_group = new Adw.PreferencesGroup ();
             this.app_list_group.title = "Application Traffic";
             body.append (this.app_list_group);
@@ -171,21 +176,26 @@ namespace SshRocket {
 
         private Gtk.Widget build_domain_page () {
             var body = this.create_list_body ();
-            var search_group = new Adw.PreferencesGroup ();
-            search_group.title = "Search";
-            this.domain_search_row = new Adw.EntryRow ();
-            this.domain_search_row.title = "Domain";
-            this.domain_search_row.notify["text"].connect (this.refresh_domains);
-            search_group.add (this.domain_search_row);
-            body.append (search_group);
-            var sort_group = new Adw.PreferencesGroup ();
-            sort_group.title = "Sort";
-            this.domain_sort_row = new Adw.ComboRow ();
-            this.domain_sort_row.title = "Sort By";
-            this.domain_sort_row.model = Native.string_list ({ "Traffic", "Requests", "Name" });
+            // 搜索与排序放在同一行
+            var domain_toolbar = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 8);
+
+            this.domain_search_row = new Gtk.SearchEntry ();
+            this.domain_search_row.placeholder_text = "Search";
+            this.domain_search_row.hexpand = true;
+            this.domain_search_row.search_changed.connect (this.refresh_domains);
+            domain_toolbar.append (this.domain_search_row);
+
+            this.domain_sort_row = new Gtk.DropDown (Native.string_list ({ "Traffic", "Requests", "Name" }), null);
             this.domain_sort_row.notify["selected"].connect (this.refresh_domains);
-            sort_group.add (this.domain_sort_row);
-            body.append (sort_group);
+
+            var domain_sort_box = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 6);
+            var domain_sort_label = new Gtk.Label ("Sort");
+            domain_sort_label.add_css_class ("dim-label");
+            domain_sort_box.append (domain_sort_label);
+            domain_sort_box.append (this.domain_sort_row);
+            domain_toolbar.append (domain_sort_box);
+
+            body.append (domain_toolbar);
             this.domain_list_group = new Adw.PreferencesGroup ();
             this.domain_list_group.title = "Domain Traffic";
             body.append (this.domain_list_group);
