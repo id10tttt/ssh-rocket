@@ -2515,6 +2515,36 @@ fn build_ui(app: &adw::Application) {
 
     log_page.append(&log_header);
 
+    let all_log_view = gtk::TextView::builder()
+        .editable(false)
+        .cursor_visible(false)
+        .monospace(true)
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .build();
+    let all_log_buffer = all_log_view.buffer();
+    let all_log_scroller = gtk::ScrolledWindow::builder()
+        .child(&all_log_view)
+        .min_content_height(180)
+        .hexpand(true)
+        .vexpand(true)
+        .build();
+    log_stack.add_titled(&all_log_scroller, Some("all"), "All");
+
+    let system_log_view = gtk::TextView::builder()
+        .editable(false)
+        .cursor_visible(false)
+        .monospace(true)
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .build();
+    let system_log_buffer = system_log_view.buffer();
+    let system_log_scroller = gtk::ScrolledWindow::builder()
+        .child(&system_log_view)
+        .min_content_height(180)
+        .hexpand(true)
+        .vexpand(true)
+        .build();
+    log_stack.add_titled(&system_log_scroller, Some("system"), "System");
+
     let proxy_log_view = gtk::TextView::builder()
         .editable(false)
         .cursor_visible(false)
@@ -2549,26 +2579,32 @@ fn build_ui(app: &adw::Application) {
     view_stack.add_named(&log_page, Some("logs"));
 
     {
+        let all_buffer = all_log_buffer.clone();
+        let system_buffer = system_log_buffer.clone();
         let proxy_buffer = proxy_log_buffer.clone();
         let direct_buffer = direct_log_buffer.clone();
         let stack = log_stack.clone();
         clear_logs.connect_clicked(move |_| {
-            if stack.visible_child_name().as_deref() == Some("direct") {
-                direct_buffer.set_text("");
-            } else {
-                proxy_buffer.set_text("");
+            match stack.visible_child_name().as_deref() {
+                Some("all") => all_buffer.set_text(""),
+                Some("system") => system_buffer.set_text(""),
+                Some("direct") => direct_buffer.set_text(""),
+                _ => proxy_buffer.set_text(""),
             }
         });
     }
     {
+        let all_buffer = all_log_buffer.clone();
+        let system_buffer = system_log_buffer.clone();
         let proxy_buffer = proxy_log_buffer.clone();
         let direct_buffer = direct_log_buffer.clone();
         let stack = log_stack.clone();
         copy_logs.connect_clicked(move |_| {
-            let target_buffer = if stack.visible_child_name().as_deref() == Some("direct") {
-                &direct_buffer
-            } else {
-                &proxy_buffer
+            let target_buffer = match stack.visible_child_name().as_deref() {
+                Some("all") => &all_buffer,
+                Some("system") => &system_buffer,
+                Some("direct") => &direct_buffer,
+                _ => &proxy_buffer,
             };
             let text = target_buffer.text(&target_buffer.start_iter(), &target_buffer.end_iter(), false);
             if let Some(display) = gtk::gdk::Display::default() {
@@ -3098,17 +3134,31 @@ fn build_ui(app: &adw::Application) {
                         import_button.set_sensitive(true);
                     }
                     RuntimeEvent::Log(line) => {
-                        let is_direct = line.contains("-> Direct") || line.contains("Direct (");
-                        let (target_buffer, target_view) = if is_direct {
-                            (&direct_log_buffer, &direct_log_view)
-                        } else {
-                            (&proxy_log_buffer, &proxy_log_view)
+                        let time_str = gtk::glib::DateTime::now_local()
+                            .and_then(|dt| dt.format("%H:%M:%S"))
+                            .map(|gstr| gstr.to_string())
+                            .unwrap_or_else(|_| "00:00:00".to_string());
+                        let formatted = format!("[{time_str}] {line}\n");
+
+                        let append_to = |buffer: &gtk::TextBuffer, view: &gtk::TextView| {
+                            let mut end = buffer.end_iter();
+                            buffer.insert(&mut end, &formatted);
+                            let end = buffer.end_iter();
+                            let mark = buffer.create_mark(None, &end, false);
+                            view.scroll_mark_onscreen(&mark);
                         };
-                        let mut end = target_buffer.end_iter();
-                        target_buffer.insert(&mut end, &format!("{line}\n"));
-                        let end = target_buffer.end_iter();
-                        let mark = target_buffer.create_mark(None, &end, false);
-                        target_view.scroll_mark_onscreen(&mark);
+
+                        append_to(&all_log_buffer, &all_log_view);
+
+                        let is_proxy = line.contains("[proxy]") || line.contains("-> Proxy");
+                        let is_direct = line.contains("[direct]") || line.contains("-> Direct") || line.contains("Direct (");
+                        if is_proxy {
+                            append_to(&proxy_log_buffer, &proxy_log_view);
+                        } else if is_direct {
+                            append_to(&direct_log_buffer, &direct_log_view);
+                        } else {
+                            append_to(&system_log_buffer, &system_log_view);
+                        }
                     }
                     RuntimeEvent::Speed { upload, download } => {
                         *session_upload.borrow_mut() += upload;

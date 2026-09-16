@@ -805,6 +805,7 @@ async fn handle_dns_query(
     routing_engine: Arc<RoutingEngine>,
     ipv6_enabled: bool,
 ) {
+    let start_time = std::time::Instant::now();
     let Some((domain, qtype)) = parse_dns_query(&packet) else {
         return;
     };
@@ -820,11 +821,11 @@ async fn handle_dns_query(
         domain: Some(domain.clone()),
         ..FlowContext::default()
     });
-    eprintln!("[routing] {} (type {qtype}) -> {:?} ({:?})", domain, decision.action, decision.source);
 
     if decision.action == RuleAction::Block {
         let response = nxdomain_response(&packet);
         let _ = socket.send_to(&response, peer).await;
+        eprintln!("[block] {domain} (type {qtype}) -> Blocked ({:?})", decision.source);
         return;
     }
 
@@ -837,7 +838,7 @@ async fn handle_dns_query(
     let response = match resolve_result {
         Ok(resp) => resp,
         Err(err) => {
-            eprintln!("[dns] resolution failed for {domain}: {err}");
+            eprintln!("[error] DNS query failed for {domain} (action: {:?}, source: {:?}): {err}", decision.action, decision.source);
             let servfail = servfail_response(&packet);
             let _ = socket.send_to(&servfail, peer).await;
             return;
@@ -847,6 +848,22 @@ async fn handle_dns_query(
     let _ = socket.send_to(&response, peer).await;
 
     let addresses = parse_dns_addresses(&response);
+    let elapsed = start_time.elapsed().as_millis();
+    let addr_strs: Vec<String> = addresses.iter().map(|a| a.to_string()).collect();
+    let addr_display = if addr_strs.is_empty() { "none".to_string() } else { addr_strs.join(", ") };
+
+    match decision.action {
+        RuleAction::Proxy => {
+            eprintln!("[proxy] {domain} (type {qtype}) -> Proxy ({:?}) => [{addr_display}] ({elapsed}ms)", decision.source);
+        }
+        RuleAction::Direct => {
+            eprintln!("[direct] {domain} (type {qtype}) -> Direct ({:?}) => [{addr_display}] ({elapsed}ms)", decision.source);
+        }
+        RuleAction::Block => {
+            eprintln!("[block] {domain} (type {qtype}) -> Block ({:?})", decision.source);
+        }
+    }
+
     if !addresses.is_empty() {
         update_domain_addresses(&addresses, decision.action).await;
     }
@@ -1042,7 +1059,7 @@ async fn update_domain_addresses(addresses: &[IpAddr], action: RuleAction) {
         if let Ok(output) = child.wait_with_output().await {
             if !output.status.success() {
                 let err = String::from_utf8_lossy(&output.stderr);
-                eprintln!("[nft] update_domain_addresses failed: {err}");
+                eprintln!("[error] [nft] update_domain_addresses failed: {err}");
             }
         }
     }
