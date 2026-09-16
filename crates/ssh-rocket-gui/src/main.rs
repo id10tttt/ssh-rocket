@@ -16,6 +16,7 @@ enum RuntimeEvent {
     Disconnected,
     Error(String),
     Log(String),
+    Speed { upload: u64, download: u64 },
     RuleImportFailed(String),
     RulesImported {
         result: RuleImportResult,
@@ -85,26 +86,45 @@ impl RuntimeController {
                 }
 
                 let _ = events.send(RuntimeEvent::Connected);
-                tokio::select! {
-                    _ = stop_rx => {
-                        process.stdin.take();
-                        if tokio::time::timeout(Duration::from_secs(3), process.wait()).await.is_err() {
-                            let _ = process.kill().await;
-                        }
-                    }
-                    status = process.wait() => {
-                        match status {
-                            Ok(status) if status.success() => {},
-                            Ok(status) => {
-                                let _ = events.send(RuntimeEvent::Error(format!("Helper exited with {status}")));
+                let mut stop_rx = stop_rx;
+                let mut traffic_interval = tokio::time::interval(Duration::from_secs(1));
+                let mut previous_traffic = None;
+                loop {
+                    tokio::select! {
+                        _ = &mut stop_rx => {
+                            process.stdin.take();
+                            if tokio::time::timeout(Duration::from_secs(3), process.wait()).await.is_err() {
+                                let _ = process.kill().await;
                             }
-                            Err(error) => {
-                                let _ = events.send(RuntimeEvent::Error(format!("Helper failed: {error}")));
+                            break;
+                        }
+                        status = process.wait() => {
+                            match status {
+                                Ok(status) if status.success() => {},
+                                Ok(status) => {
+                                    let _ = events.send(RuntimeEvent::Error(format!("Helper exited with {status}")));
+                                }
+                                Err(error) => {
+                                    let _ = events.send(RuntimeEvent::Error(format!("Helper failed: {error}")));
+                                }
+                            }
+                            break;
+                        }
+                        _ = traffic_interval.tick() => {
+                            if let Some((sent, received)) = read_ssh_traffic(&profile.host).await {
+                                let (upload, download) = previous_traffic
+                                    .map(|(old_sent, old_received)| {
+                                        (sent.saturating_sub(old_sent), received.saturating_sub(old_received))
+                                    })
+                                    .unwrap_or((0, 0));
+                                previous_traffic = Some((sent, received));
+                                let _ = events.send(RuntimeEvent::Speed { upload, download });
                             }
                         }
                     }
                 }
                 let _ = ssh.stop().await;
+                let _ = events.send(RuntimeEvent::Speed { upload: 0, download: 0 });
                 let _ = events.send(RuntimeEvent::Disconnected);
             });
         });
@@ -115,6 +135,63 @@ impl RuntimeController {
             let _ = stop.send(());
         }
     }
+}
+
+async fn read_ssh_traffic(host: &str) -> Option<(u64, u64)> {
+    if host.trim().is_empty() {
+        return None;
+    }
+    let output = Command::new("ss").args(["-tin", "dst", host]).output().await.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let sent = sum_ss_counter(&text, "bytes_sent:");
+    let received = sum_ss_counter(&text, "bytes_received:");
+    (sent > 0 || received > 0).then_some((sent, received))
+}
+
+fn sum_ss_counter(text: &str, key: &str) -> u64 {
+    text.split_whitespace()
+        .filter_map(|field| field.strip_prefix(key))
+        .filter_map(|value| value.parse::<u64>().ok())
+        .sum()
+}
+
+fn format_speed(bytes_per_second: u64) -> String {
+    let value = bytes_per_second as f64;
+    if value < 1024.0 {
+        format!("{value:.0} B/s")
+    } else if value < 1024.0 * 1024.0 {
+        format!("{:.1} KB/s", value / 1024.0)
+    } else if value < 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.1} MB/s", value / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GB/s", value / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+fn navigation_row(icon_name: &str, title: &str) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::new();
+    row.set_height_request(48);
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    content.set_margin_start(12);
+    content.set_margin_end(12);
+    content.set_margin_top(8);
+    content.set_margin_bottom(8);
+    let icon = gtk::Image::from_icon_name(icon_name);
+    icon.set_pixel_size(20);
+    content.append(&icon);
+    let label = gtk::Label::new(Some(title));
+    label.set_halign(gtk::Align::Start);
+    label.set_hexpand(true);
+    content.append(&label);
+    row.set_child(Some(&content));
+    row
+}
+
+fn page_scroller(page: &adw::PreferencesPage) -> gtk::ScrolledWindow {
+    gtk::ScrolledWindow::builder().child(page).vexpand(true).build()
 }
 
 fn spawn_log_reader<R>(reader: R, source: &'static str, events: mpsc::Sender<RuntimeEvent>)
@@ -226,15 +303,51 @@ fn build_ui(app: &adw::Application) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("SSH Rocket")
-        .default_width(760)
-        .default_height(640)
+        .default_width(880)
+        .default_height(600)
         .build();
 
+    let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    sidebar.set_width_request(200);
+    sidebar.add_css_class("sidebar");
+    let app_title = gtk::Label::new(Some("SSH Rocket"));
+    app_title.add_css_class("title-2");
+    app_title.set_halign(gtk::Align::Start);
+    app_title.set_margin_start(18);
+    app_title.set_margin_end(18);
+    app_title.set_margin_top(18);
+    app_title.set_margin_bottom(12);
+    sidebar.append(&app_title);
+
+    let navigation = gtk::ListBox::new();
+    navigation.add_css_class("navigation-sidebar");
+    navigation.set_selection_mode(gtk::SelectionMode::Single);
+    navigation.set_activate_on_single_click(true);
+    navigation.set_vexpand(true);
+    let connect_nav = navigation_row("network-server-symbolic", "Connect");
+    let routing_nav = navigation_row("preferences-system-network-symbolic", "Routing");
+    let logs_nav = navigation_row("utilities-terminal-symbolic", "Logs");
+    navigation.append(&connect_nav);
+    navigation.append(&routing_nav);
+    navigation.append(&logs_nav);
+    sidebar.append(&navigation);
+    root.append(&sidebar);
+    root.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+
     let header = adw::HeaderBar::new();
+    let page_title = gtk::Label::new(Some("Connect"));
+    page_title.add_css_class("title-3");
+    header.set_title_widget(Some(&page_title));
     let toolbar = adw::ToolbarView::new();
+    toolbar.set_hexpand(true);
     toolbar.add_top_bar(&header);
 
-    let page = adw::PreferencesPage::new();
+    let view_stack = gtk::Stack::new();
+    view_stack.set_hexpand(true);
+    view_stack.set_vexpand(true);
+
+    let connect_page = adw::PreferencesPage::new();
     let connection_group = adw::PreferencesGroup::builder().title("SSH Connection").build();
     let host = adw::EntryRow::builder().title("Host").text(&active_profile.host).build();
     let port = adw::EntryRow::builder().title("Port").text(active_profile.port.to_string()).build();
@@ -247,8 +360,19 @@ fn build_ui(app: &adw::Application) {
     connection_group.add(&port);
     connection_group.add(&username);
     connection_group.add(&identity);
-    page.add(&connection_group);
+    connect_page.add(&connection_group);
 
+    let runtime_group = adw::PreferencesGroup::builder().title("Runtime").build();
+    let status = adw::ActionRow::builder().title("Status").subtitle("Disconnected").build();
+    let connect = gtk::Button::with_label("Connect");
+    connect.add_css_class("suggested-action");
+    connect.set_valign(gtk::Align::Center);
+    status.add_suffix(&connect);
+    runtime_group.add(&status);
+    connect_page.add(&runtime_group);
+    view_stack.add_named(&page_scroller(&connect_page), Some("connect"));
+
+    let routing_page = adw::PreferencesPage::new();
     let routing_group = adw::PreferencesGroup::builder().title("Routing").build();
     let policy = adw::ComboRow::builder()
         .title("Default Policy")
@@ -287,17 +411,10 @@ fn build_ui(app: &adw::Application) {
     routing_group.add(&ipv6);
     routing_group.add(&rule_source);
     routing_group.add(&rule_status);
-    page.add(&routing_group);
+    routing_page.add(&routing_group);
+    view_stack.add_named(&page_scroller(&routing_page), Some("routing"));
 
-    let runtime_group = adw::PreferencesGroup::builder().title("Runtime").build();
-    let status = adw::ActionRow::builder().title("Status").subtitle("Disconnected").build();
-    let connect = gtk::Button::with_label("Connect");
-    connect.add_css_class("suggested-action");
-    connect.set_valign(gtk::Align::Center);
-    status.add_suffix(&connect);
-    runtime_group.add(&status);
-    page.add(&runtime_group);
-
+    let log_page = adw::PreferencesPage::new();
     let log_group = adw::PreferencesGroup::builder().title("Proxy Logs").build();
     let log_actions = adw::ActionRow::builder().title("SSH and routing output").build();
     let copy_logs = gtk::Button::from_icon_name("edit-copy-symbolic");
@@ -322,7 +439,8 @@ fn build_ui(app: &adw::Application) {
         .vexpand(true)
         .build();
     log_group.add(&log_scroller);
-    page.add(&log_group);
+    log_page.add(&log_group);
+    view_stack.add_named(&page_scroller(&log_page), Some("logs"));
 
     {
         let log_buffer = log_buffer.clone();
@@ -338,9 +456,41 @@ fn build_ui(app: &adw::Application) {
         });
     }
 
-    let scroller = gtk::ScrolledWindow::builder().child(&page).vexpand(true).build();
-    toolbar.set_content(Some(&scroller));
-    window.set_content(Some(&toolbar));
+    {
+        let view_stack = view_stack.clone();
+        let page_title = page_title.clone();
+        navigation.connect_row_selected(move |_, row| {
+            let Some(row) = row else { return; };
+            let (name, title) = match row.index() {
+                1 => ("routing", "Routing"),
+                2 => ("logs", "Logs"),
+                _ => ("connect", "Connect"),
+            };
+            view_stack.set_visible_child_name(name);
+            page_title.set_text(title);
+        });
+    }
+    navigation.select_row(Some(&connect_nav));
+
+    let bottom_bar = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    bottom_bar.set_margin_start(16);
+    bottom_bar.set_margin_end(16);
+    bottom_bar.set_margin_top(8);
+    bottom_bar.set_margin_bottom(8);
+    let bottom_status = gtk::Label::new(Some("Disconnected"));
+    bottom_status.add_css_class("dim-label");
+    bottom_status.set_halign(gtk::Align::Start);
+    bottom_status.set_hexpand(true);
+    bottom_bar.append(&bottom_status);
+    let speed_label = gtk::Label::new(Some("↑ 0 B/s   ↓ 0 B/s"));
+    speed_label.add_css_class("dim-label");
+    speed_label.set_halign(gtk::Align::End);
+    bottom_bar.append(&speed_label);
+
+    toolbar.set_content(Some(&view_stack));
+    toolbar.add_bottom_bar(&bottom_bar);
+    root.append(&toolbar);
+    window.set_content(Some(&root));
 
     let is_connected = Rc::new(RefCell::new(false));
     {
@@ -427,24 +577,31 @@ fn build_ui(app: &adw::Application) {
         let import_rules = import_rules.clone();
         let log_buffer = log_buffer.clone();
         let log_view = log_view.clone();
+        let bottom_status = bottom_status.clone();
+        let speed_label = speed_label.clone();
         gtk::glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
             while let Ok(event) = event_rx.try_recv() {
                 match event {
                     RuntimeEvent::Connected => {
                         *is_connected.borrow_mut() = true;
                         status.set_subtitle("Connected");
+                        bottom_status.set_text("Connected");
                         connect.set_label("Disconnect");
                         connect.set_sensitive(true);
                     }
                     RuntimeEvent::Disconnected => {
                         *is_connected.borrow_mut() = false;
                         status.set_subtitle("Disconnected");
+                        bottom_status.set_text("Disconnected");
+                        speed_label.set_text("↑ 0 B/s   ↓ 0 B/s");
                         connect.set_label("Connect");
                         connect.set_sensitive(true);
                     }
                     RuntimeEvent::Error(error) => {
                         *is_connected.borrow_mut() = false;
                         status.set_subtitle(&error);
+                        bottom_status.set_text("Disconnected");
+                        speed_label.set_text("↑ 0 B/s   ↓ 0 B/s");
                         connect.set_label("Connect");
                         connect.set_sensitive(true);
                         import_rules.set_sensitive(true);
@@ -455,6 +612,13 @@ fn build_ui(app: &adw::Application) {
                         let end = log_buffer.end_iter();
                         let mark = log_buffer.create_mark(None, &end, false);
                         log_view.scroll_mark_onscreen(&mark);
+                    }
+                    RuntimeEvent::Speed { upload, download } => {
+                        speed_label.set_text(&format!(
+                            "↑ {}   ↓ {}",
+                            format_speed(upload),
+                            format_speed(download)
+                        ));
                     }
                     RuntimeEvent::RuleImportFailed(error) => {
                         rule_status.set_subtitle(&format!("Import failed: {error}"));
