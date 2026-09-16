@@ -172,16 +172,22 @@ void test_multiple_rule_sources () {
         assert (config.resolve_domain_action ("two.example", out matched) == "reject" && matched);
         config.set_active_rule_source (first_id);
         assert (config.resolve_domain_action ("one.example", out matched) == "direct" && matched);
-        assert (config.resolve_domain_action ("two.example", out matched) == "proxy" && !matched);
+        assert (config.resolve_domain_action ("two.example", out matched) == "direct" && !matched);
+        assert (config.get_domain_default_policy () == "direct");
         assert (config.resolve_domain_action ("custom.example", out matched) == "proxy" && matched);
-        config.set_domain_default_policy ("direct");
+        config.set_domain_default_policy ("proxy");
+        assert (config.resolve_domain_action ("unmatched.example", out matched) == "proxy" && !matched);
         config.set_active_rule_source (second_id);
-        assert (config.resolve_domain_action ("unmatched.example", out matched) == "direct" && !matched);
+        assert (config.get_domain_default_policy () == "proxy");
+        assert (config.resolve_domain_action ("unmatched.example", out matched) == "proxy" && !matched);
+        config.set_active_rule_source (first_id);
+        assert (config.get_domain_default_policy () == "proxy");
+        config.set_active_rule_source (second_id);
 
         var restored = new Sshuttle.ConfigManager ();
         assert (restored.get_rule_sources ().length == 2);
         assert (restored.get_active_rule_source_id () == second_id);
-        assert (restored.get_domain_default_policy () == "direct");
+        assert (restored.get_domain_default_policy () == "proxy");
         restored.clear_imported_rule_source ();
         assert (restored.get_rule_sources ().length == 1);
     } catch (GLib.Error e) {

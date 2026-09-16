@@ -86,6 +86,7 @@ namespace Sshuttle {
 
         public signal void app_rules_changed ();
         public signal void domain_rules_changed ();
+        public signal void domain_default_policy_changed ();
         public signal void blacklist_changed ();
         public signal void traffic_stats_changed ();
         public signal void network_settings_changed ();
@@ -587,6 +588,7 @@ namespace Sshuttle {
 
             this.app_rules_changed ();
             this.domain_rules_changed ();
+            this.domain_default_policy_changed ();
             this.blacklist_changed ();
             this.traffic_stats_changed ();
             this.network_settings_changed ();
@@ -756,9 +758,13 @@ namespace Sshuttle {
             string p = (policy.down () == "proxy") ? "proxy" : "direct";
             if (this.domain_default_policy != p) {
                 this.domain_default_policy = p;
-                this.rebuild_domain_rule_matcher ();
+                var active_source = this.get_active_rule_source ();
+                if (active_source != null) {
+                    active_source.default_policy = p;
+                }
+                this.domain_rule_matcher.set_default_policy (p);
                 this.save_settings ();
-                this.domain_rules_changed ();
+                this.domain_default_policy_changed ();
             }
         }
 
@@ -889,12 +895,16 @@ namespace Sshuttle {
             foreach (var r in rules) {
                 this.domain_rules.add (r);
             }
+            bool policy_changed = false;
             if (default_policy != "") {
-                this.domain_default_policy = (default_policy.down () == "proxy") ? "proxy" : "direct";
+                string policy = (default_policy.down () == "proxy") ? "proxy" : "direct";
+                policy_changed = this.domain_default_policy != policy;
+                this.domain_default_policy = policy;
             }
             this.rebuild_domain_rule_matcher ();
             this.save_settings ();
             this.domain_rules_changed ();
+            if (policy_changed) this.domain_default_policy_changed ();
         }
 
         public void clear_domain_rules () {
@@ -940,10 +950,12 @@ namespace Sshuttle {
             info.default_policy = result.default_policy == "proxy" ? "proxy" : "direct";
             this.rule_sources.add (info);
             this.active_rule_source_id = info.id;
+            bool policy_changed = this.sync_default_policy_from_active_rule_source ();
             this.load_rule_cache ();
             this.rebuild_domain_rule_matcher ();
             this.save_settings ();
             this.domain_rules_changed ();
+            if (policy_changed) this.domain_default_policy_changed ();
         }
 
         public void clear_imported_rule_source () {
@@ -958,10 +970,12 @@ namespace Sshuttle {
                 }
             }
             this.active_rule_source_id = this.rule_sources.length > 0 ? this.rule_sources[0].id : "";
+            bool policy_changed = this.sync_default_policy_from_active_rule_source ();
             this.load_rule_cache ();
             this.rebuild_domain_rule_matcher ();
             this.save_settings ();
             this.domain_rules_changed ();
+            if (policy_changed) this.domain_default_policy_changed ();
         }
 
         public RuleSourceInfo[] get_rule_sources () {
@@ -985,10 +999,12 @@ namespace Sshuttle {
             }
             if (!found) return;
             this.active_rule_source_id = source_id;
+            bool policy_changed = this.sync_default_policy_from_active_rule_source ();
             this.load_rule_cache ();
             this.rebuild_domain_rule_matcher ();
             this.save_settings ();
             this.domain_rules_changed ();
+            if (policy_changed) this.domain_default_policy_changed ();
         }
 
         private void store_rule_source (RuleSourceInfo info, RuleImportResult result) throws GLib.Error {
@@ -998,10 +1014,12 @@ namespace Sshuttle {
             info.updated_at = new GLib.DateTime.now_local ().to_unix ();
             info.default_policy = result.default_policy == "proxy" ? "proxy" : "direct";
             this.active_rule_source_id = info.id;
+            bool policy_changed = this.sync_default_policy_from_active_rule_source ();
             this.load_rule_cache ();
             this.rebuild_domain_rule_matcher ();
             this.save_settings ();
             this.domain_rules_changed ();
+            if (policy_changed) this.domain_default_policy_changed ();
         }
 
         private RuleSourceInfo? get_active_rule_source () {
@@ -1009,6 +1027,15 @@ namespace Sshuttle {
                 if (this.rule_sources[i].id == this.active_rule_source_id) return this.rule_sources[i];
             }
             return null;
+        }
+
+        private bool sync_default_policy_from_active_rule_source () {
+            var active_source = this.get_active_rule_source ();
+            if (active_source == null) return false;
+            string policy = active_source.default_policy == "direct" ? "direct" : "proxy";
+            if (this.domain_default_policy == policy) return false;
+            this.domain_default_policy = policy;
+            return true;
         }
 
         private string get_rule_source_path (RuleSourceInfo info) {

@@ -136,6 +136,10 @@ namespace Sshuttle {
             }
         }
 
+        public void set_default_policy (string policy) {
+            this.default_policy = policy == "proxy" ? "proxy" : "direct";
+        }
+
         public string resolve (string? domain, out bool matched = null) {
             matched = false;
             if (domain == null || domain.strip () == "") {

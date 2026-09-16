@@ -49,6 +49,10 @@ namespace Sshuttle {
         private uint runtime_ready_timeout_id = 0;
         private uint health_timer_id = 0;
         private const uint MAX_LOGS = 1000;
+        private bool routing_refresh_running = false;
+        private bool routing_refresh_pending = false;
+        private bool routing_refresh_pending_dns = false;
+        private uint routing_refresh_idle_id = 0;
 
         private uint speed_timer_id = 0;
         private uint64 prev_bytes_sent = 0;
@@ -101,6 +105,7 @@ namespace Sshuttle {
 
             this.config_manager.app_rules_changed.connect (this.on_app_rules_changed);
             this.config_manager.domain_rules_changed.connect (this.on_domain_rules_changed);
+            this.config_manager.domain_default_policy_changed.connect (this.on_domain_default_policy_changed);
             this.config_manager.blacklist_changed.connect (this.on_blacklist_changed);
             this.process_monitor.process_migrated.connect (this.on_process_migrated);
             this.dns_proxy.dns_resolved.connect (this.on_dns_resolved);
@@ -871,29 +876,86 @@ namespace Sshuttle {
         }
 
         public void refresh_routing_configuration () {
+            this.queue_routing_refresh (true);
+        }
+
+        private void queue_routing_refresh (bool rebuild_dns_sets) {
+            if (this.state != TunnelState.CONNECTED) return;
+            this.routing_refresh_pending = true;
+            this.routing_refresh_pending_dns = this.routing_refresh_pending_dns || rebuild_dns_sets;
+            this.schedule_routing_refresh ();
+        }
+
+        private void schedule_routing_refresh () {
+            if (this.routing_refresh_running || this.routing_refresh_idle_id != 0) return;
+            this.routing_refresh_idle_id = GLib.Idle.add (() => {
+                this.routing_refresh_idle_id = 0;
+                this.start_routing_refresh ();
+                return GLib.Source.REMOVE;
+            });
+        }
+
+        private void start_routing_refresh () {
             if (this.state != TunnelState.CONNECTED) {
+                this.routing_refresh_pending = false;
+                this.routing_refresh_pending_dns = false;
                 return;
             }
-            if (!this.refresh_proxy_rules ()) {
-                this.fail_current_attempt ("Failed to refresh routing configuration.");
-                return;
-            }
-            this.dns_proxy.rebuild_routing_sets ();
+            if (!this.routing_refresh_pending) return;
+
+            this.routing_refresh_pending = false;
+            bool rebuild_dns_sets = this.routing_refresh_pending_dns;
+            this.routing_refresh_pending_dns = false;
+            this.routing_refresh_running = true;
+
+            var profile = this.active_profile;
+            var settings = this.config_manager.get_network_settings ();
+            bool ipv6 = this.uses_ipv6_routing (settings);
+            string[] direct_networks = profile != null
+                ? CommandBuilder.get_effective_excludes (profile, settings)
+                : new string[0];
+            string default_policy = this.config_manager.get_domain_default_policy ();
+            DomainRule[] network_rules = this.config_manager.get_network_rules ();
+            int proxy_port = this.local_proxy_port;
+
+            new GLib.Thread<void*> ("routing-refresh", () => {
+                bool ready = this.nft_manager.apply_cgroup_filter (
+                    proxy_port,
+                    ipv6,
+                    default_policy,
+                    direct_networks,
+                    network_rules
+                );
+                if (ready && rebuild_dns_sets) {
+                    this.dns_proxy.rebuild_routing_sets ();
+                }
+                GLib.Idle.add (() => {
+                    this.routing_refresh_running = false;
+                    if (!ready && this.state == TunnelState.CONNECTED) {
+                        this.fail_current_attempt ("Failed to refresh routing configuration.");
+                    } else if (this.routing_refresh_pending) {
+                        this.schedule_routing_refresh ();
+                    }
+                    return GLib.Source.REMOVE;
+                });
+                return null;
+            });
         }
 
         private void on_app_rules_changed () {
             this.sync_process_monitor_targets ();
             if (this.state == TunnelState.CONNECTED) {
-                if (!this.refresh_proxy_rules ()) {
-                    this.fail_current_attempt ("Failed to refresh application routing rules.");
-                    return;
-                }
+                this.queue_routing_refresh (false);
                 this.process_monitor.start ();
             }
         }
 
         private void on_domain_rules_changed () {
-            this.refresh_routing_configuration ();
+            this.queue_routing_refresh (true);
+        }
+
+        private void on_domain_default_policy_changed () {
+            this.queue_routing_refresh (false);
         }
 
         private void on_blacklist_changed () {

@@ -56,6 +56,7 @@ namespace Sshuttle {
                 this.refresh_imported_rules ();
                 this.refresh_custom_rules ();
             });
+            this.config_manager.domain_default_policy_changed.connect (this.refresh_default_policy);
             this.refresh_overview ();
             this.refresh_detail ();
             this.refresh_imported_rules ();
@@ -281,6 +282,13 @@ namespace Sshuttle {
             this.custom_summary_row.subtitle = "%u rules".printf (
                 this.config_manager.get_domain_rules ().length
             );
+            this.refreshing = false;
+        }
+
+        private void refresh_default_policy () {
+            this.refreshing = true;
+            this.default_policy_row.selected =
+                this.config_manager.get_domain_default_policy () == "proxy" ? 1 : 0;
             this.refreshing = false;
         }
 
