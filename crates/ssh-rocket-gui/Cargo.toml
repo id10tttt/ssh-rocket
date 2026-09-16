@@ -1,0 +1,18 @@
+[package]
+name = "ssh-rocket"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+gtk4 = { version = "0.11.4", features = ["v4_18"] }
+libadwaita = { version = "0.9.2", features = ["v1_7"] }
+libc.workspace = true
+ssh-rocket-core = { path = "../ssh-rocket-core" }
+ssh-rocket-runtime = { path = "../ssh-rocket-runtime" }
+tokio.workspace = true
+
+[[bin]]
+name = "ssh-rocket"
+path = "src/main.rs"

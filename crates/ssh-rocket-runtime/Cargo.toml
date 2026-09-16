@@ -1,0 +1,21 @@
+[package]
+name = "ssh-rocket-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ipnet.workspace = true
+libc.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ssh-rocket-core = { path = "../ssh-rocket-core" }
+tokio.workspace = true
+tokio-util.workspace = true
+tun2proxy = { version = "0.8.3", default-features = false }
+
+[[bin]]
+name = "ssh-rocket-helper"
+path = "src/bin/helper.rs"

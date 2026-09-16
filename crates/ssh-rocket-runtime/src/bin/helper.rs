@@ -1,0 +1,478 @@
+use anyhow::{Context, Result, bail};
+use ipnet::IpNet;
+use ssh_rocket_core::{AppConfig, FlowContext, MatchSource, RoutingEngine, RuleAction};
+use std::{collections::HashMap, env, net::{IpAddr, Ipv4Addr, Ipv6Addr}, path::{Path, PathBuf}, process::Stdio, time::Duration};
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpStream, UdpSocket}, process::Command, signal, time::{interval, sleep, timeout}};
+use tokio_util::sync::CancellationToken;
+use tun2proxy::{ArgDns, ArgProxy, Args};
+
+const TUN_NAME: &str = "sshrocket0";
+const MARK: &str = "0x5352";
+const TABLE: &str = "21330";
+const NFT_TABLE: &str = "ssh_rocket";
+const DNS_LISTEN_PORT: u16 = 15353;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let mut args = env::args().skip(1);
+    let command = args.next().unwrap_or_default();
+    if command != "run" {
+        bail!("usage: ssh-rocket-helper run <config.json> <uid> <socks-port> <dns-port>");
+    }
+    let config_path = args.next().context("missing config path")?;
+    let uid: u32 = args.next().context("missing uid")?.parse().context("invalid uid")?;
+    let socks_port: u16 = args.next().context("missing SOCKS port")?.parse().context("invalid SOCKS port")?;
+    let dns_port: u16 = args.next().context("missing DNS port")?.parse().context("invalid DNS port")?;
+
+    if unsafe { libc::geteuid() } != 0 {
+        bail!("ssh-rocket-helper must run as root");
+    }
+
+    let config: AppConfig = serde_json::from_slice(&tokio::fs::read(&config_path).await?)?;
+    let routing_engine = RoutingEngine::new(config.settings.clone());
+    let shutdown = CancellationToken::new();
+    let proxy = ArgProxy::try_from(format!("socks5://127.0.0.1:{socks_port}").as_str())?;
+    let mut proxy_args = Args::default();
+    proxy_args
+        .proxy(proxy)
+        .tun(TUN_NAME.to_string())
+        .dns(ArgDns::OverTcp)
+        .ipv6_enabled(config.settings.ipv6)
+        .setup(false);
+
+    let tun_shutdown = shutdown.clone();
+    let mut tun_task = tokio::spawn(async move {
+        tun2proxy::general_run_async(proxy_args, 1500, true, tun_shutdown).await
+    });
+
+    wait_for_interface().await?;
+    let dns_socket = UdpSocket::bind(("127.0.0.1", DNS_LISTEN_PORT))
+        .await
+        .context("failed to bind local DNS router")?;
+    let mut system = SystemState::new(uid, socks_port, dns_port, config);
+    if let Err(error) = system.setup().await {
+        shutdown.cancel();
+        let _ = tun_task.await;
+        system.cleanup().await;
+        return Err(error);
+    }
+
+    let dns_shutdown = shutdown.clone();
+    let dns_task = tokio::spawn(async move {
+        run_dns_router(dns_socket, dns_port, routing_engine, dns_shutdown).await
+    });
+    let mut app_scan = interval(Duration::from_secs(2));
+    let mut stdin = tokio::io::stdin();
+    let mut stdin_byte = [0_u8; 1];
+    let ctrl_c = signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+
+    loop {
+        tokio::select! {
+            _ = &mut ctrl_c => break,
+            _ = stdin.read(&mut stdin_byte) => break,
+            result = &mut tun_task => {
+                match result {
+                    Ok(Ok(_)) => {},
+                    Ok(Err(error)) => eprintln!("tun runtime failed: {error}"),
+                    Err(error) => eprintln!("tun task failed: {error}"),
+                }
+                break;
+            }
+            _ = app_scan.tick() => {
+                if let Err(error) = system.assign_apps().await {
+                    eprintln!("app rule synchronization failed: {error}");
+                }
+            }
+        }
+    }
+
+    shutdown.cancel();
+    let _ = dns_task.await;
+    system.cleanup().await;
+    Ok(())
+}
+
+struct SystemState {
+    uid: u32,
+    socks_port: u16,
+    dns_port: u16,
+    config: AppConfig,
+}
+
+impl SystemState {
+    fn new(uid: u32, socks_port: u16, dns_port: u16, config: AppConfig) -> Self {
+        Self { uid, socks_port, dns_port, config }
+    }
+
+    async fn setup(&mut self) -> Result<()> {
+        self.run_ip(&["link", "set", "dev", TUN_NAME, "up"]).await?;
+        self.run_ip(&["-4", "route", "replace", "default", "dev", TUN_NAME, "table", TABLE]).await?;
+        self.run_ip(&["-4", "rule", "add", "priority", TABLE, "fwmark", MARK, "lookup", TABLE]).await?;
+        if self.config.settings.ipv6 {
+            self.run_ip(&["-6", "route", "replace", "default", "dev", TUN_NAME, "table", TABLE]).await?;
+            self.run_ip(&["-6", "rule", "add", "priority", TABLE, "fwmark", MARK, "lookup", TABLE]).await?;
+        }
+        self.setup_cgroups().await?;
+        self.install_nftables().await?;
+        self.assign_apps().await?;
+        Ok(())
+    }
+
+    async fn cleanup(&self) {
+        let _ = command("nft", &["delete", "table", "inet", NFT_TABLE]).await;
+        let _ = command("ip", &["-4", "rule", "del", "priority", TABLE]).await;
+        let _ = command("ip", &["-6", "rule", "del", "priority", TABLE]).await;
+        let _ = command("ip", &["-4", "route", "flush", "table", TABLE]).await;
+        let _ = command("ip", &["-6", "route", "flush", "table", TABLE]).await;
+        self.restore_app_processes().await;
+        for name in ["sshrocket-proxy", "sshrocket-direct", "sshrocket-block"] {
+            let path = format!("/sys/fs/cgroup/{name}");
+            let _ = tokio::fs::remove_dir(path).await;
+        }
+    }
+
+    async fn run_ip(&self, args: &[&str]) -> Result<()> {
+        command("ip", args).await
+    }
+
+    async fn setup_cgroups(&self) -> Result<()> {
+        for name in ["sshrocket-proxy", "sshrocket-direct", "sshrocket-block"] {
+            tokio::fs::create_dir_all(format!("/sys/fs/cgroup/{name}"))
+                .await
+                .with_context(|| format!("failed to create cgroup {name}"))?;
+        }
+        Ok(())
+    }
+
+    async fn assign_apps(&self) -> Result<()> {
+        let rules: HashMap<_, _> = self
+            .config
+            .settings
+            .app_rules
+            .iter()
+            .map(|rule| (rule.executable.clone(), rule.action))
+            .collect();
+        if rules.is_empty() {
+            return Ok(());
+        }
+
+        let mut entries = tokio::fs::read_dir("/proc").await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let Some(pid) = entry.file_name().to_string_lossy().parse::<u32>().ok() else { continue; };
+            let status = tokio::fs::read_to_string(format!("/proc/{pid}/status")).await.unwrap_or_default();
+            if !status.lines().any(|line| line == format!("Uid:\t{}\t{}\t{}\t{}", self.uid, self.uid, self.uid, self.uid))
+                && !status.lines().any(|line| line.starts_with(&format!("Uid:\t{}\t", self.uid)))
+            {
+                continue;
+            }
+            let Ok(executable) = tokio::fs::read_link(format!("/proc/{pid}/exe")).await else { continue; };
+            let Some(action) = app_action(&rules, &executable) else { continue; };
+            let group = match action {
+                RuleAction::Proxy => "sshrocket-proxy",
+                RuleAction::Direct => "sshrocket-direct",
+                RuleAction::Block => "sshrocket-block",
+            };
+            let _ = tokio::fs::write(format!("/sys/fs/cgroup/{group}/cgroup.procs"), pid.to_string()).await;
+        }
+        Ok(())
+    }
+
+    async fn restore_app_processes(&self) {
+        for group in ["sshrocket-proxy", "sshrocket-direct", "sshrocket-block"] {
+            let Ok(pids) = tokio::fs::read_to_string(format!("/sys/fs/cgroup/{group}/cgroup.procs")).await else {
+                continue;
+            };
+            for pid in pids.lines() {
+                let _ = tokio::fs::write("/sys/fs/cgroup/cgroup.procs", pid).await;
+            }
+        }
+    }
+
+    async fn install_nftables(&self) -> Result<()> {
+        let _ = command("nft", &["delete", "table", "inet", NFT_TABLE]).await;
+        command("nft", &["add", "table", "inet", NFT_TABLE]).await?;
+        command("nft", &["add", "chain", "inet", NFT_TABLE, "output", "{", "type", "route", "hook", "output", "priority", "mangle", ";", "policy", "accept", ";", "}"]).await?;
+
+        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "meta", "skuid", "!=", &self.uid.to_string(), "return"]).await?;
+        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip", "daddr", "127.0.0.0/8", "return"]).await?;
+        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "tcp", "dport", &self.socks_port.to_string(), "return"]).await?;
+        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "tcp", "dport", &self.dns_port.to_string(), "return"]).await?;
+        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "udp", "dport", "53", "redirect", "to", &format!(":{DNS_LISTEN_PORT}")]).await?;
+
+        self.install_ip_rules(&self.config.settings.custom_overrides).await?;
+        self.install_cgroup_rules().await?;
+        self.install_domain_sets().await?;
+        self.install_ip_rules(&self.config.settings.ip_rules).await?;
+
+        match self.config.settings.default_policy {
+            RuleAction::Proxy => command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "meta", "l4proto", "tcp", "meta", "mark", "set", MARK]).await?,
+            RuleAction::Block => command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "meta", "l4proto", "tcp", "reject"]).await?,
+            RuleAction::Direct => {}
+        }
+        Ok(())
+    }
+
+    async fn install_domain_sets(&self) -> Result<()> {
+        for (name, address_type) in [
+            ("domain_proxy4", "ipv4_addr"),
+            ("domain_direct4", "ipv4_addr"),
+            ("domain_block4", "ipv4_addr"),
+            ("domain_proxy6", "ipv6_addr"),
+            ("domain_direct6", "ipv6_addr"),
+            ("domain_block6", "ipv6_addr"),
+        ] {
+            command("nft", &["add", "set", "inet", NFT_TABLE, name, "{", "type", address_type, ";", "flags", "timeout", ";", "}"]).await?;
+        }
+
+        for family in ["ip", "ip6"] {
+            let suffix = if family == "ip" { "4" } else { "6" };
+            command("nft", &["add", "rule", "inet", NFT_TABLE, "output", family, "daddr", &format!("@domain_block{suffix}"), "reject"]).await?;
+            command("nft", &["add", "rule", "inet", NFT_TABLE, "output", family, "daddr", &format!("@domain_direct{suffix}"), "return"]).await?;
+            command("nft", &["add", "rule", "inet", NFT_TABLE, "output", family, "daddr", &format!("@domain_proxy{suffix}"), "meta", "l4proto", "tcp", "meta", "mark", "set", MARK, "return"]).await?;
+        }
+        Ok(())
+    }
+
+    async fn install_cgroup_rules(&self) -> Result<()> {
+        for (group, action) in [
+            ("sshrocket-block", RuleAction::Block),
+            ("sshrocket-direct", RuleAction::Direct),
+            ("sshrocket-proxy", RuleAction::Proxy),
+        ] {
+            let mut args = vec!["add", "rule", "inet", NFT_TABLE, "output", "socket", "cgroupv2", "level", "1", group];
+            match action {
+                RuleAction::Block => args.push("reject"),
+                RuleAction::Direct => args.push("return"),
+                RuleAction::Proxy => args.extend(["meta", "l4proto", "tcp", "meta", "mark", "set", MARK, "return"]),
+            }
+            command("nft", &args).await?;
+        }
+        Ok(())
+    }
+
+    async fn install_ip_rules(&self, rules: &[ssh_rocket_core::IpRule]) -> Result<()> {
+        for rule in rules {
+            let family = match rule.network {
+                IpNet::V4(_) => "ip",
+                IpNet::V6(_) => "ip6",
+            };
+            let network = rule.network.to_string();
+            let mut args = vec!["add", "rule", "inet", NFT_TABLE, "output", family, "daddr", network.as_str()];
+            match rule.action {
+                RuleAction::Block => args.push("reject"),
+                RuleAction::Direct => args.push("return"),
+                RuleAction::Proxy => args.extend(["meta", "l4proto", "tcp", "meta", "mark", "set", MARK, "return"]),
+            }
+            command("nft", &args).await?;
+        }
+        Ok(())
+    }
+}
+
+fn app_action(rules: &HashMap<PathBuf, RuleAction>, executable: &Path) -> Option<RuleAction> {
+    if let Some(action) = rules.get(executable) {
+        return Some(*action);
+    }
+    let executable_name = executable.file_name()?;
+    rules
+        .iter()
+        .find(|(rule, _)| rule.file_name() == Some(executable_name))
+        .map(|(_, action)| *action)
+}
+
+async fn run_dns_router(
+    socket: UdpSocket,
+    remote_dns_port: u16,
+    routing_engine: RoutingEngine,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    let mut buffer = [0_u8; 4096];
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => return Ok(()),
+            received = socket.recv_from(&mut buffer) => {
+                let (size, peer) = received?;
+                let packet = &buffer[..size];
+                let Some(domain) = parse_dns_question(packet) else {
+                    continue;
+                };
+                let decision = routing_engine.decide(&FlowContext {
+                    domain: Some(domain),
+                    ..FlowContext::default()
+                });
+
+                if decision.action == RuleAction::Block {
+                    let response = nxdomain_response(packet);
+                    let _ = socket.send_to(&response, peer).await;
+                    continue;
+                }
+
+                let Ok(response) = forward_dns_over_tcp(remote_dns_port, packet).await else {
+                    continue;
+                };
+                if decision.source == MatchSource::DomainRule {
+                    let addresses = parse_dns_addresses(&response);
+                    update_domain_addresses(&addresses, decision.action).await;
+                }
+                let _ = socket.send_to(&response, peer).await;
+            }
+        }
+    }
+}
+
+async fn forward_dns_over_tcp(port: u16, packet: &[u8]) -> Result<Vec<u8>> {
+    timeout(Duration::from_secs(5), async move {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).await?;
+        let length = u16::try_from(packet.len()).context("DNS packet too large")?;
+        stream.write_all(&length.to_be_bytes()).await?;
+        stream.write_all(packet).await?;
+        let mut header = [0_u8; 2];
+        stream.read_exact(&mut header).await?;
+        let response_length = u16::from_be_bytes(header) as usize;
+        let mut response = vec![0_u8; response_length];
+        stream.read_exact(&mut response).await?;
+        Ok::<_, anyhow::Error>(response)
+    })
+    .await
+    .context("DNS forwarding timed out")?
+}
+
+fn parse_dns_question(packet: &[u8]) -> Option<String> {
+    if packet.len() < 12 || u16::from_be_bytes([packet[4], packet[5]]) == 0 {
+        return None;
+    }
+    let mut offset = 12;
+    let mut labels = Vec::new();
+    while offset < packet.len() {
+        let length = packet[offset] as usize;
+        offset += 1;
+        if length == 0 {
+            break;
+        }
+        if length & 0xc0 != 0 || offset + length > packet.len() {
+            return None;
+        }
+        labels.push(std::str::from_utf8(&packet[offset..offset + length]).ok()?);
+        offset += length;
+    }
+    (!labels.is_empty()).then(|| labels.join("."))
+}
+
+fn nxdomain_response(packet: &[u8]) -> Vec<u8> {
+    let mut response = packet.to_vec();
+    if response.len() >= 12 {
+        response[2] = 0x80 | (response[2] & 0x01);
+        response[3] = 0x83;
+        response[6..12].fill(0);
+    }
+    response
+}
+
+fn parse_dns_addresses(packet: &[u8]) -> Vec<IpAddr> {
+    if packet.len() < 12 {
+        return Vec::new();
+    }
+    let questions = u16::from_be_bytes([packet[4], packet[5]]) as usize;
+    let answers = u16::from_be_bytes([packet[6], packet[7]]) as usize;
+    let mut offset = 12;
+    for _ in 0..questions {
+        let Some(next) = skip_dns_name(packet, offset) else { return Vec::new(); };
+        offset = next.saturating_add(4);
+        if offset > packet.len() {
+            return Vec::new();
+        }
+    }
+
+    let mut addresses = Vec::new();
+    for _ in 0..answers {
+        let Some(next) = skip_dns_name(packet, offset) else { break; };
+        offset = next;
+        if offset + 10 > packet.len() {
+            break;
+        }
+        let record_type = u16::from_be_bytes([packet[offset], packet[offset + 1]]);
+        let record_class = u16::from_be_bytes([packet[offset + 2], packet[offset + 3]]);
+        let data_length = u16::from_be_bytes([packet[offset + 8], packet[offset + 9]]) as usize;
+        offset += 10;
+        if offset + data_length > packet.len() {
+            break;
+        }
+        if record_class == 1 {
+            match (record_type, data_length) {
+                (1, 4) => addresses.push(IpAddr::V4(Ipv4Addr::new(
+                    packet[offset], packet[offset + 1], packet[offset + 2], packet[offset + 3],
+                ))),
+                (28, 16) => {
+                    let mut octets = [0_u8; 16];
+                    octets.copy_from_slice(&packet[offset..offset + 16]);
+                    addresses.push(IpAddr::V6(Ipv6Addr::from(octets)));
+                }
+                _ => {}
+            }
+        }
+        offset += data_length;
+    }
+    addresses
+}
+
+fn skip_dns_name(packet: &[u8], mut offset: usize) -> Option<usize> {
+    loop {
+        let length = *packet.get(offset)? as usize;
+        offset += 1;
+        if length == 0 {
+            return Some(offset);
+        }
+        if length & 0xc0 == 0xc0 {
+            packet.get(offset)?;
+            return Some(offset + 1);
+        }
+        offset = offset.checked_add(length)?;
+        if offset > packet.len() {
+            return None;
+        }
+    }
+}
+
+async fn update_domain_addresses(addresses: &[IpAddr], action: RuleAction) {
+    for address in addresses {
+        let suffix = if address.is_ipv4() { "4" } else { "6" };
+        let value = address.to_string();
+        for category in ["proxy", "direct", "block"] {
+            let set = format!("domain_{category}{suffix}");
+            let _ = command("nft", &["delete", "element", "inet", NFT_TABLE, &set, "{", &value, "}"]).await;
+        }
+        let category = match action {
+            RuleAction::Proxy => "proxy",
+            RuleAction::Direct => "direct",
+            RuleAction::Block => "block",
+        };
+        let set = format!("domain_{category}{suffix}");
+        let _ = command("nft", &["add", "element", "inet", NFT_TABLE, &set, "{", &value, "timeout", "300s", "}"]).await;
+    }
+}
+
+async fn wait_for_interface() -> Result<()> {
+    for _ in 0..100 {
+        if Path::new(&format!("/sys/class/net/{TUN_NAME}")).exists() {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    bail!("TUN interface {TUN_NAME} was not created")
+}
+
+async fn command(program: &str, args: &[&str]) -> Result<()> {
+    let output = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .with_context(|| format!("failed to execute {program}"))?;
+    if !output.status.success() {
+        bail!("{} {} failed: {}", program, args.join(" "), String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(())
+}

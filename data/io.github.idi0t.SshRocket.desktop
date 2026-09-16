@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=SSH Rocket
+Comment=Transparent proxy over SSH
+Exec="@GUI_EXECUTABLE@"
+Icon=ssh-rocket
+Terminal=false
+Type=Application
+Categories=GNOME;GTK;Network;
+StartupNotify=true
+StartupWMClass=io.github.idi0t.SshRocket
+X-Purism-FormFactor=Workstation;Mobile;

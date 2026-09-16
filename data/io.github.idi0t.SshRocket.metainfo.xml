@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.idi0t.SshRocket</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>SSH Rocket</name>
+  <developer_name>1di0t</developer_name>
+  <summary>Transparent SSH proxy for GNOME</summary>
+  <description>
+    <p>A native GNOME client that routes selected TCP traffic through OpenSSH and an embedded Rust TUN data plane.</p>
+  </description>
+  <launchable type="desktop-id">io.github.idi0t.SshRocket.desktop</launchable>
+  <provides>
+    <binary>ssh-rocket</binary>
+  </provides>
+</component>
