@@ -16,8 +16,8 @@ namespace Sshuttle {
         private Adw.EntryRow key_row;
         private Adw.PasswordEntryRow password_row;
 
-        private static string[] AUTH_TYPES = { "agent", "key", "password" };
-        private static string[] AUTH_LABELS = { "SSH Agent / Default", "Private Key File", "Password" };
+        private static string[] AUTH_TYPES = { "key", "password" };
+        private static string[] AUTH_LABELS = { "Private Key File", "Password" };
 
         public ProfileEditorWindow (Profile? profile = null) {
             this.original_profile = profile;
@@ -60,7 +60,9 @@ namespace Sshuttle {
             this.auth_row.title = "Login Mode";
             var auth_model = Native.string_list (AUTH_LABELS);
             this.auth_row.model = auth_model;
-            string cur_auth = (profile != null) ? profile.auth_type : "agent";
+            string cur_auth = (profile != null && profile.auth_type == "password")
+                ? "password"
+                : "key";
             for (uint i = 0; i < AUTH_TYPES.length; i++) {
                 if (AUTH_TYPES[i] == cur_auth) {
                     this.auth_row.selected = i;
@@ -115,7 +117,7 @@ namespace Sshuttle {
 
         private void update_auth_fields_visibility () {
             uint idx = this.auth_row.selected;
-            string auth_mode = (idx < AUTH_TYPES.length) ? AUTH_TYPES[idx] : "agent";
+            string auth_mode = (idx < AUTH_TYPES.length) ? AUTH_TYPES[idx] : "key";
 
             this.key_row.visible = (auth_mode == "key");
             this.password_row.visible = (auth_mode == "password");
@@ -144,7 +146,7 @@ namespace Sshuttle {
             }
 
             uint auth_idx = this.auth_row.selected;
-            string auth_mode = (auth_idx < AUTH_TYPES.length) ? AUTH_TYPES[auth_idx] : "agent";
+            string auth_mode = (auth_idx < AUTH_TYPES.length) ? AUTH_TYPES[auth_idx] : "key";
             if (auth_mode == "key" && this.key_row.text.strip () == "") {
                 this.show_validation_error ("Select a private key file.");
                 return;

@@ -6,10 +6,11 @@ SSH Rocket 使用 OpenSSH 建立本地 SOCKS5 和远端 TCP DNS 通道，由 tun
 
 ## 功能
 
-- SSH Agent、私钥和密码认证
+- 私钥和密码认证（旧版 SSH Agent 配置可继续读取）
 - 全局或指定 CIDR 路由
 - 按应用、域名和 IP 分流
 - 从 HTTPS URL 或本地文件导入 Shadowrocket 规则，支持直连、代理和拒绝规则
+- 自定义规则优先于导入规则；未命中时先应用 App 代理选择，再使用配置默认策略
 - DNS 请求通过 SSH TCP 转发，代理规则失败时不回退到本地 DNS
 - IPv4 和可选 IPv6 策略路由
 - 黑名单应用阻断和 QUIC 降级

@@ -44,7 +44,7 @@ namespace Sshuttle {
         public string host { get; set; default = ""; }
         public int port { get; set; default = 22; }
         public string username { get; set; default = ""; }
-        public string auth_type { get; set; default = "agent"; } // "agent", "key", "password"
+        public string auth_type { get; set; default = "key"; } // "key", "password"；"agent" 仅兼容旧配置
         public string key_path { get; set; default = ""; }
         public string password { get; set; default = ""; }
         // 仅用于将旧版 Profile 中的网络配置迁移到全局设置，不再写入 Profile。

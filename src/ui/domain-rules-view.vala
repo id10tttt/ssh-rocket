@@ -1,7 +1,9 @@
 namespace Sshuttle {
 
     public class DomainRulesView : Adw.PreferencesGroup {
+        private const uint RULE_BATCH_SIZE = 20;
         private ConfigManager config_manager;
+        private Adw.ComboRow source_selector_row;
         private Adw.ActionRow source_row;
         private Gtk.Button import_source_button;
         private Gtk.Button update_source_button;
@@ -9,19 +11,28 @@ namespace Sshuttle {
         private Gtk.Spinner source_spinner;
         private Adw.ComboRow default_policy_row;
         private Adw.EntryRow new_pattern_row;
+        private Adw.ComboRow rule_type_row;
         private Gtk.DropDown action_dropdown;
         private Adw.EntryRow search_row;
         private Gtk.Box rules_list_box;
+        private Gtk.Button load_more_button;
         private Gtk.Button clear_custom_button;
-        private GLib.GenericArray<Adw.ActionRow> rule_rows;
-        private GLib.GenericArray<DomainRule> displayed_rules;
+        private GLib.GenericArray<DomainRule> filtered_rules;
+        private uint filtered_custom_count = 0;
+        private uint loaded_rule_count = 0;
+        private bool scroll_connected = false;
+        private bool refreshing_sources = false;
 
         public DomainRulesView (ConfigManager config_manager, TunnelManager tunnel_manager) {
             this.config_manager = config_manager;
-            this.rule_rows = new GLib.GenericArray<Adw.ActionRow> ();
-            this.displayed_rules = new GLib.GenericArray<DomainRule> ();
+            this.filtered_rules = new GLib.GenericArray<DomainRule> ();
             this.title = "Domain and IP Routing";
             this.description = "Import Shadowrocket rules and add custom overrides.";
+
+            this.source_selector_row = new Adw.ComboRow ();
+            this.source_selector_row.title = "Local Configurations";
+            this.source_selector_row.notify["selected"].connect (this.on_source_selected);
+            this.add (this.source_selector_row);
 
             this.source_row = new Adw.ActionRow ();
             this.source_row.add_prefix (new Gtk.Image.from_icon_name ("folder-download-symbolic"));
@@ -53,10 +64,11 @@ namespace Sshuttle {
 
             this.default_policy_row = new Adw.ComboRow ();
             this.default_policy_row.title = "Default Policy";
-            this.default_policy_row.subtitle = "Used when no rule matches";
+            this.default_policy_row.subtitle = "Used when neither a rule nor an app selection matches";
             this.default_policy_row.model = Native.string_list ({ "direct", "proxy" });
             this.default_policy_row.selected = this.config_manager.get_domain_default_policy () == "proxy" ? 1 : 0;
             this.default_policy_row.notify["selected"].connect (() => {
+                if (this.refreshing_sources) return;
                 string policy = this.default_policy_row.selected == 1 ? "proxy" : "direct";
                 this.config_manager.set_domain_default_policy (policy);
             });
@@ -74,9 +86,17 @@ namespace Sshuttle {
 
             this.new_pattern_row = new Adw.EntryRow ();
             this.new_pattern_row.title = "Domain, IP, or CIDR";
+            this.rule_type_row = new Adw.ComboRow ();
+            this.rule_type_row.title = "Rule Type";
+            this.rule_type_row.model = Native.string_list ({
+                "DOMAIN-SUFFIX", "DOMAIN", "DOMAIN-KEYWORD", "IP-CIDR"
+            });
+            this.rule_type_row.selected = 0;
+            this.add (this.rule_type_row);
             this.action_dropdown = new Gtk.DropDown (
                 Native.string_list ({ "direct", "proxy", "reject" }), null
             );
+            this.action_dropdown.selected = 1;
             this.action_dropdown.valign = Gtk.Align.CENTER;
             this.new_pattern_row.add_suffix (this.action_dropdown);
             var add_button = new Gtk.Button.from_icon_name ("list-add-symbolic");
@@ -89,12 +109,20 @@ namespace Sshuttle {
             this.add (this.new_pattern_row);
 
             this.search_row = new Adw.EntryRow ();
-            this.search_row.title = "Search Custom Rules";
+            this.search_row.title = "Search Rules";
             this.search_row.notify["text"].connect (this.filter_rules);
             this.add (this.search_row);
             this.rules_list_box = new Gtk.Box (Gtk.Orientation.VERTICAL, 4);
             this.rules_list_box.margin_top = 8;
             this.add (this.rules_list_box);
+
+            this.load_more_button = new Gtk.Button.with_label ("Load More");
+            this.load_more_button.margin_top = 8;
+            this.load_more_button.halign = Gtk.Align.CENTER;
+            this.load_more_button.clicked.connect (this.append_next_rule_batch);
+            this.add (this.load_more_button);
+
+            this.map.connect (this.connect_scroll_loader);
 
             this.config_manager.domain_rules_changed.connect (() => {
                 this.refresh_source_row ();
@@ -105,6 +133,22 @@ namespace Sshuttle {
         }
 
         private void refresh_source_row () {
+            var sources = this.config_manager.get_rule_sources ();
+            var names = new string[sources.length];
+            uint selected = 0;
+            string active_id = this.config_manager.get_active_rule_source_id ();
+            for (uint i = 0; i < sources.length; i++) {
+                names[i] = sources[i].name;
+                if (sources[i].id == active_id) selected = i;
+            }
+            this.refreshing_sources = true;
+            this.source_selector_row.model = Native.string_list (names);
+            this.source_selector_row.selected = selected;
+            this.source_selector_row.subtitle = "%u configurations".printf (sources.length);
+            this.source_selector_row.visible = sources.length > 0;
+            this.default_policy_row.selected = this.config_manager.get_domain_default_policy () == "proxy" ? 1 : 0;
+            this.refreshing_sources = false;
+
             uint direct;
             uint proxy;
             uint reject;
@@ -127,6 +171,15 @@ namespace Sshuttle {
             }
             this.update_source_button.visible = this.config_manager.get_rule_source_url () != "";
             this.remove_source_button.visible = has_source;
+        }
+
+        private void on_source_selected () {
+            if (this.refreshing_sources) return;
+            var sources = this.config_manager.get_rule_sources ();
+            uint selected = this.source_selector_row.selected;
+            if (selected < sources.length) {
+                this.config_manager.set_active_rule_source (sources[selected].id);
+            }
         }
 
         private void set_source_busy (bool busy) {
@@ -152,7 +205,7 @@ namespace Sshuttle {
             dialog.add_response ("import", "Import");
             dialog.set_response_appearance ("import", Adw.ResponseAppearance.SUGGESTED);
             dialog.response.connect ((response) => {
-                if (response == "import") this.import_url.begin (url_row.text.strip ());
+                if (response == "import") this.import_url.begin (url_row.text.strip (), false);
                 else if (response == "file") this.choose_rule_file ();
             });
             dialog.present (this.get_root () as Gtk.Window);
@@ -160,17 +213,25 @@ namespace Sshuttle {
 
         private void on_update_source_clicked () {
             string url = this.config_manager.get_rule_source_url ();
-            if (url != "") this.import_url.begin (url);
+            if (url != "") this.import_url.begin (url, true);
         }
 
-        private async void import_url (string url) {
+        private async void import_url (string url, bool replace_active) {
             if (url == "") return;
             this.set_source_busy (true);
             try {
                 var imported = yield RuleImporter.import_from_url (url);
-                this.config_manager.set_imported_rule_source (
-                    imported, url, "Shadowrocket Rule Source"
-                );
+                if (replace_active) {
+                    this.config_manager.set_imported_rule_source (
+                        imported, url, this.config_manager.get_rule_source_name ()
+                    );
+                } else {
+                    var uri = GLib.Uri.parse (url, GLib.UriFlags.NONE);
+                    string name = GLib.Path.get_basename (uri.get_path ());
+                    this.config_manager.add_imported_rule_source (
+                        imported, url, name != "" ? name : "Shadowrocket Rule Source"
+                    );
+                }
                 this.default_policy_row.selected = imported.default_policy == "proxy" ? 1 : 0;
                 this.show_import_result (imported);
             } catch (GLib.Error e) {
@@ -212,7 +273,7 @@ namespace Sshuttle {
                     return;
                 }
                 yield RuleImporter.import_rule_sets (imported);
-                this.config_manager.set_imported_rule_source (imported, "", source_name);
+                this.config_manager.add_imported_rule_source (imported, "", source_name);
                 this.default_policy_row.selected = imported.default_policy == "proxy" ? 1 : 0;
                 this.show_import_result (imported);
             } catch (GLib.Error e) {
@@ -267,16 +328,106 @@ namespace Sshuttle {
             string pattern = this.new_pattern_row.text.strip ();
             if (pattern == "") return;
             string[] actions = { "direct", "proxy", "reject" };
-            this.config_manager.add_domain_rule (pattern, actions[this.action_dropdown.selected]);
+            string[] rule_types = { "domain-suffix", "domain", "domain-keyword", "ip-cidr" };
+            this.config_manager.add_domain_rule (
+                pattern,
+                actions[this.action_dropdown.selected],
+                rule_types[this.rule_type_row.selected]
+            );
             this.new_pattern_row.text = "";
         }
 
         private void filter_rules () {
             string query = this.search_row.text.strip ().down ();
-            for (uint i = 0; i < this.displayed_rules.length; i++) {
-                var rule = this.displayed_rules[i];
-                this.rule_rows[i].visible = query == "" || query in rule.pattern || query in rule.action;
+            this.filtered_rules.remove_range (0, this.filtered_rules.length);
+            this.filtered_custom_count = 0;
+
+            foreach (var rule in this.config_manager.get_domain_rules ()) {
+                if (this.rule_matches_query (rule, query)) {
+                    this.filtered_rules.add (rule);
+                    this.filtered_custom_count++;
+                }
             }
+            foreach (var rule in this.config_manager.get_imported_domain_rules ()) {
+                if (this.rule_matches_query (rule, query)) {
+                    this.filtered_rules.add (rule);
+                }
+            }
+
+            this.clear_rendered_rules ();
+            this.append_next_rule_batch ();
+        }
+
+        private bool rule_matches_query (DomainRule rule, string query) {
+            return query == "" || query in rule.pattern || query in rule.action ||
+                query in rule.rule_type;
+        }
+
+        /** 每次只创建二十条规则行，滚动到底部后继续追加。 */
+        private void append_next_rule_batch () {
+            uint end = uint.min (this.loaded_rule_count + RULE_BATCH_SIZE, this.filtered_rules.length);
+            while (this.loaded_rule_count < end) {
+                this.append_rule_row (
+                    this.filtered_rules[this.loaded_rule_count],
+                    this.loaded_rule_count < this.filtered_custom_count
+                );
+                this.loaded_rule_count++;
+            }
+            this.load_more_button.visible = this.loaded_rule_count < this.filtered_rules.length;
+        }
+
+        private void append_rule_row (DomainRule rule, bool custom) {
+            var row = new Adw.ActionRow ();
+            row.title = GLib.Markup.escape_text (rule.pattern);
+            row.subtitle = @"$(rule.rule_type.up ()) · $(rule.action.up ()) · $(custom ? "Custom" : "Imported")";
+            row.add_prefix (new Gtk.Image.from_icon_name (
+                rule.action == "proxy" ? "ssh-rocket-symbolic" :
+                (rule.action == "reject" ? "network-offline-symbolic" : "network-wired-symbolic")
+            ));
+            if (custom) {
+                var edit_button = new Gtk.Button.from_icon_name ("document-edit-symbolic");
+                edit_button.tooltip_text = "Edit custom rule";
+                edit_button.valign = Gtk.Align.CENTER;
+                edit_button.add_css_class ("flat");
+                edit_button.clicked.connect (() => this.show_edit_dialog (rule));
+                row.add_suffix (edit_button);
+
+                var delete_button = new Gtk.Button.from_icon_name ("user-trash-symbolic");
+                delete_button.tooltip_text = "Delete custom rule";
+                delete_button.valign = Gtk.Align.CENTER;
+                delete_button.add_css_class ("flat");
+                string pattern = rule.pattern;
+                delete_button.clicked.connect (() => this.config_manager.remove_domain_rule (pattern));
+                row.add_suffix (delete_button);
+            }
+            this.rules_list_box.append (row);
+        }
+
+        private void clear_rendered_rules () {
+            Gtk.Widget? child = this.rules_list_box.get_first_child ();
+            while (child != null) {
+                var next = child.get_next_sibling ();
+                this.rules_list_box.remove (child);
+                child = next;
+            }
+            this.loaded_rule_count = 0;
+        }
+
+        private void connect_scroll_loader () {
+            if (this.scroll_connected) return;
+            Gtk.Widget? parent = this.get_parent ();
+            while (parent != null && !(parent is Gtk.ScrolledWindow)) {
+                parent = parent.get_parent ();
+            }
+            var scrolled = parent as Gtk.ScrolledWindow;
+            if (scrolled == null) return;
+            this.scroll_connected = true;
+            scrolled.vadjustment.value_changed.connect (() => {
+                var adjustment = scrolled.vadjustment;
+                if (adjustment.value + adjustment.page_size >= adjustment.upper - 160) {
+                    this.append_next_rule_batch ();
+                }
+            });
         }
 
         private void show_edit_dialog (DomainRule rule) {
@@ -291,6 +442,15 @@ namespace Sshuttle {
             action_row.model = Native.string_list ({ "direct", "proxy", "reject" });
             action_row.selected = rule.action == "proxy" ? 1 : (rule.action == "reject" ? 2 : 0);
             group.add (action_row);
+            var type_row = new Adw.ComboRow ();
+            type_row.title = "Rule Type";
+            type_row.model = Native.string_list ({
+                "DOMAIN-SUFFIX", "DOMAIN", "DOMAIN-KEYWORD", "IP-CIDR"
+            });
+            type_row.selected = rule.rule_type == "domain" ? 1 :
+                (rule.rule_type == "domain-keyword" ? 2 :
+                (rule.rule_type == "ip-cidr" ? 3 : 0));
+            group.add (type_row);
             dialog.set_extra_child (group);
             dialog.add_response ("cancel", "Cancel");
             dialog.add_response ("save", "Save");
@@ -298,8 +458,12 @@ namespace Sshuttle {
             dialog.response.connect ((response) => {
                 if (response == "save" && pattern_row.text.strip () != "") {
                     string[] actions = { "direct", "proxy", "reject" };
+                    string[] rule_types = { "domain-suffix", "domain", "domain-keyword", "ip-cidr" };
                     this.config_manager.update_domain_rule (
-                        rule.pattern, pattern_row.text, actions[action_row.selected]
+                        rule.pattern,
+                        pattern_row.text,
+                        actions[action_row.selected],
+                        rule_types[type_row.selected]
                     );
                 }
             });
@@ -307,44 +471,9 @@ namespace Sshuttle {
         }
 
         private void refresh_rules_list () {
-            Gtk.Widget? child = this.rules_list_box.get_first_child ();
-            while (child != null) {
-                Gtk.Widget next = child.get_next_sibling ();
-                this.rules_list_box.remove (child);
-                child = next;
-            }
-            this.rule_rows.remove_range (0, this.rule_rows.length);
-            this.displayed_rules.remove_range (0, this.displayed_rules.length);
-
             var rules = this.config_manager.get_domain_rules ();
             this.clear_custom_button.visible = rules.length > 0;
-            this.search_row.visible = rules.length > 0;
-            foreach (var rule in rules) {
-                var row = new Adw.ActionRow ();
-                row.title = GLib.Markup.escape_text (rule.pattern);
-                row.subtitle = rule.action;
-                row.add_prefix (new Gtk.Image.from_icon_name (
-                    rule.action == "proxy" ? "ssh-rocket-symbolic" :
-                    (rule.action == "reject" ? "network-offline-symbolic" : "network-wired-symbolic")
-                ));
-                var edit_button = new Gtk.Button.from_icon_name ("document-edit-symbolic");
-                edit_button.tooltip_text = "Edit custom rule";
-                edit_button.valign = Gtk.Align.CENTER;
-                edit_button.add_css_class ("flat");
-                var current_rule = rule;
-                edit_button.clicked.connect (() => this.show_edit_dialog (current_rule));
-                row.add_suffix (edit_button);
-                var delete_button = new Gtk.Button.from_icon_name ("user-trash-symbolic");
-                delete_button.tooltip_text = "Delete custom rule";
-                delete_button.valign = Gtk.Align.CENTER;
-                delete_button.add_css_class ("flat");
-                string pattern = rule.pattern;
-                delete_button.clicked.connect (() => this.config_manager.remove_domain_rule (pattern));
-                row.add_suffix (delete_button);
-                this.rules_list_box.append (row);
-                this.rule_rows.add (row);
-                this.displayed_rules.add (rule);
-            }
+            this.search_row.visible = rules.length > 0 || this.config_manager.get_imported_rule_count () > 0;
             this.filter_rules ();
         }
     }

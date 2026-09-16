@@ -12,6 +12,52 @@ namespace Sshuttle {
         }
     }
 
+    public class RuleSourceInfo : Object {
+        public string id { get; set; default = ""; }
+        public string name { get; set; default = "Imported Configuration"; }
+        public string url { get; set; default = ""; }
+        public int64 updated_at { get; set; default = 0; }
+        public string cache_file { get; set; default = ""; }
+        public string default_policy { get; set; default = "proxy"; }
+
+        public RuleSourceInfo () {
+            this.id = GLib.Uuid.string_random ();
+        }
+
+        public Json.Node serialize () {
+            var builder = new Json.Builder ();
+            builder.begin_object ();
+            builder.set_member_name ("id");
+            builder.add_string_value (this.id);
+            builder.set_member_name ("name");
+            builder.add_string_value (this.name);
+            builder.set_member_name ("url");
+            builder.add_string_value (this.url);
+            builder.set_member_name ("updated_at");
+            builder.add_int_value (this.updated_at);
+            builder.set_member_name ("cache_file");
+            builder.add_string_value (this.cache_file);
+            builder.set_member_name ("default_policy");
+            builder.add_string_value (this.default_policy);
+            builder.end_object ();
+            return builder.get_root ();
+        }
+
+        public static RuleSourceInfo deserialize (Json.Object obj) {
+            var info = new RuleSourceInfo ();
+            if (obj.has_member ("id")) info.id = obj.get_string_member ("id");
+            if (obj.has_member ("name")) info.name = obj.get_string_member ("name");
+            if (obj.has_member ("url")) info.url = obj.get_string_member ("url");
+            if (obj.has_member ("updated_at")) info.updated_at = obj.get_int_member ("updated_at");
+            if (obj.has_member ("cache_file")) info.cache_file = obj.get_string_member ("cache_file");
+            if (obj.has_member ("default_policy")) {
+                info.default_policy = obj.get_string_member ("default_policy") == "direct"
+                    ? "direct" : "proxy";
+            }
+            return info;
+        }
+    }
+
     public class ConfigManager : Object {
         private string config_dir;
         private string profiles_path;
@@ -32,6 +78,8 @@ namespace Sshuttle {
         private string rule_source_name = "";
         private int64 rule_source_updated_at = 0;
         private string rule_cache_path;
+        private GLib.GenericArray<RuleSourceInfo> rule_sources;
+        private string active_rule_source_id = "";
         private DomainRuleMatcher domain_rule_matcher;
         private GLib.HashTable<string, AppTrafficStats> app_traffic;
         private NetworkSettings network_settings;
@@ -48,6 +96,7 @@ namespace Sshuttle {
             this.blocked_processes = new GLib.GenericArray<string> ();
             this.domain_rules = new GLib.GenericArray<DomainRule> ();
             this.imported_domain_rules = new GLib.GenericArray<DomainRule> ();
+            this.rule_sources = new GLib.GenericArray<RuleSourceInfo> ();
             this.domain_rule_matcher = new DomainRuleMatcher ({}, this.domain_default_policy);
             this.app_traffic = new GLib.HashTable<string, AppTrafficStats> (GLib.str_hash, GLib.str_equal);
             this.network_settings = new NetworkSettings ();
@@ -212,6 +261,18 @@ namespace Sshuttle {
                         if (obj.has_member ("rule_source_updated_at")) {
                             this.rule_source_updated_at = obj.get_int_member ("rule_source_updated_at");
                         }
+                        if (obj.has_member ("active_rule_source_id")) {
+                            this.active_rule_source_id = obj.get_string_member ("active_rule_source_id");
+                        }
+                        if (obj.has_member ("rule_sources")) {
+                            this.rule_sources.remove_range (0, this.rule_sources.length);
+                            var sources = obj.get_array_member ("rule_sources");
+                            sources.foreach_element ((array, index, element_node) => {
+                                if (element_node.get_node_type () == Json.NodeType.OBJECT) {
+                                    this.rule_sources.add (RuleSourceInfo.deserialize (element_node.get_object ()));
+                                }
+                            });
+                        }
                         if (obj.has_member ("app_traffic")) {
                             this.app_traffic.remove_all ();
                             var traffic_obj = obj.get_object_member ("app_traffic");
@@ -244,6 +305,7 @@ namespace Sshuttle {
             }
 
             this.load_rule_cache ();
+            this.migrate_legacy_rule_source ();
             this.rebuild_domain_rule_matcher ();
         }
 
@@ -415,6 +477,15 @@ namespace Sshuttle {
             builder.set_member_name ("rule_source_updated_at");
             builder.add_int_value (this.rule_source_updated_at);
 
+            builder.set_member_name ("active_rule_source_id");
+            builder.add_string_value (this.active_rule_source_id);
+            builder.set_member_name ("rule_sources");
+            builder.begin_array ();
+            for (uint i = 0; i < this.rule_sources.length; i++) {
+                builder.add_value (this.rule_sources[i].serialize ());
+            }
+            builder.end_array ();
+
             builder.set_member_name ("app_traffic");
             builder.begin_object ();
             var iter = GLib.HashTableIter<string, AppTrafficStats> (this.app_traffic);
@@ -504,6 +575,11 @@ namespace Sshuttle {
             this.rule_source_url = "";
             this.rule_source_name = "";
             this.rule_source_updated_at = 0;
+            for (uint i = 0; i < this.rule_sources.length; i++) {
+                GLib.FileUtils.remove (this.get_rule_source_path (this.rule_sources[i]));
+            }
+            this.rule_sources.remove_range (0, this.rule_sources.length);
+            this.active_rule_source_id = "";
             GLib.FileUtils.remove (this.rule_cache_path);
             this.rebuild_domain_rule_matcher ();
             this.app_traffic.remove_all ();
@@ -680,6 +756,8 @@ namespace Sshuttle {
             string p = (policy.down () == "proxy") ? "proxy" : "direct";
             if (this.domain_default_policy != p) {
                 this.domain_default_policy = p;
+                var source = this.get_active_rule_source ();
+                if (source != null) source.default_policy = p;
                 this.rebuild_domain_rule_matcher ();
                 this.save_settings ();
                 this.domain_rules_changed ();
@@ -702,6 +780,14 @@ namespace Sshuttle {
             return rules;
         }
 
+        public DomainRule[] get_imported_domain_rules () {
+            var rules = new DomainRule[this.imported_domain_rules.length];
+            for (uint i = 0; i < this.imported_domain_rules.length; i++) {
+                rules[i] = this.imported_domain_rules[i];
+            }
+            return rules;
+        }
+
         public DomainRule[] get_network_rules () {
             var result = new GLib.GenericArray<DomainRule> ();
             foreach (var rule in this.get_effective_domain_rules ()) {
@@ -720,7 +806,21 @@ namespace Sshuttle {
             return this.domain_rule_matcher.resolve (domain, out matched);
         }
 
-        public void add_domain_rule (string pattern, string action = "proxy") {
+        /** 显式规则优先，其次是应用代理，最后使用配置默认策略。 */
+        public string resolve_traffic_action (
+            string? domain,
+            bool app_proxy_enabled,
+            out bool matched = null
+        ) {
+            string action = this.domain_rule_matcher.resolve (domain, out matched);
+            return matched ? action : (app_proxy_enabled ? "proxy" : this.domain_default_policy);
+        }
+
+        public void add_domain_rule (
+            string pattern,
+            string action = "proxy",
+            string rule_type = "legacy"
+        ) {
             string p = pattern.strip ().down ();
             if (p == "") {
                 return;
@@ -729,13 +829,18 @@ namespace Sshuttle {
             // 如果已有相同模式，先移除旧的
             this.remove_domain_rule (p);
 
-            this.domain_rules.add (new DomainRule (p, action));
+            this.domain_rules.add (new DomainRule (p, action, rule_type));
             this.rebuild_domain_rule_matcher ();
             this.save_settings ();
             this.domain_rules_changed ();
         }
 
-        public void update_domain_rule (string old_pattern, string new_pattern, string new_action) {
+        public void update_domain_rule (
+            string old_pattern,
+            string new_pattern,
+            string new_action,
+            string new_rule_type = "legacy"
+        ) {
             string op = old_pattern.strip ().down ();
             string np = new_pattern.strip ().down ();
             string requested_action = new_action.strip ().down ();
@@ -748,14 +853,14 @@ namespace Sshuttle {
             bool found = false;
             for (uint i = 0; i < this.domain_rules.length; i++) {
                 if (this.domain_rules[i].pattern == op) {
-                    this.domain_rules[i] = new DomainRule (np, na);
+                    this.domain_rules[i] = new DomainRule (np, na, new_rule_type);
                     found = true;
                     break;
                 }
             }
 
             if (!found) {
-                this.add_domain_rule (np, na);
+                this.add_domain_rule (np, na, new_rule_type);
                 return;
             }
 
@@ -788,6 +893,8 @@ namespace Sshuttle {
             }
             if (default_policy != "") {
                 this.domain_default_policy = (default_policy.down () == "proxy") ? "proxy" : "direct";
+                var source = this.get_active_rule_source ();
+                if (source != null) source.default_policy = this.domain_default_policy;
             }
             this.rebuild_domain_rule_matcher ();
             this.save_settings ();
@@ -802,32 +909,125 @@ namespace Sshuttle {
         }
 
         public void set_imported_rule_source (RuleImportResult result, string url, string name) throws GLib.Error {
-            string cache = result.to_cache ();
-            GLib.FileUtils.set_contents (this.rule_cache_path, cache);
-            this.fix_ownership (this.rule_cache_path);
-
-            this.imported_domain_rules.remove_range (0, this.imported_domain_rules.length);
-            for (uint i = 0; i < result.rules.length; i++) {
-                this.imported_domain_rules.add (result.rules[i]);
+            var info = this.get_active_rule_source ();
+            if (info == null) {
+                this.add_imported_rule_source (result, url, name);
+                return;
             }
-            this.rule_source_url = url;
-            this.rule_source_name = name;
-            this.rule_source_updated_at = new GLib.DateTime.now_local ().to_unix ();
-            this.domain_default_policy = result.default_policy == "proxy" ? "proxy" : "direct";
+            string old_url = info.url;
+            string old_name = info.name;
+            info.url = url;
+            info.name = name;
+            try {
+                this.store_rule_source (info, result);
+            } catch (GLib.Error e) {
+                info.url = old_url;
+                info.name = old_name;
+                throw e;
+            }
+        }
+
+        /** 新增并启用一份独立配置，自定义规则不随配置切换。 */
+        public void add_imported_rule_source (
+            RuleImportResult result,
+            string url,
+            string name
+        ) throws GLib.Error {
+            var info = new RuleSourceInfo ();
+            info.url = url;
+            info.name = name != "" ? name : "Imported Configuration";
+            info.cache_file = @"rules-$(info.id).conf";
+            string path = this.get_rule_source_path (info);
+            GLib.FileUtils.set_contents (path, result.to_cache ());
+            this.fix_ownership (path);
+            info.updated_at = new GLib.DateTime.now_local ().to_unix ();
+            info.default_policy = result.default_policy == "proxy" ? "proxy" : "direct";
+            this.rule_sources.add (info);
+            this.active_rule_source_id = info.id;
+            this.load_rule_cache ();
             this.rebuild_domain_rule_matcher ();
             this.save_settings ();
             this.domain_rules_changed ();
         }
 
         public void clear_imported_rule_source () {
-            this.imported_domain_rules.remove_range (0, this.imported_domain_rules.length);
-            this.rule_source_url = "";
-            this.rule_source_name = "";
-            this.rule_source_updated_at = 0;
-            GLib.FileUtils.remove (this.rule_cache_path);
+            var active = this.get_active_rule_source ();
+            if (active != null) {
+                GLib.FileUtils.remove (this.get_rule_source_path (active));
+                for (uint i = 0; i < this.rule_sources.length; i++) {
+                    if (this.rule_sources[i].id == active.id) {
+                        this.rule_sources.remove_index (i);
+                        break;
+                    }
+                }
+            }
+            this.active_rule_source_id = this.rule_sources.length > 0 ? this.rule_sources[0].id : "";
+            this.load_rule_cache ();
             this.rebuild_domain_rule_matcher ();
             this.save_settings ();
             this.domain_rules_changed ();
+        }
+
+        public RuleSourceInfo[] get_rule_sources () {
+            var sources = new RuleSourceInfo[this.rule_sources.length];
+            for (uint i = 0; i < this.rule_sources.length; i++) sources[i] = this.rule_sources[i];
+            return sources;
+        }
+
+        public string get_active_rule_source_id () {
+            return this.active_rule_source_id;
+        }
+
+        public void set_active_rule_source (string source_id) {
+            if (source_id == this.active_rule_source_id) return;
+            bool found = false;
+            for (uint i = 0; i < this.rule_sources.length; i++) {
+                if (this.rule_sources[i].id == source_id) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return;
+            this.active_rule_source_id = source_id;
+            this.load_rule_cache ();
+            this.rebuild_domain_rule_matcher ();
+            this.save_settings ();
+            this.domain_rules_changed ();
+        }
+
+        private void store_rule_source (RuleSourceInfo info, RuleImportResult result) throws GLib.Error {
+            string path = this.get_rule_source_path (info);
+            GLib.FileUtils.set_contents (path, result.to_cache ());
+            this.fix_ownership (path);
+            info.updated_at = new GLib.DateTime.now_local ().to_unix ();
+            info.default_policy = result.default_policy == "proxy" ? "proxy" : "direct";
+            this.active_rule_source_id = info.id;
+            this.load_rule_cache ();
+            this.rebuild_domain_rule_matcher ();
+            this.save_settings ();
+            this.domain_rules_changed ();
+        }
+
+        private RuleSourceInfo? get_active_rule_source () {
+            for (uint i = 0; i < this.rule_sources.length; i++) {
+                if (this.rule_sources[i].id == this.active_rule_source_id) return this.rule_sources[i];
+            }
+            return null;
+        }
+
+        private string get_rule_source_path (RuleSourceInfo info) {
+            string filename = info.cache_file != ""
+                ? GLib.Path.get_basename (info.cache_file)
+                : @"rules-$(info.id).conf";
+            return GLib.Path.build_filename (this.config_dir, filename);
+        }
+
+        private void sync_active_rule_source_metadata (RuleSourceInfo? info) {
+            this.imported_domain_rules.remove_range (0, this.imported_domain_rules.length);
+            this.rule_source_url = info != null ? info.url : "";
+            this.rule_source_name = info != null ? info.name : "";
+            this.rule_source_updated_at = info != null ? info.updated_at : 0;
+            if (info != null) this.domain_default_policy = info.default_policy;
         }
 
         public string get_rule_source_url () { return this.rule_source_url; }
@@ -847,13 +1047,31 @@ namespace Sshuttle {
         }
 
         private void load_rule_cache () {
-            this.imported_domain_rules.remove_range (0, this.imported_domain_rules.length);
-            if (!GLib.FileUtils.test (this.rule_cache_path, GLib.FileTest.EXISTS)) return;
-            var imported = RuleImporter.import_from_file (this.rule_cache_path);
+            var info = this.get_active_rule_source ();
+            if (info == null && this.rule_sources.length > 0) {
+                info = this.rule_sources[0];
+                this.active_rule_source_id = info.id;
+            }
+            this.sync_active_rule_source_metadata (info);
+            string path = info != null ? this.get_rule_source_path (info) : this.rule_cache_path;
+            if (!GLib.FileUtils.test (path, GLib.FileTest.EXISTS)) return;
+            var imported = RuleImporter.import_from_file (path);
             if (imported == null) return;
             for (uint i = 0; i < imported.rules.length; i++) {
                 this.imported_domain_rules.add (imported.rules[i]);
             }
+        }
+
+        private void migrate_legacy_rule_source () {
+            if (this.rule_sources.length > 0 || this.imported_domain_rules.length == 0) return;
+            var info = new RuleSourceInfo ();
+            info.name = this.rule_source_name != "" ? this.rule_source_name : "Imported Configuration";
+            info.url = this.rule_source_url;
+            info.updated_at = this.rule_source_updated_at;
+            info.cache_file = GLib.Path.get_basename (this.rule_cache_path);
+            info.default_policy = this.domain_default_policy;
+            this.rule_sources.add (info);
+            this.active_rule_source_id = info.id;
         }
 
         private void rebuild_domain_rule_matcher () {

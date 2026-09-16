@@ -19,7 +19,7 @@ namespace Sshuttle {
      * - 若匹配到 Proxy：解析后将 IP 加入 nftables proxy_ips 集合（走代理）
      * - 若匹配到 Direct：解析后将 IP 加入 nftables direct_ips 集合（走直连）
      * - 若匹配到 Reject：返回 NXDOMAIN 阻断请求
-     * - 若未匹配：依 default_policy 决定
+     * - 若未匹配：勾选的应用走代理，其他应用使用配置默认策略
      */
     public class DnsProxy : Object {
         public const uint16 DNS_PORT = 15353;
@@ -252,10 +252,9 @@ namespace Sshuttle {
             uint16 qtype;
             string? domain = parse_qname_and_type (query_packet, out qtype);
             bool matched = false;
-            string action = this.resolve_action_for_domain (domain, out matched);
-            if (!matched && app_proxy_default) {
-                action = "proxy";
-            }
+            string action = this.config_manager.resolve_traffic_action (
+                domain, app_proxy_default, out matched
+            );
 
             if (action == "reject") {
                 var rejected_response = build_error_response (query_packet, 3);
@@ -322,7 +321,7 @@ namespace Sshuttle {
                         }
                         this.resolution_cache_mutex.unlock ();
                     }
-                    // 注：若未匹配规则且全局默认策略为 direct，切勿将 IP 加入 direct_ips 集合。
+                    // 未匹配规则时不写入全局 IP 集合，交由应用 cgroup 与配置默认策略裁决。
                     // 否则 direct_ips 在 nftables 首部优先放行，会导致已勾选 App 的未匹配域名被错误放行走直连。
                     // 不加入 direct_ips 时，已勾选 App 由 cgroup 规则全量代理，未勾选 App 按默认策略处理。
                 }

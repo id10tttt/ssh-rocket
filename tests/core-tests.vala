@@ -1,5 +1,6 @@
 void test_commands () {
     var profile = new Sshuttle.Profile ();
+    assert (profile.auth_type == "key");
     profile.host = "test-host";
     profile.username = "debian";
     profile.port = 2200;
@@ -52,6 +53,12 @@ void test_rule_compatibility () {
     assert (resolver.resolve_action_for_domain ("www.example.com", out matched) == "proxy" && matched);
     assert (resolver.resolve_action_for_domain ("direct.example.com", out matched) == "direct" && matched);
     assert (resolver.resolve_action_for_domain ("unmatched.test", out matched) == "direct" && !matched);
+    assert (config.resolve_traffic_action ("unmatched.test", true, out matched) == "proxy" && !matched);
+    assert (config.resolve_traffic_action ("unmatched.test", false, out matched) == "direct" && !matched);
+    assert (config.resolve_traffic_action ("direct.example.com", true, out matched) == "direct" && matched);
+    assert (config.resolve_traffic_action ("www.example.com", false, out matched) == "proxy" && matched);
+    config.set_domain_default_policy ("proxy");
+    assert (config.resolve_traffic_action ("unmatched.test", false, out matched) == "proxy" && !matched);
     var restored = Sshuttle.Profile.deserialize (profile.serialize ().get_object ());
     assert (restored.id == profile.id && restored.host == profile.host);
     var profile_json = profile.serialize ().get_object ();
@@ -65,6 +72,10 @@ void test_rule_compatibility () {
 }
 
 void test_shadowrocket_rules () {
+    var without_final = Sshuttle.RuleImporter.import_from_string (
+        "[Rule]\nDOMAIN-SUFFIX,example.com,PROXY\n"
+    );
+    assert (without_final.default_policy == "proxy");
     string source = """
 [General]
 skip-proxy = 10.0.0.0/8, *.lan
@@ -100,11 +111,14 @@ FINAL,direct
 
     try {
         var config = new Sshuttle.ConfigManager ();
+        config.reset_rules_and_settings ();
         config.set_imported_rule_source (imported, "https://example.com/rules.conf", "Test Rules");
-        config.add_domain_rule ("safe.ads.example", "direct");
+        config.add_domain_rule ("safe.ads.example", "direct", "domain");
         assert (config.resolve_domain_action ("safe.ads.example", out matched) == "direct" && matched);
         assert (config.resolve_domain_action ("www.ads.example", out matched) == "reject" && matched);
         assert (config.get_network_rules ().length == 2);
+        assert (config.get_effective_domain_rules ()[0].pattern == "safe.ads.example");
+        assert (config.get_imported_domain_rules ().length == imported.rules.length);
 
         var restored_config = new Sshuttle.ConfigManager ();
         assert (restored_config.get_imported_rule_count () == imported.rules.length);
@@ -119,6 +133,55 @@ FINAL,direct
     };
     var response = Sshuttle.DnsProxy.build_error_response (query, 3);
     assert (response.length == query.length && (response[3] & 0x0f) == 3);
+}
+
+void test_site_routing_matrix () {
+    var config = new Sshuttle.ConfigManager ();
+    config.reset_rules_and_settings ();
+    config.set_domain_rules ({
+        new Sshuttle.DomainRule ("google.com", "direct", "domain-suffix"),
+        new Sshuttle.DomainRule ("reddit.com", "proxy", "domain-suffix"),
+        new Sshuttle.DomainRule ("chatgpt.com", "reject", "domain-suffix")
+    }, "direct");
+
+    bool matched;
+    assert (config.resolve_traffic_action ("www.google.com", true, out matched) == "direct" && matched);
+    assert (config.resolve_traffic_action ("www.reddit.com", false, out matched) == "proxy" && matched);
+    assert (config.resolve_traffic_action ("chatgpt.com", true, out matched) == "reject" && matched);
+    assert (config.resolve_traffic_action ("gmail.com", true, out matched) == "proxy" && !matched);
+    assert (config.resolve_traffic_action ("gmail.com", false, out matched) == "direct" && !matched);
+    config.set_domain_default_policy ("proxy");
+    assert (config.resolve_traffic_action ("gmail.com", false, out matched) == "proxy" && !matched);
+}
+
+void test_multiple_rule_sources () {
+    var first = Sshuttle.RuleImporter.import_from_string ("[Rule]\nDOMAIN,one.example,DIRECT\nFINAL,DIRECT\n");
+    var second = Sshuttle.RuleImporter.import_from_string ("[Rule]\nDOMAIN,two.example,REJECT\nFINAL,PROXY\n");
+    var config = new Sshuttle.ConfigManager ();
+    config.reset_rules_and_settings ();
+    try {
+        config.add_imported_rule_source (first, "", "one.conf");
+        string first_id = config.get_active_rule_source_id ();
+        config.add_imported_rule_source (second, "", "two.conf");
+        assert (config.get_rule_sources ().length == 2);
+        assert (config.get_active_rule_source_id () != first_id);
+        config.add_domain_rule ("custom.example", "proxy", "domain");
+
+        bool matched;
+        assert (config.resolve_domain_action ("two.example", out matched) == "reject" && matched);
+        config.set_active_rule_source (first_id);
+        assert (config.resolve_domain_action ("one.example", out matched) == "direct" && matched);
+        assert (config.resolve_domain_action ("two.example", out matched) == "direct" && !matched);
+        assert (config.resolve_domain_action ("custom.example", out matched) == "proxy" && matched);
+
+        var restored = new Sshuttle.ConfigManager ();
+        assert (restored.get_rule_sources ().length == 2);
+        assert (restored.get_active_rule_source_id () == first_id);
+        restored.clear_imported_rule_source ();
+        assert (restored.get_rule_sources ().length == 1);
+    } catch (GLib.Error e) {
+        GLib.error ("Multiple rule sources: %s", e.message);
+    }
 }
 
 void test_dns_tcp () {
@@ -159,6 +222,8 @@ int main (string[] args) {
     GLib.Test.add_func ("/ssh/command-auth-and-routes", test_commands);
     GLib.Test.add_func ("/ssh/rules-and-profile-compatibility", test_rule_compatibility);
     GLib.Test.add_func ("/ssh/shadowrocket-rule-import", test_shadowrocket_rules);
+    GLib.Test.add_func ("/ssh/site-routing-matrix", test_site_routing_matrix);
+    GLib.Test.add_func ("/ssh/multiple-rule-sources", test_multiple_rule_sources);
     GLib.Test.add_func ("/ssh/dns-tcp-framing-and-failure", test_dns_tcp);
     return GLib.Test.run ();
 }

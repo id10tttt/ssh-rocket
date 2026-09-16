@@ -20,7 +20,7 @@ namespace Sshuttle {
         public GLib.GenericArray<DomainRule> rules { get; private set; }
         public GLib.GenericArray<RuleSetReference> rule_sets { get; private set; }
         public GLib.GenericArray<string> warnings { get; private set; }
-        public string default_policy { get; set; default = "direct"; }
+        public string default_policy { get; set; default = "proxy"; }
         public uint direct_count { get; private set; default = 0; }
         public uint proxy_count { get; private set; default = 0; }
         public uint reject_count { get; private set; default = 0; }

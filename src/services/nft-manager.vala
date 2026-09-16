@@ -130,22 +130,6 @@ namespace Sshuttle {
             bool success = true;
 
             string table_v4 = @"sshrocket-ipv4-$(port)";
-            var direct_v4 = new GLib.GenericArray<string> ();
-            var proxy_v4 = new GLib.GenericArray<string> ();
-            var direct_v6 = new GLib.GenericArray<string> ();
-            var proxy_v6 = new GLib.GenericArray<string> ();
-            var reject_v4 = new GLib.GenericArray<string> ();
-            var reject_v6 = new GLib.GenericArray<string> ();
-
-            foreach (var network in direct_networks) {
-                this.append_network (network, "direct", direct_v4, proxy_v4, reject_v4,
-                    direct_v6, proxy_v6, reject_v6);
-            }
-            foreach (var rule in routing_rules) {
-                this.append_network (rule.pattern, rule.action, direct_v4, proxy_v4, reject_v4,
-                    direct_v6, proxy_v6, reject_v6);
-            }
-
             // 1. 创建用于动态域名 IP 分流的 set (带 300 秒超时)
             success = this.ensure_ip_set (table_v4, "proxy_ips", "ipv4_addr") && success;
             success = this.ensure_ip_set (table_v4, "direct_ips", "ipv4_addr") && success;
@@ -162,27 +146,20 @@ namespace Sshuttle {
             success = this.run_nft_command (@"nft insert rule inet $(table_v4) output meta nfproto ipv4 udp sport 15356 return") && success;
             success = this.run_nft_command (@"nft insert rule inet $(table_v4) output meta nfproto ipv4 udp sport 15354 return") && success;
 
-            // 4. 在独立子链首部插入分流与裁决规则（倒序插入）：
-            // 最终期望执行顺序：
-            //   1) ip daddr @direct_ips return (直连域名/IP 集合优先放行，无论哪个 App 访问均直连)
-            //   2) ip daddr @proxy_ips meta l4proto tcp meta mark set 0x5352 return (显式代理规则)
-            //   3) socket cgroupv2 level 1 "sshuttle-proxy" meta l4proto tcp meta mark set 0x5352 return (勾选应用未命中显式规则时全量走代理)
-            //   4) [默认 direct] socket cgroupv2 level 1 != "sshuttle-proxy" return (未勾选应用未命中规则时直连)
-            //   5) [默认 proxy] 继续执行基础路由规则，使未勾选应用的其余 TCP 流量也走代理
+            // 4. 先插入兜底，再逆序插入规则，保证最终顺序与配置文件一致。
+            // 显式规则优先于应用选择；其余流量最终使用配置默认策略。
             if (default_policy == "direct") {
                 success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) socket cgroupv2 level 1 != \"sshuttle-proxy\" return") && success;
             }
             success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) socket cgroupv2 level 1 \"sshuttle-proxy\" meta l4proto tcp meta mark set 0x5352 return") && success;
             success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr @proxy_ips meta l4proto tcp meta mark set 0x5352 return") && success;
-            for (uint i = 0; i < proxy_v4.length; i++) {
-                success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr $(proxy_v4[i]) meta l4proto tcp meta mark set 0x5352 return comment \"sshuttle-gui-network\"") && success;
-            }
             success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr @direct_ips return") && success;
-            for (uint i = 0; i < direct_v4.length; i++) {
-                success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr $(direct_v4[i]) return comment \"sshuttle-gui-network\"") && success;
+            for (int i = routing_rules.length - 1; i >= 0; i--) {
+                success = this.insert_network_rule (table_v4, routing_rules[i].pattern,
+                    routing_rules[i].action, false) && success;
             }
-            for (uint i = 0; i < reject_v4.length; i++) {
-                success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr $(reject_v4[i]) drop comment \"sshuttle-gui-network\"") && success;
+            for (int i = direct_networks.length - 1; i >= 0; i--) {
+                success = this.insert_network_rule (table_v4, direct_networks[i], "direct", false) && success;
             }
 
             if (ipv6_enabled) {
@@ -194,15 +171,13 @@ namespace Sshuttle {
                 }
                 success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) socket cgroupv2 level 1 \"sshuttle-proxy\" meta l4proto tcp meta mark set 0x5352 return") && success;
                 success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) ip6 daddr @proxy_ips meta l4proto tcp meta mark set 0x5352 return") && success;
-                for (uint i = 0; i < proxy_v6.length; i++) {
-                    success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) ip6 daddr $(proxy_v6[i]) meta l4proto tcp meta mark set 0x5352 return comment \"sshuttle-gui-network\"") && success;
-                }
                 success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) ip6 daddr @direct_ips return") && success;
-                for (uint i = 0; i < direct_v6.length; i++) {
-                    success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) ip6 daddr $(direct_v6[i]) return comment \"sshuttle-gui-network\"") && success;
+                for (int i = routing_rules.length - 1; i >= 0; i--) {
+                    success = this.insert_network_rule (table_v6, routing_rules[i].pattern,
+                        routing_rules[i].action, true) && success;
                 }
-                for (uint i = 0; i < reject_v6.length; i++) {
-                    success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) ip6 daddr $(reject_v6[i]) drop comment \"sshuttle-gui-network\"") && success;
+                for (int i = direct_networks.length - 1; i >= 0; i--) {
+                    success = this.insert_network_rule (table_v6, direct_networks[i], "direct", true) && success;
                 }
             }
 
@@ -305,32 +280,22 @@ namespace Sshuttle {
             }
         }
 
-        private void append_network (
-            string value,
-            string action,
-            GLib.GenericArray<string> direct_v4,
-            GLib.GenericArray<string> proxy_v4,
-            GLib.GenericArray<string> reject_v4,
-            GLib.GenericArray<string> direct_v6,
-            GLib.GenericArray<string> proxy_v6,
-            GLib.GenericArray<string> reject_v6
-        ) {
+        /** 按配置顺序插入一条静态 IP/CIDR 规则。 */
+        private bool insert_network_rule (string table, string value, string action, bool ipv6) {
             string normalized;
             bool is_ipv6;
             if (!this.normalize_network (value, out normalized, out is_ipv6)) {
-                return;
+                return true;
             }
-
+            if (is_ipv6 != ipv6) return true;
             string normalized_action = action.strip ().down ();
-            if (is_ipv6) {
-                if (normalized_action == "reject") reject_v6.add (normalized);
-                else if (normalized_action == "proxy") proxy_v6.add (normalized);
-                else direct_v6.add (normalized);
-            } else {
-                if (normalized_action == "reject") reject_v4.add (normalized);
-                else if (normalized_action == "proxy") proxy_v4.add (normalized);
-                else direct_v4.add (normalized);
-            }
+            string family = ipv6 ? "ip6" : "ip";
+            string verdict = normalized_action == "reject"
+                ? "drop"
+                : (normalized_action == "proxy"
+                    ? "meta l4proto tcp meta mark set 0x5352 return"
+                    : "return");
+            return this.run_nft_command (@"nft insert rule inet $(table) $(table) $(family) daddr $(normalized) $(verdict) comment \"sshuttle-gui-network\"");
         }
 
         private bool normalize_network (string value, out string normalized, out bool is_ipv6) {
