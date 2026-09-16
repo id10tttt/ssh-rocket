@@ -53,6 +53,32 @@ namespace Sshuttle {
             }
         }
 
+        /** 核对虚拟网卡、策略规则和专用路由表是否仍完整。 */
+        public bool is_ready (bool ipv6) {
+            if (!GLib.FileUtils.test ("/sys/class/net/" + DEVICE, GLib.FileTest.EXISTS)) {
+                return false;
+            }
+            try {
+                string rules_v4 = run ({ "-4", "rule", "show" });
+                string routes_v4 = run ({ "-4", "route", "show", "table", TABLE });
+                if (!(TABLE in rules_v4) || !(MARK in rules_v4) ||
+                    !("default dev " + DEVICE in routes_v4)) {
+                    return false;
+                }
+                if (ipv6) {
+                    string rules_v6 = run ({ "-6", "rule", "show" });
+                    string routes_v6 = run ({ "-6", "route", "show", "table", TABLE });
+                    if (!(TABLE in rules_v6) || !(MARK in rules_v6) ||
+                        !("default dev " + DEVICE in routes_v6)) {
+                        return false;
+                    }
+                }
+                return true;
+            } catch (GLib.Error e) {
+                return false;
+            }
+        }
+
         public void stop () {
             try {
                 if (rule_v4) {

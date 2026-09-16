@@ -163,6 +163,7 @@ void test_multiple_rule_sources () {
         config.add_imported_rule_source (first, "", "one.conf");
         string first_id = config.get_active_rule_source_id ();
         config.add_imported_rule_source (second, "", "two.conf");
+        string second_id = config.get_active_rule_source_id ();
         assert (config.get_rule_sources ().length == 2);
         assert (config.get_active_rule_source_id () != first_id);
         config.add_domain_rule ("custom.example", "proxy", "domain");
@@ -171,12 +172,16 @@ void test_multiple_rule_sources () {
         assert (config.resolve_domain_action ("two.example", out matched) == "reject" && matched);
         config.set_active_rule_source (first_id);
         assert (config.resolve_domain_action ("one.example", out matched) == "direct" && matched);
-        assert (config.resolve_domain_action ("two.example", out matched) == "direct" && !matched);
+        assert (config.resolve_domain_action ("two.example", out matched) == "proxy" && !matched);
         assert (config.resolve_domain_action ("custom.example", out matched) == "proxy" && matched);
+        config.set_domain_default_policy ("direct");
+        config.set_active_rule_source (second_id);
+        assert (config.resolve_domain_action ("unmatched.example", out matched) == "direct" && !matched);
 
         var restored = new Sshuttle.ConfigManager ();
         assert (restored.get_rule_sources ().length == 2);
-        assert (restored.get_active_rule_source_id () == first_id);
+        assert (restored.get_active_rule_source_id () == second_id);
+        assert (restored.get_domain_default_policy () == "direct");
         restored.clear_imported_rule_source ();
         assert (restored.get_rule_sources ().length == 1);
     } catch (GLib.Error e) {
@@ -211,6 +216,29 @@ void test_dns_tcp () {
         thread.join ();
         listener.close ();
         assert (Sshuttle.DnsProxy.query_tcp (port, packet) == null);
+
+        var probe_listener = new GLib.SocketListener ();
+        uint16 probe_port = probe_listener.add_any_inet_port (null);
+        var probe_thread = new GLib.Thread<void*> ("dns-probe-fixture", () => {
+            try {
+                var peer = probe_listener.accept ();
+                uint8[] request = new uint8[31];
+                size_t count;
+                peer.input_stream.read_all (request, out count);
+                assert (count == request.length);
+                uint8[] answer = {
+                    0, 45, 0x53, 0x52, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0,
+                    7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0, 0, 1, 0, 1,
+                    0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 203, 0, 113, 1
+                };
+                peer.output_stream.write_all (answer, out count);
+                peer.close ();
+            } catch (GLib.Error e) { GLib.error ("DNS probe fixture: %s", e.message); }
+            return null;
+        });
+        assert (Sshuttle.DnsProxy.probe_remote_dns (probe_port));
+        probe_thread.join ();
+        probe_listener.close ();
     } catch (GLib.Error e) { GLib.error ("DNS test: %s", e.message); }
 }
 

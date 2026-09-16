@@ -46,7 +46,10 @@ namespace Sshuttle {
             blocked_stack_page.icon_name = "network-offline-symbolic";
         }
 
-        private Gtk.Widget create_preferences_page (Adw.PreferencesGroup group) {
+        private Gtk.Widget create_preferences_page (Gtk.Widget group) {
+            if (!(group is Adw.PreferencesGroup)) {
+                return group;
+            }
             var scrolled = new Gtk.ScrolledWindow ();
             scrolled.vexpand = true;
 
@@ -56,7 +59,7 @@ namespace Sshuttle {
             scrolled.set_child (clamp);
 
             var page = new Adw.PreferencesPage ();
-            page.add (group);
+            page.add ((Adw.PreferencesGroup) group);
             clamp.set_child (page);
             return scrolled;
         }

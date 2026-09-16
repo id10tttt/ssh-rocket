@@ -48,6 +48,7 @@ namespace Sshuttle {
             }
             string table_v4 = @"sshrocket-ipv4-$(port)";
             if (!this.chain_exists ("inet", table_v4, "output") ||
+                !this.chain_exists ("inet", table_v4, "route_output") ||
                 !this.chain_exists ("inet", table_v4, table_v4)) {
                 return false;
             }
@@ -55,6 +56,7 @@ namespace Sshuttle {
             if (ipv6_enabled) {
                 string table_v6 = @"sshrocket-ipv6-$(port)";
                 if (!this.chain_exists ("inet", table_v6, "output") ||
+                    !this.chain_exists ("inet", table_v6, "route_output") ||
                     !this.chain_exists ("inet", table_v6, table_v6)) {
                     return false;
                 }

@@ -756,8 +756,6 @@ namespace Sshuttle {
             string p = (policy.down () == "proxy") ? "proxy" : "direct";
             if (this.domain_default_policy != p) {
                 this.domain_default_policy = p;
-                var source = this.get_active_rule_source ();
-                if (source != null) source.default_policy = p;
                 this.rebuild_domain_rule_matcher ();
                 this.save_settings ();
                 this.domain_rules_changed ();
@@ -893,8 +891,6 @@ namespace Sshuttle {
             }
             if (default_policy != "") {
                 this.domain_default_policy = (default_policy.down () == "proxy") ? "proxy" : "direct";
-                var source = this.get_active_rule_source ();
-                if (source != null) source.default_policy = this.domain_default_policy;
             }
             this.rebuild_domain_rule_matcher ();
             this.save_settings ();
@@ -1027,7 +1023,6 @@ namespace Sshuttle {
             this.rule_source_url = info != null ? info.url : "";
             this.rule_source_name = info != null ? info.name : "";
             this.rule_source_updated_at = info != null ? info.updated_at : 0;
-            if (info != null) this.domain_default_policy = info.default_policy;
         }
 
         public string get_rule_source_url () { return this.rule_source_url; }

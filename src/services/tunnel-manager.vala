@@ -47,6 +47,7 @@ namespace Sshuttle {
         private uint connection_generation = 0;
         private uint connect_timeout_id = 0;
         private uint runtime_ready_timeout_id = 0;
+        private uint health_timer_id = 0;
         private const uint MAX_LOGS = 1000;
 
         private uint speed_timer_id = 0;
@@ -364,6 +365,16 @@ namespace Sshuttle {
                 return;
             }
 
+            var settings = this.config_manager.get_network_settings ();
+            if (!new TunRouter ().is_ready (this.uses_ipv6_routing (settings))) {
+                this.fail_current_attempt ("TUN interface or policy routing is not ready.");
+                return;
+            }
+            if (settings.dns && !DnsProxy.probe_remote_dns ((uint16) (this.local_proxy_port + 1))) {
+                this.fail_current_attempt ("Remote DNS is unavailable through the SSH tunnel.");
+                return;
+            }
+
             if (this.connect_timeout_id != 0) {
                 GLib.Source.remove (this.connect_timeout_id);
                 this.connect_timeout_id = 0;
@@ -372,6 +383,7 @@ namespace Sshuttle {
             this.sync_process_monitor_targets ();
             this.process_monitor.start ();
             this.start_speed_monitor ();
+            this.start_health_monitor ();
             this.change_state (TunnelState.CONNECTED);
             this.emit_log ("Tunnel, DNS routing, and application rules are ready.");
         }
@@ -490,6 +502,7 @@ namespace Sshuttle {
                 this.runtime_ready_timeout_id = 0;
             }
             this.stop_speed_monitor ();
+            this.stop_health_monitor ();
             this.dns_proxy.stop ();
             this.dns_proxy.remote_dns_port = 0;
             this.process_monitor.stop ();
@@ -497,6 +510,33 @@ namespace Sshuttle {
             this.cgroup_manager.cleanup_and_destroy ();
             this.active_sockets.remove_all ();
             this.config_manager.save_settings ();
+        }
+
+        /** 已连接后持续校验关键网络对象，避免界面保留失效状态。 */
+        private void start_health_monitor () {
+            this.stop_health_monitor ();
+            this.health_timer_id = GLib.Timeout.add_seconds (2, () => {
+                if (this.state != TunnelState.CONNECTED) {
+                    this.health_timer_id = 0;
+                    return GLib.Source.REMOVE;
+                }
+                var settings = this.config_manager.get_network_settings ();
+                bool ipv6_enabled = this.uses_ipv6_routing (settings);
+                if (!new TunRouter ().is_ready (ipv6_enabled) ||
+                    !this.nft_manager.base_chains_exist (this.local_proxy_port, ipv6_enabled)) {
+                    this.health_timer_id = 0;
+                    this.fail_current_attempt ("Tunnel routing stopped unexpectedly.");
+                    return GLib.Source.REMOVE;
+                }
+                return GLib.Source.CONTINUE;
+            });
+        }
+
+        private void stop_health_monitor () {
+            if (this.health_timer_id != 0) {
+                GLib.Source.remove (this.health_timer_id);
+                this.health_timer_id = 0;
+            }
         }
 
         private void start_speed_monitor () {

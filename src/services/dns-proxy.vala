@@ -242,6 +242,19 @@ namespace Sshuttle {
             }
         }
 
+        /** 通过 SSH DNS 转发解析固定域名，用于连接就绪检查。 */
+        public static bool probe_remote_dns (uint16 port) {
+            uint8[] query = {
+                0x53, 0x52, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
+                07, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
+                03, 'c', 'o', 'm', 0x00,
+                0x00, 0x01, 0x00, 0x01
+            };
+            var response = query_tcp (port, query);
+            return response != null && parse_answer_ips (response).length > 0;
+        }
+
         private void handle_dns_query (
             uint8[] query_packet,
             GLib.SocketAddress client_addr,

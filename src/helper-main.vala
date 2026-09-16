@@ -215,7 +215,7 @@ namespace Sshuttle {
             }
         }
 
-        /** SOCKS 握手成功且 TUN 协议栈就绪后，才通知界面安装分流规则。 */
+        /** SOCKS 能实际连接公网且 TUN 协议栈就绪后，才通知界面安装分流规则。 */
         private async void probe_ready (GLib.Subprocess child) {
             while (tunnel == child && !stopping) {
                 try {
@@ -226,11 +226,24 @@ namespace Sshuttle {
                     yield connection.output_stream.write_all_async ({ 5, 1, 0 }, GLib.Priority.DEFAULT, null, out count);
                     uint8[] reply = new uint8[2];
                     yield connection.input_stream.read_all_async (reply, GLib.Priority.DEFAULT, null, out count);
-                    connection.close (null);
-                    if (count == 2 && reply[0] == 5 && reply[1] == 0 && forwarder_ready && tunnel == child && !stopping) {
-                        log_line ("SSH Rocket tunnel ready");
-                        return;
+                    if (count == 2 && reply[0] == 5 && reply[1] == 0) {
+                        // SOCKS CONNECT 1.1.1.1:443，确认远端出口真实可用，而不只是本地端口已监听。
+                        uint8[] request = { 5, 1, 0, 1, 1, 1, 1, 1, 1, 0xbb };
+                        yield connection.output_stream.write_all_async (
+                            request, GLib.Priority.DEFAULT, null, out count
+                        );
+                        uint8[] connect_reply = new uint8[10];
+                        yield connection.input_stream.read_all_async (
+                            connect_reply, GLib.Priority.DEFAULT, null, out count
+                        );
+                        if (count >= 4 && connect_reply[0] == 5 && connect_reply[1] == 0 &&
+                            forwarder_ready && tunnel == child && !stopping) {
+                            connection.close (null);
+                            log_line ("SSH Rocket tunnel ready");
+                            return;
+                        }
                     }
+                    connection.close (null);
                 } catch (GLib.Error e) {}
                 GLib.Timeout.add (100, () => { probe_ready.callback (); return false; });
                 yield;
