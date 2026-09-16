@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
     let dns_socket = UdpSocket::bind(("127.0.0.1", DNS_LISTEN_PORT))
         .await
         .context("failed to bind local DNS router")?;
-    let mut system = SystemState::new(uid, socks_port, dns_port, config);
+    let mut system = SystemState::new(uid, socks_port, dns_port, PathBuf::from(config_path), config);
     if let Err(error) = system.setup().await {
         shutdown.cancel();
         let _ = tun_task.await;
@@ -101,12 +101,13 @@ struct SystemState {
     uid: u32,
     socks_port: u16,
     dns_port: u16,
+    config_path: PathBuf,
     config: AppConfig,
 }
 
 impl SystemState {
-    fn new(uid: u32, socks_port: u16, dns_port: u16, config: AppConfig) -> Self {
-        Self { uid, socks_port, dns_port, config }
+    fn new(uid: u32, socks_port: u16, dns_port: u16, config_path: PathBuf, config: AppConfig) -> Self {
+        Self { uid, socks_port, dns_port, config_path, config }
     }
 
     async fn setup(&mut self) -> Result<()> {
@@ -149,7 +150,13 @@ impl SystemState {
         Ok(())
     }
 
-    async fn assign_apps(&self) -> Result<()> {
+    async fn assign_apps(&mut self) -> Result<()> {
+        if let Ok(bytes) = tokio::fs::read(&self.config_path).await {
+            if let Ok(config) = serde_json::from_slice::<AppConfig>(&bytes) {
+                self.config.settings.app_rules = config.settings.app_rules;
+            }
+        }
+        self.restore_app_processes().await;
         let rules: HashMap<_, _> = self
             .config
             .settings

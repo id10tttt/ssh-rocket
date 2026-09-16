@@ -1,9 +1,9 @@
 use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
-use ssh_rocket_core::{AppConfig, Profile, RuleAction, RuleImportResult, parse_rule_set, parse_shadowrocket_rules};
+use ssh_rocket_core::{AppConfig, AppRule, Profile, RuleAction, RuleImportResult, parse_rule_set, parse_shadowrocket_rules};
 use ssh_rocket_runtime::SshSession;
-use std::{cell::RefCell, path::PathBuf, process::{Command as StdCommand, Stdio}, rc::Rc, sync::mpsc, thread, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{cell::RefCell, collections::HashSet, fs, path::{Path, PathBuf}, process::{Command as StdCommand, Stdio}, rc::Rc, sync::mpsc, thread, time::{Duration, SystemTime, UNIX_EPOCH}};
 use tokio::{io::{AsyncBufReadExt, BufReader}, process::Command, sync::oneshot};
 
 const APP_ID: &str = "io.github.idi0t.SshRocket";
@@ -27,6 +27,137 @@ enum RuntimeEvent {
 #[derive(Default)]
 struct RuntimeController {
     stop: Option<oneshot::Sender<()>>,
+}
+
+#[derive(Clone)]
+struct DesktopApp {
+    name: String,
+    executable: String,
+    icon: String,
+}
+
+fn scan_desktop_apps() -> Vec<DesktopApp> {
+    let mut dirs = vec![
+        PathBuf::from("/usr/share/applications"),
+        PathBuf::from("/usr/local/share/applications"),
+        PathBuf::from("/var/lib/flatpak/exports/share/applications"),
+    ];
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        dirs.push(home.join(".local/share/applications"));
+        dirs.push(home.join(".local/share/flatpak/exports/share/applications"));
+    }
+
+    let mut seen = HashSet::new();
+    let mut apps = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = fs::read_dir(dir) else { continue; };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("desktop") {
+                continue;
+            }
+            let Ok(text) = fs::read_to_string(&path) else { continue; };
+            if let Some(app) = parse_desktop_app(&text) {
+                if seen.insert(app.executable.clone()) {
+                    apps.push(app);
+                }
+            }
+        }
+    }
+    apps.sort_by_key(|app| app.name.to_lowercase());
+    apps
+}
+
+fn parse_desktop_app(text: &str) -> Option<DesktopApp> {
+    let mut in_entry = false;
+    let mut name = String::new();
+    let mut exec = String::new();
+    let mut icon = String::new();
+    let mut no_display = false;
+    let mut app_type = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_entry = line == "[Desktop Entry]";
+            continue;
+        }
+        if !in_entry || line.starts_with('#') {
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("Name=") {
+            if name.is_empty() { name = value.trim().to_string(); }
+        } else if let Some(value) = line.strip_prefix("Exec=") {
+            exec = value.trim().to_string();
+        } else if let Some(value) = line.strip_prefix("Icon=") {
+            icon = value.trim().to_string();
+        } else if let Some(value) = line.strip_prefix("NoDisplay=") {
+            no_display = value.eq_ignore_ascii_case("true");
+        } else if let Some(value) = line.strip_prefix("Type=") {
+            app_type = value.trim().to_string();
+        }
+    }
+    if no_display || (!app_type.is_empty() && app_type != "Application") || exec.is_empty() {
+        return None;
+    }
+    let executable = extract_exec_name(&exec)?;
+    Some(DesktopApp {
+        name: if name.is_empty() { executable.clone() } else { name },
+        executable,
+        icon,
+    })
+}
+
+fn extract_exec_name(exec: &str) -> Option<String> {
+    let mut parts = exec.split_whitespace().filter(|part| !part.starts_with('%'));
+    let first = parts.next()?.trim_matches(['\'', '"']);
+    let command = if first.ends_with("/env") || first == "env" {
+        parts.find(|part| !part.starts_with('-') && !part.contains('='))?
+    } else {
+        first
+    };
+    if command.ends_with("flatpak") || command == "flatpak" {
+        let args: Vec<_> = exec.split_whitespace().collect();
+        if let Some(value) = args.iter().find_map(|arg| arg.strip_prefix("--command=")) {
+            return Path::new(value).file_name().map(|value| value.to_string_lossy().to_lowercase());
+        }
+        if let Some(id) = args.iter().rev().find(|arg| !arg.starts_with('-') && **arg != "run") {
+            return id.rsplit('.').find(|part| !matches!(*part, "desktop" | "client" | "app"))
+                .map(|value| value.to_lowercase());
+        }
+    }
+    Path::new(command).file_name().map(|value| value.to_string_lossy().to_lowercase())
+}
+
+fn current_app_action(config: &AppConfig, executable: &str) -> RuleAction {
+    config.settings.app_rules.iter()
+        .find(|rule| rule.executable.file_name().is_some_and(|name| name == executable))
+        .map(|rule| rule.action)
+        .unwrap_or(RuleAction::Direct)
+}
+
+fn set_app_action(config: &Rc<RefCell<AppConfig>>, executable: &str, action: RuleAction) {
+    let mut current = config.borrow_mut();
+    current.settings.app_rules.retain(|rule| {
+        rule.executable.file_name().is_none_or(|name| name != executable)
+    });
+    current.settings.app_rules.push(AppRule {
+        executable: PathBuf::from(executable),
+        action,
+    });
+    let _ = current.save();
+}
+
+fn format_bytes(bytes: u64) -> String {
+    let value = bytes as f64;
+    if value < 1024.0 {
+        format!("{bytes} B")
+    } else if value < 1024.0 * 1024.0 {
+        format!("{:.1} KB", value / 1024.0)
+    } else if value < 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.1} MB", value / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GB", value / (1024.0 * 1024.0 * 1024.0))
+    }
 }
 
 impl RuntimeController {
@@ -326,10 +457,12 @@ fn build_ui(app: &adw::Application) {
     navigation.set_activate_on_single_click(true);
     navigation.set_vexpand(true);
     let connect_nav = navigation_row("network-server-symbolic", "Connect");
-    let routing_nav = navigation_row("preferences-system-network-symbolic", "Routing");
+    let rules_nav = navigation_row("preferences-system-network-symbolic", "Rules");
+    let traffic_nav = navigation_row("ssh-rocket-traffic-symbolic", "Traffic");
     let logs_nav = navigation_row("utilities-terminal-symbolic", "Logs");
     navigation.append(&connect_nav);
-    navigation.append(&routing_nav);
+    navigation.append(&rules_nav);
+    navigation.append(&traffic_nav);
     navigation.append(&logs_nav);
     sidebar.append(&navigation);
     root.append(&sidebar);
@@ -372,6 +505,69 @@ fn build_ui(app: &adw::Application) {
     connect_page.add(&runtime_group);
     view_stack.add_named(&page_scroller(&connect_page), Some("connect"));
 
+    let rules_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let rules_stack = gtk::Stack::new();
+    rules_stack.set_vexpand(true);
+    let rules_switcher = gtk::StackSwitcher::new();
+    rules_switcher.set_stack(Some(&rules_stack));
+    rules_switcher.set_halign(gtk::Align::Center);
+    rules_switcher.set_margin_top(12);
+    rules_switcher.set_margin_bottom(12);
+    rules_page.append(&rules_switcher);
+    rules_page.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    rules_page.append(&rules_stack);
+
+    let applications_page = adw::PreferencesPage::new();
+    let applications_group = adw::PreferencesGroup::builder().title("Applications").build();
+    let app_search = gtk::SearchEntry::builder().placeholder_text("Search").build();
+    applications_group.add(&app_search);
+    let app_rows = Rc::new(RefCell::new(Vec::<(String, adw::ComboRow)>::new()));
+    for app_info in scan_desktop_apps() {
+        let action = current_app_action(&config.borrow(), &app_info.executable);
+        let row = adw::ComboRow::builder()
+            .title(&app_info.name)
+            .subtitle(&app_info.executable)
+            .model(&gtk::StringList::new(&["Direct", "Proxy", "Block"]))
+            .selected(match action {
+                RuleAction::Direct => 0,
+                RuleAction::Proxy => 1,
+                RuleAction::Block => 2,
+            })
+            .build();
+        if !app_info.icon.is_empty() {
+            let icon = if app_info.icon.starts_with('/') {
+                gtk::Image::from_file(&app_info.icon)
+            } else {
+                gtk::Image::from_icon_name(&app_info.icon)
+            };
+            icon.set_pixel_size(28);
+            row.add_prefix(&icon);
+        }
+        let executable = app_info.executable.clone();
+        let config_ref = config.clone();
+        row.connect_selected_notify(move |row| {
+            let action = match row.selected() {
+                1 => RuleAction::Proxy,
+                2 => RuleAction::Block,
+                _ => RuleAction::Direct,
+            };
+            set_app_action(&config_ref, &executable, action);
+        });
+        applications_group.add(&row);
+        app_rows.borrow_mut().push((format!("{} {}", app_info.name, app_info.executable).to_lowercase(), row));
+    }
+    {
+        let app_rows = app_rows.clone();
+        app_search.connect_search_changed(move |entry| {
+            let query = entry.text().to_lowercase();
+            for (search_text, row) in app_rows.borrow().iter() {
+                row.set_visible(query.is_empty() || search_text.contains(&query));
+            }
+        });
+    }
+    applications_page.add(&applications_group);
+    rules_stack.add_titled(&page_scroller(&applications_page), Some("applications"), "Applications");
+
     let routing_page = adw::PreferencesPage::new();
     let routing_group = adw::PreferencesGroup::builder().title("Routing").build();
     let policy = adw::ComboRow::builder()
@@ -412,7 +608,44 @@ fn build_ui(app: &adw::Application) {
     routing_group.add(&rule_source);
     routing_group.add(&rule_status);
     routing_page.add(&routing_group);
-    view_stack.add_named(&page_scroller(&routing_page), Some("routing"));
+    rules_stack.add_titled(&page_scroller(&routing_page), Some("routing"), "Domains & IPs");
+
+    let blocked_page = adw::PreferencesPage::new();
+    let blocked_group = adw::PreferencesGroup::builder().title("Blocked Applications").build();
+    for app_info in scan_desktop_apps().into_iter().filter(|app_info| {
+        current_app_action(&config.borrow(), &app_info.executable) == RuleAction::Block
+    }) {
+        let row = adw::ActionRow::builder().title(&app_info.name).subtitle(&app_info.executable).build();
+        blocked_group.add(&row);
+    }
+    blocked_page.add(&blocked_group);
+    rules_stack.add_titled(&page_scroller(&blocked_page), Some("blocked"), "Blocked");
+    view_stack.add_named(&rules_page, Some("rules"));
+
+    let traffic_page = adw::PreferencesPage::new();
+    let traffic_group = adw::PreferencesGroup::builder().title("Current Session").build();
+    let uploaded_row = adw::ActionRow::builder().title("Uploaded").subtitle("0 B").build();
+    let downloaded_row = adw::ActionRow::builder().title("Downloaded").subtitle("0 B").build();
+    let total_row = adw::ActionRow::builder().title("Total").subtitle("0 B").build();
+    traffic_group.add(&uploaded_row);
+    traffic_group.add(&downloaded_row);
+    traffic_group.add(&total_row);
+    traffic_page.add(&traffic_group);
+    let traffic_rules_group = adw::PreferencesGroup::builder().title("Application Rules").build();
+    let proxy_apps_row = adw::ActionRow::builder().title("PROXY").build();
+    let direct_apps_row = adw::ActionRow::builder().title("DIRECT").build();
+    let blocked_apps_row = adw::ActionRow::builder().title("REJECT").build();
+    let app_count = scan_desktop_apps().len();
+    let proxy_count = config.borrow().settings.app_rules.iter().filter(|rule| rule.action == RuleAction::Proxy).count();
+    let block_count = config.borrow().settings.app_rules.iter().filter(|rule| rule.action == RuleAction::Block).count();
+    proxy_apps_row.set_subtitle(&format!("{proxy_count} applications"));
+    blocked_apps_row.set_subtitle(&format!("{block_count} applications"));
+    direct_apps_row.set_subtitle(&format!("{} applications", app_count.saturating_sub(proxy_count + block_count)));
+    traffic_rules_group.add(&proxy_apps_row);
+    traffic_rules_group.add(&direct_apps_row);
+    traffic_rules_group.add(&blocked_apps_row);
+    traffic_page.add(&traffic_rules_group);
+    view_stack.add_named(&page_scroller(&traffic_page), Some("traffic"));
 
     let log_page = adw::PreferencesPage::new();
     let log_group = adw::PreferencesGroup::builder().title("Proxy Logs").build();
@@ -462,8 +695,9 @@ fn build_ui(app: &adw::Application) {
         navigation.connect_row_selected(move |_, row| {
             let Some(row) = row else { return; };
             let (name, title) = match row.index() {
-                1 => ("routing", "Routing"),
-                2 => ("logs", "Logs"),
+                1 => ("rules", "Rules"),
+                2 => ("traffic", "Traffic"),
+                3 => ("logs", "Logs"),
                 _ => ("connect", "Connect"),
             };
             view_stack.set_visible_child_name(name);
@@ -493,6 +727,8 @@ fn build_ui(app: &adw::Application) {
     window.set_content(Some(&root));
 
     let is_connected = Rc::new(RefCell::new(false));
+    let session_upload = Rc::new(RefCell::new(0_u64));
+    let session_download = Rc::new(RefCell::new(0_u64));
     {
         let event_tx = event_tx.clone();
         let rule_source = rule_source.clone();
@@ -579,10 +815,20 @@ fn build_ui(app: &adw::Application) {
         let log_view = log_view.clone();
         let bottom_status = bottom_status.clone();
         let speed_label = speed_label.clone();
+        let uploaded_row = uploaded_row.clone();
+        let downloaded_row = downloaded_row.clone();
+        let total_row = total_row.clone();
+        let session_upload = session_upload.clone();
+        let session_download = session_download.clone();
         gtk::glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
             while let Ok(event) = event_rx.try_recv() {
                 match event {
                     RuntimeEvent::Connected => {
+                        *session_upload.borrow_mut() = 0;
+                        *session_download.borrow_mut() = 0;
+                        uploaded_row.set_subtitle("0 B");
+                        downloaded_row.set_subtitle("0 B");
+                        total_row.set_subtitle("0 B");
                         *is_connected.borrow_mut() = true;
                         status.set_subtitle("Connected");
                         bottom_status.set_text("Connected");
@@ -614,10 +860,17 @@ fn build_ui(app: &adw::Application) {
                         log_view.scroll_mark_onscreen(&mark);
                     }
                     RuntimeEvent::Speed { upload, download } => {
+                        *session_upload.borrow_mut() += upload;
+                        *session_download.borrow_mut() += download;
+                        let up_total = *session_upload.borrow();
+                        let down_total = *session_download.borrow();
+                        uploaded_row.set_subtitle(&format_bytes(up_total));
+                        downloaded_row.set_subtitle(&format_bytes(down_total));
+                        total_row.set_subtitle(&format_bytes(up_total + down_total));
                         speed_label.set_text(&format!(
-                            "↑ {}   ↓ {}",
-                            format_speed(upload),
-                            format_speed(download)
+                            "↑ {} ({})   ↓ {} ({})",
+                            format_speed(upload), format_bytes(up_total),
+                            format_speed(download), format_bytes(down_total)
                         ));
                     }
                     RuntimeEvent::RuleImportFailed(error) => {
