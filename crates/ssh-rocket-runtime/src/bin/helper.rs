@@ -18,12 +18,19 @@ async fn main() -> Result<()> {
     let mut args = env::args().skip(1);
     let command = args.next().unwrap_or_default();
     if command != "run" {
-        bail!("usage: ssh-rocket-helper run <config.json> <uid> <socks-port> <dns-port>");
+        bail!("usage: ssh-rocket-helper run <config.json> <uid> <socks-port> <dns-port> <ssh-port> <ssh-address>...");
     }
     let config_path = args.next().context("missing config path")?;
     let uid: u32 = args.next().context("missing uid")?.parse().context("invalid uid")?;
     let socks_port: u16 = args.next().context("missing SOCKS port")?.parse().context("invalid SOCKS port")?;
     let dns_port: u16 = args.next().context("missing DNS port")?.parse().context("invalid DNS port")?;
+    let ssh_port: u16 = args.next().context("missing SSH port")?.parse().context("invalid SSH port")?;
+    let ssh_addresses = args
+        .map(|value| value.parse::<IpAddr>().context("invalid SSH address"))
+        .collect::<Result<Vec<_>>>()?;
+    if ssh_addresses.is_empty() {
+        bail!("at least one SSH server address is required");
+    }
 
     if unsafe { libc::geteuid() } != 0 {
         bail!("ssh-rocket-helper must run as root");
@@ -51,7 +58,15 @@ async fn main() -> Result<()> {
     let dns_socket = UdpSocket::bind(("127.0.0.1", DNS_LISTEN_PORT))
         .await
         .context("failed to bind local DNS router")?;
-    let mut system = SystemState::new(uid, socks_port, dns_port, PathBuf::from(config_path), config);
+    let mut system = SystemState::new(
+        uid,
+        socks_port,
+        dns_port,
+        ssh_port,
+        ssh_addresses,
+        PathBuf::from(config_path),
+        config,
+    );
     if let Err(error) = system.setup().await {
         shutdown.cancel();
         let _ = tun_task.await;
@@ -101,16 +116,36 @@ struct SystemState {
     uid: u32,
     socks_port: u16,
     dns_port: u16,
+    ssh_port: u16,
+    ssh_addresses: Vec<IpAddr>,
     config_path: PathBuf,
     config: AppConfig,
 }
 
 impl SystemState {
-    fn new(uid: u32, socks_port: u16, dns_port: u16, config_path: PathBuf, config: AppConfig) -> Self {
-        Self { uid, socks_port, dns_port, config_path, config }
+    fn new(
+        uid: u32,
+        socks_port: u16,
+        dns_port: u16,
+        ssh_port: u16,
+        ssh_addresses: Vec<IpAddr>,
+        config_path: PathBuf,
+        config: AppConfig,
+    ) -> Self {
+        Self {
+            uid,
+            socks_port,
+            dns_port,
+            ssh_port,
+            ssh_addresses,
+            config_path,
+            config,
+        }
     }
 
     async fn setup(&mut self) -> Result<()> {
+        let _ = self.run_ip(&["-4", "rule", "del", "priority", TABLE]).await;
+        let _ = self.run_ip(&["-6", "rule", "del", "priority", TABLE]).await;
         self.run_ip(&["link", "set", "dev", TUN_NAME, "up"]).await?;
         self.run_ip(&["-4", "route", "replace", "default", "dev", TUN_NAME, "table", TABLE]).await?;
         self.run_ip(&["-4", "rule", "add", "priority", TABLE, "fwmark", MARK, "lookup", TABLE]).await?;
@@ -204,12 +239,36 @@ impl SystemState {
         let _ = command("nft", &["delete", "table", "inet", NFT_TABLE]).await;
         command("nft", &["add", "table", "inet", NFT_TABLE]).await?;
         command("nft", &["add", "chain", "inet", NFT_TABLE, "output", "{", "type", "route", "hook", "output", "priority", "mangle", ";", "policy", "accept", ";", "}"]).await?;
+        command("nft", &["add", "chain", "inet", NFT_TABLE, "dns_output", "{", "type", "nat", "hook", "output", "priority", "dstnat", ";", "policy", "accept", ";", "}"]).await?;
 
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "meta", "skuid", "!=", &self.uid.to_string(), "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip", "daddr", "127.0.0.0/8", "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "tcp", "dport", &self.socks_port.to_string(), "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "tcp", "dport", &self.dns_port.to_string(), "return"]).await?;
-        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "udp", "dport", "53", "redirect", "to", &format!(":{DNS_LISTEN_PORT}")]).await?;
+        for address in &self.ssh_addresses {
+            let family = if address.is_ipv4() { "ip" } else { "ip6" };
+            let address = address.to_string();
+            command(
+                "nft",
+                &[
+                    "add",
+                    "rule",
+                    "inet",
+                    NFT_TABLE,
+                    "output",
+                    family,
+                    "daddr",
+                    &address,
+                    "tcp",
+                    "dport",
+                    &self.ssh_port.to_string(),
+                    "return",
+                ],
+            )
+            .await?;
+        }
+        command("nft", &["add", "rule", "inet", NFT_TABLE, "dns_output", "meta", "skuid", "!=", &self.uid.to_string(), "return"]).await?;
+        command("nft", &["add", "rule", "inet", NFT_TABLE, "dns_output", "udp", "dport", "53", "redirect", "to", &format!(":{DNS_LISTEN_PORT}")]).await?;
 
         self.install_ip_rules(&self.config.settings.custom_overrides).await?;
         self.install_cgroup_rules().await?;

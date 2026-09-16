@@ -4,6 +4,9 @@
     <file alias="ssh-rocket-symbolic.svg">icons/ssh-rocket-symbolic.svg</file>
     <file alias="ssh-rocket-disconnected-symbolic.svg">icons/ssh-rocket-disconnected-symbolic.svg</file>
     <file alias="ssh-rocket-acquiring-symbolic.svg">icons/ssh-rocket-acquiring-symbolic.svg</file>
+    <file alias="ssh-rocket-connect-symbolic.svg">icons/ssh-rocket-connect-symbolic.svg</file>
+    <file alias="ssh-rocket-rules-symbolic.svg">icons/ssh-rocket-rules-symbolic.svg</file>
     <file alias="ssh-rocket-traffic-symbolic.svg">icons/ssh-rocket-traffic-symbolic.svg</file>
+    <file alias="ssh-rocket-logs-symbolic.svg">icons/ssh-rocket-logs-symbolic.svg</file>
   </gresource>
 </gresources>

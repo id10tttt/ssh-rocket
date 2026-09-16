@@ -22,6 +22,10 @@ sudo install -Dm644 data/icons/ssh-rocket.svg \
   "$DATA_PREFIX/icons/hicolor/scalable/apps/ssh-rocket.svg"
 sudo install -Dm644 data/icons/ssh-rocket-symbolic.svg \
   "$DATA_PREFIX/icons/hicolor/symbolic/apps/ssh-rocket-symbolic.svg"
+for icon in disconnected acquiring connect rules traffic logs; do
+  sudo install -Dm644 "data/icons/ssh-rocket-${icon}-symbolic.svg" \
+    "$DATA_PREFIX/icons/hicolor/symbolic/apps/ssh-rocket-${icon}-symbolic.svg"
+done
 
 command -v update-desktop-database >/dev/null 2>&1 && sudo update-desktop-database "$DATA_PREFIX/applications" || true
 command -v gtk-update-icon-cache >/dev/null 2>&1 && sudo gtk-update-icon-cache -q -t -f "$DATA_PREFIX/icons/hicolor" || true
