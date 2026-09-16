@@ -25,9 +25,11 @@ use tun2proxy::{ArgDns, ArgProxy, Args};
 const TUN_NAME: &str = "sshrocket0";
 const MARK: &str = "0x5352";
 const TABLE: &str = "21330";
+const DNS_RULE_PRIORITY: &str = "21328";
 const NFT_TABLE: &str = "ssh_rocket";
 const DNS_LISTEN_PORT: u16 = 15353;
 const MAX_TUN_RETRIES: usize = 3;
+const CGROUPS: [&str; 3] = ["sshrocket-proxy", "sshrocket-direct", "sshrocket-block"];
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -291,7 +293,7 @@ async fn start_proxy_session(
         .ipv6_enabled(config.settings.ipv6)
         .setup(false);
 
-    // 1. 创建 TUN 并重试解决 EBUSY
+    // 1. 附加到常驻 TUN，并重试解决 EBUSY
     let mut tun_task = None;
     let mut shutdown = CancellationToken::new();
     let mut last_error = String::new();
@@ -299,6 +301,7 @@ async fn start_proxy_session(
     for attempt in 1..=MAX_TUN_RETRIES {
         clean_stale_resources().await;
         sleep(Duration::from_millis(100)).await;
+        ensure_persistent_tun().await?;
 
         let cur_shutdown = CancellationToken::new();
         let tun_shutdown_clone = cur_shutdown.clone();
@@ -487,13 +490,14 @@ async fn clean_stale_resources() {
         }
     }
     let _ = command("nft", &["delete", "table", "inet", NFT_TABLE]).await;
+    let _ = command("ip", &["-4", "rule", "del", "priority", DNS_RULE_PRIORITY]).await;
     let _ = command("ip", &["-4", "rule", "del", "priority", "21329"]).await;
     let _ = command("ip", &["-4", "rule", "del", "priority", TABLE]).await;
     let _ = command("ip", &["-6", "rule", "del", "priority", TABLE]).await;
     let _ = command("ip", &["-4", "route", "flush", "table", TABLE]).await;
     let _ = command("ip", &["-6", "route", "flush", "table", TABLE]).await;
-    let _ = command("ip", &["link", "delete", "dev", TUN_NAME]).await;
-    for group in ["sshrocket-proxy", "sshrocket-direct", "sshrocket-block"] {
+    let _ = command("ip", &["-4", "route", "del", "10.0.0.1/32", "dev", TUN_NAME]).await;
+    for group in CGROUPS {
         if let Ok(pids) = tokio::fs::read_to_string(format!("/sys/fs/cgroup/{group}/cgroup.procs")).await {
             for pid in pids.lines() {
                 let _ = tokio::fs::write("/sys/fs/cgroup/cgroup.procs", pid).await;
@@ -511,6 +515,7 @@ struct SystemState {
     ssh_addresses: Vec<IpAddr>,
     config_path: PathBuf,
     config: AppConfig,
+    current_pids: HashMap<u32, &'static str>,
 }
 
 impl SystemState {
@@ -531,18 +536,32 @@ impl SystemState {
             ssh_addresses,
             config_path,
             config,
+            current_pids: HashMap::new(),
         }
     }
 
     async fn setup(&mut self) -> Result<()> {
+        let _ = self.run_ip(&["-4", "rule", "del", "priority", DNS_RULE_PRIORITY]).await;
         let _ = self.run_ip(&["-4", "rule", "del", "priority", "21329"]).await;
         let _ = self.run_ip(&["-4", "rule", "del", "priority", TABLE]).await;
         let _ = self.run_ip(&["-6", "rule", "del", "priority", TABLE]).await;
-        self.run_ip(&["link", "set", "dev", TUN_NAME, "up"]).await?;
-        let _ = self.run_ip(&["-4", "addr", "replace", "10.0.0.33/24", "dev", TUN_NAME]).await;
-        let _ = self.run_ip(&["-4", "route", "replace", "10.0.0.0/24", "dev", TUN_NAME]).await;
+        self.configure_tun_interface().await?;
         let _ = self.run_ip(&["-4", "route", "replace", "198.18.0.0/15", "dev", TUN_NAME, "table", TABLE]).await;
         self.run_ip(&["-4", "route", "replace", "default", "dev", TUN_NAME, "table", TABLE]).await?;
+        self.run_ip(&[
+            "-4",
+            "rule",
+            "add",
+            "priority",
+            DNS_RULE_PRIORITY,
+            "uidrange",
+            "0-0",
+            "to",
+            "10.0.0.1/32",
+            "lookup",
+            TABLE,
+        ])
+        .await?;
         self.run_ip(&["-4", "rule", "add", "priority", TABLE, "fwmark", MARK, "lookup", TABLE]).await?;
         let _ = self.run_ip(&["-4", "rule", "add", "priority", "21329", "to", "198.18.0.0/15", "lookup", TABLE]).await;
         if self.config.settings.ipv6 {
@@ -557,13 +576,15 @@ impl SystemState {
 
     async fn cleanup(&self) {
         let _ = command("nft", &["delete", "table", "inet", NFT_TABLE]).await;
+        let _ = command("ip", &["-4", "rule", "del", "priority", DNS_RULE_PRIORITY]).await;
         let _ = command("ip", &["-4", "rule", "del", "priority", "21329"]).await;
         let _ = command("ip", &["-4", "rule", "del", "priority", TABLE]).await;
         let _ = command("ip", &["-6", "rule", "del", "priority", TABLE]).await;
         let _ = command("ip", &["-4", "route", "flush", "table", TABLE]).await;
         let _ = command("ip", &["-6", "route", "flush", "table", TABLE]).await;
+        let _ = command("ip", &["-4", "route", "del", "10.0.0.1/32", "dev", TUN_NAME]).await;
         self.restore_app_processes().await;
-        for name in ["sshrocket-proxy", "sshrocket-direct", "sshrocket-block"] {
+        for name in CGROUPS {
             let path = format!("/sys/fs/cgroup/{name}");
             let _ = tokio::fs::remove_dir(path).await;
         }
@@ -573,8 +594,35 @@ impl SystemState {
         command("ip", args).await
     }
 
+    /// 仅在链路或地址状态不符合预期时更新 TUN，避免重复产生 Netlink 通知。
+    async fn configure_tun_interface(&self) -> Result<()> {
+        let flags = tokio::fs::read_to_string(format!("/sys/class/net/{TUN_NAME}/flags"))
+            .await
+            .with_context(|| format!("failed to read flags for {TUN_NAME}"))?;
+        let flags = u32::from_str_radix(flags.trim().trim_start_matches("0x"), 16)
+            .with_context(|| format!("invalid flags for {TUN_NAME}"))?;
+        if flags & libc::IFF_UP as u32 == 0 {
+            self.run_ip(&["link", "set", "dev", TUN_NAME, "up"]).await?;
+        }
+
+        let addresses = command_output("ip", &["-4", "-o", "addr", "show", "dev", TUN_NAME]).await?;
+        let stale_addresses = addresses
+            .split_whitespace()
+            .filter(|value| value.starts_with("10.0.0.33/") && *value != "10.0.0.33/32")
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        for address in stale_addresses {
+            let _ = self.run_ip(&["-4", "addr", "del", &address, "dev", TUN_NAME]).await;
+        }
+        if !addresses.split_whitespace().any(|value| value == "10.0.0.33/32") {
+            self.run_ip(&["-4", "addr", "replace", "10.0.0.33/32", "dev", TUN_NAME])
+                .await?;
+        }
+        Ok(())
+    }
+
     async fn setup_cgroups(&self) -> Result<()> {
-        for name in ["sshrocket-proxy", "sshrocket-direct", "sshrocket-block"] {
+        for name in CGROUPS {
             tokio::fs::create_dir_all(format!("/sys/fs/cgroup/{name}"))
                 .await
                 .with_context(|| format!("failed to create cgroup {name}"))?;
@@ -588,7 +636,6 @@ impl SystemState {
                 self.config.settings.app_rules = config.settings.app_rules;
             }
         }
-        self.restore_app_processes().await;
         let rules: HashMap<_, _> = self
             .config
             .settings
@@ -596,33 +643,49 @@ impl SystemState {
             .iter()
             .map(|rule| (rule.executable.clone(), rule.action))
             .collect();
-        if rules.is_empty() {
-            return Ok(());
+        let mut desired_pids = HashMap::new();
+        if !rules.is_empty() {
+            let mut entries = tokio::fs::read_dir("/proc").await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let Some(pid) = entry.file_name().to_string_lossy().parse::<u32>().ok() else { continue; };
+                let status = tokio::fs::read_to_string(format!("/proc/{pid}/status")).await.unwrap_or_default();
+                if !status.lines().any(|line| line.starts_with(&format!("Uid:\t{}\t", self.uid))) {
+                    continue;
+                }
+                let Ok(executable) = tokio::fs::read_link(format!("/proc/{pid}/exe")).await else { continue; };
+                let Some(action) = app_action(&rules, &executable) else { continue; };
+                let group = match action {
+                    RuleAction::Proxy => "sshrocket-proxy",
+                    RuleAction::Direct => "sshrocket-direct",
+                    RuleAction::Block => "sshrocket-block",
+                };
+                desired_pids.insert(pid, group);
+            }
         }
 
-        let mut entries = tokio::fs::read_dir("/proc").await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let Some(pid) = entry.file_name().to_string_lossy().parse::<u32>().ok() else { continue; };
-            let status = tokio::fs::read_to_string(format!("/proc/{pid}/status")).await.unwrap_or_default();
-            if !status.lines().any(|line| line == format!("Uid:\t{}\t{}\t{}\t{}", self.uid, self.uid, self.uid, self.uid))
-                && !status.lines().any(|line| line.starts_with(&format!("Uid:\t{}\t", self.uid)))
-            {
+        self.current_pids = read_cgroup_pids().await;
+        for pid in self.current_pids.keys().copied().collect::<Vec<_>>() {
+            if !desired_pids.contains_key(&pid) {
+                let _ = tokio::fs::write("/sys/fs/cgroup/cgroup.procs", pid.to_string()).await;
+                self.current_pids.remove(&pid);
+            }
+        }
+        for (pid, group) in desired_pids {
+            if self.current_pids.get(&pid) == Some(&group) {
                 continue;
             }
-            let Ok(executable) = tokio::fs::read_link(format!("/proc/{pid}/exe")).await else { continue; };
-            let Some(action) = app_action(&rules, &executable) else { continue; };
-            let group = match action {
-                RuleAction::Proxy => "sshrocket-proxy",
-                RuleAction::Direct => "sshrocket-direct",
-                RuleAction::Block => "sshrocket-block",
-            };
-            let _ = tokio::fs::write(format!("/sys/fs/cgroup/{group}/cgroup.procs"), pid.to_string()).await;
+            if tokio::fs::write(format!("/sys/fs/cgroup/{group}/cgroup.procs"), pid.to_string())
+                .await
+                .is_ok()
+            {
+                self.current_pids.insert(pid, group);
+            }
         }
         Ok(())
     }
 
     async fn restore_app_processes(&self) {
-        for group in ["sshrocket-proxy", "sshrocket-direct", "sshrocket-block"] {
+        for group in CGROUPS {
             let Ok(pids) = tokio::fs::read_to_string(format!("/sys/fs/cgroup/{group}/cgroup.procs")).await else {
                 continue;
             };
@@ -639,12 +702,9 @@ impl SystemState {
         command("nft", &["add", "chain", "inet", NFT_TABLE, "dns_output", "{", "type", "nat", "hook", "output", "priority", "dstnat", ";", "policy", "accept", ";", "}"]).await?;
 
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "meta", "skuid", "!=", &self.uid.to_string(), "return"]).await?;
-        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip", "daddr", "127.0.0.0/8", "return"]).await?;
-        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip", "daddr", "224.0.0.0/4", "return"]).await?;
-        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip", "daddr", "255.255.255.255", "return"]).await?;
-        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip6", "daddr", "::1", "return"]).await?;
-        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip6", "daddr", "fe80::/10", "return"]).await?;
-        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip6", "daddr", "ff00::/8", "return"]).await?;
+        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "fib", "daddr", "type", "local", "return"]).await?;
+        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip", "daddr", "{", "127.0.0.0/8", ",", "169.254.0.0/16", ",", "192.168.0.0/16", ",", "172.16.0.0/12", ",", "10.0.0.0/8", ",", "224.0.0.0/4", ",", "255.255.255.255", "}", "return"]).await?;
+        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip6", "daddr", "{", "::1", ",", "fc00::/7", ",", "fe80::/10", ",", "ff00::/8", "}", "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "tcp", "dport", &self.socks_port.to_string(), "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "tcp", "dport", &self.dns_port.to_string(), "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip", "daddr", "223.5.5.5", "return"]).await?;
@@ -781,6 +841,19 @@ fn app_action(rules: &HashMap<PathBuf, RuleAction>, executable: &Path) -> Option
         .iter()
         .find(|(rule, _)| rule.file_name() == Some(executable_name))
         .map(|(_, action)| *action)
+}
+
+async fn read_cgroup_pids() -> HashMap<u32, &'static str> {
+    let mut current_pids = HashMap::new();
+    for group in CGROUPS {
+        let Ok(pids) = tokio::fs::read_to_string(format!("/sys/fs/cgroup/{group}/cgroup.procs")).await else {
+            continue;
+        };
+        for pid in pids.lines().filter_map(|pid| pid.parse::<u32>().ok()) {
+            current_pids.insert(pid, group);
+        }
+    }
+    current_pids
 }
 
 async fn run_dns_router(
@@ -1069,6 +1142,31 @@ async fn update_domain_addresses(addresses: &[IpAddr], action: RuleAction) {
     }
 }
 
+/// 创建与 tun2proxy packet-information 模式兼容的常驻 TUN，后续会话只重新附加。
+async fn ensure_persistent_tun() -> Result<()> {
+    let tun_path = format!("/sys/class/net/{TUN_NAME}/tun_flags");
+    if !Path::new(&tun_path).exists() {
+        if Path::new(&format!("/sys/class/net/{TUN_NAME}")).exists() {
+            bail!("network interface {TUN_NAME} exists but is not a TUN device");
+        }
+        command("ip", &["tuntap", "add", "dev", TUN_NAME, "mode", "tun", "pi"])
+            .await
+            .with_context(|| format!("failed to create persistent TUN {TUN_NAME}"))?;
+    }
+
+    let flags = tokio::fs::read_to_string(&tun_path)
+        .await
+        .with_context(|| format!("failed to read TUN flags for {TUN_NAME}"))?;
+    let flags = u32::from_str_radix(flags.trim().trim_start_matches("0x"), 16)
+        .with_context(|| format!("invalid TUN flags for {TUN_NAME}"))?;
+    const IFF_TUN: u32 = 0x0001;
+    const IFF_NO_PI: u32 = 0x1000;
+    if flags & IFF_TUN == 0 || flags & IFF_NO_PI != 0 {
+        bail!("existing TUN {TUN_NAME} is incompatible with tun2proxy packet-information mode");
+    }
+    Ok(())
+}
+
 async fn wait_for_interface() -> Result<()> {
     for _ in 0..100 {
         if Path::new(&format!("/sys/class/net/{TUN_NAME}")).exists() {
@@ -1077,6 +1175,21 @@ async fn wait_for_interface() -> Result<()> {
         sleep(Duration::from_millis(50)).await;
     }
     bail!("TUN interface {TUN_NAME} was not created")
+}
+
+async fn command_output(program: &str, args: &[&str]) -> Result<String> {
+    let output = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .with_context(|| format!("failed to execute {program}"))?;
+    if !output.status.success() {
+        bail!("{} {} failed: {}", program, args.join(" "), String::from_utf8_lossy(&output.stderr).trim());
+    }
+    String::from_utf8(output.stdout).with_context(|| format!("{program} output was not valid UTF-8"))
 }
 
 async fn command(program: &str, args: &[&str]) -> Result<()> {
