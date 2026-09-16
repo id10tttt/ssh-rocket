@@ -152,6 +152,8 @@ namespace Sshuttle {
             // 显式规则优先于应用选择；其余流量最终使用配置默认策略。
             if (default_policy == "direct") {
                 success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) socket cgroupv2 level 1 != \"sshuttle-proxy\" return") && success;
+            } else {
+                success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) meta l4proto tcp meta mark set 0x5352 return") && success;
             }
             success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) socket cgroupv2 level 1 \"sshuttle-proxy\" meta l4proto tcp meta mark set 0x5352 return") && success;
             success = this.run_nft_command (@"nft insert rule inet $(table_v4) $(table_v4) ip daddr @proxy_ips meta l4proto tcp meta mark set 0x5352 return") && success;
@@ -170,6 +172,8 @@ namespace Sshuttle {
                 success = this.ensure_ip_set (table_v6, "direct_ips", "ipv6_addr") && success;
                 if (default_policy == "direct") {
                     success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) socket cgroupv2 level 1 != \"sshuttle-proxy\" return") && success;
+                } else {
+                    success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) meta l4proto tcp meta mark set 0x5352 return") && success;
                 }
                 success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) socket cgroupv2 level 1 \"sshuttle-proxy\" meta l4proto tcp meta mark set 0x5352 return") && success;
                 success = this.run_nft_command (@"nft insert rule inet $(table_v6) $(table_v6) ip6 daddr @proxy_ips meta l4proto tcp meta mark set 0x5352 return") && success;
