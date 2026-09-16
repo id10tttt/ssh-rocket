@@ -841,6 +841,14 @@ async fn handle_dns_query(
         return;
     }
 
+    // 对于走代理的域名，如果不是 A 记录查询（例如 AAAA type 28、HTTPS type 65、SVCB type 64 等），
+    // 立即返回标准 NODATA，避免 Chrome/浏览器因收到非法的 A 记录而导致 ECH 协商失败或 IPv6 握手挂起
+    if decision.action == RuleAction::Proxy && qtype != 1 {
+        let response = nodata_response(&packet);
+        let _ = socket.send_to(&response, peer).await;
+        return;
+    }
+
     let resolve_result = if decision.action == RuleAction::Direct {
         forward_dns_local(&packet).await
     } else {
