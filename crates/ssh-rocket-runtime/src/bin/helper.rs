@@ -35,6 +35,12 @@ async fn main() -> Result<()> {
     if unsafe { libc::geteuid() } != 0 {
         bail!("ssh-rocket-helper must run as root");
     }
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("failed to monitor the GUI process");
+    }
+    if unsafe { libc::getppid() } == 1 {
+        bail!("SSH Rocket exited before the helper started");
+    }
 
     let config: AppConfig = serde_json::from_slice(&tokio::fs::read(&config_path).await?)?;
     eprintln!("[helper] starting transparent proxy");
@@ -80,15 +86,15 @@ async fn main() -> Result<()> {
         run_dns_router(dns_socket, dns_port, routing_engine, dns_shutdown).await
     });
     let mut app_scan = interval(Duration::from_secs(2));
-    let mut stdin = tokio::io::stdin();
-    let mut stdin_byte = [0_u8; 1];
     let ctrl_c = signal::ctrl_c();
     tokio::pin!(ctrl_c);
+    let mut terminate = signal::unix::signal(signal::unix::SignalKind::terminate())
+        .context("failed to listen for termination")?;
 
     loop {
         tokio::select! {
             _ = &mut ctrl_c => break,
-            _ = stdin.read(&mut stdin_byte) => break,
+            _ = terminate.recv() => break,
             result = &mut tun_task => {
                 match result {
                     Ok(Ok(_)) => {},

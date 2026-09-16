@@ -4,7 +4,7 @@ use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
 use ssh_rocket_core::{
-    AppConfig, AppRule, DomainRuleKind, Profile, RuleAction, RuleImportResult,
+    AppConfig, AppRule, DomainRule, DomainRuleKind, IpRule, Profile, RuleAction, RuleImportResult,
     parse_rule_set, parse_shadowrocket_rules,
 };
 use ssh_rocket_runtime::SshSession;
@@ -16,6 +16,7 @@ const APP_ID: &str = "io.github.idi0t.SshRocket";
 const SOCKS_PORT: u16 = 17880;
 const DEFAULT_RULE_SOURCE: &str = "https://johnshall.github.io/Shadowrocket-ADBlock-Rules-Forever/sr_top500_banlist_ad.conf";
 const MAX_RULE_SOURCE_SIZE: usize = 16 * 1024 * 1024;
+const RULE_BATCH_SIZE: usize = 20;
 
 enum RuntimeEvent {
     Connected,
@@ -43,6 +44,50 @@ struct DesktopApp {
 }
 
 type RefreshConnections = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+type RefreshRules = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+
+#[derive(Clone)]
+enum ListedRule {
+    Domain(DomainRule),
+    Ip(IpRule),
+}
+
+impl ListedRule {
+    fn value(&self) -> String {
+        match self {
+            Self::Domain(rule) => rule.pattern.clone(),
+            Self::Ip(rule) => rule.network.to_string(),
+        }
+    }
+
+    fn kind_label(&self) -> &'static str {
+        match self {
+            Self::Domain(rule) => domain_kind_label(rule.kind),
+            Self::Ip(_) => "IP-CIDR",
+        }
+    }
+
+    fn action(&self) -> RuleAction {
+        match self {
+            Self::Domain(rule) => rule.action,
+            Self::Ip(rule) => rule.action,
+        }
+    }
+
+    fn matches(&self, query: &str) -> bool {
+        query.is_empty()
+            || self.value().to_lowercase().contains(query)
+            || self.kind_label().to_lowercase().contains(query)
+            || action_label(self.action()).to_lowercase().contains(query)
+    }
+}
+
+#[derive(Default)]
+struct RuleListState {
+    filtered: Vec<ListedRule>,
+    rendered_rows: Vec<adw::ActionRow>,
+    loaded: usize,
+}
 
 fn action_label(action: RuleAction) -> &'static str {
     match action {
@@ -61,59 +106,245 @@ fn domain_kind_label(kind: DomainRuleKind) -> &'static str {
     }
 }
 
-fn add_domain_rule_row(
-    group: &adw::PreferencesGroup,
-    config: &Rc<RefCell<AppConfig>>,
-    pattern: String,
-    kind: DomainRuleKind,
-    action: RuleAction,
-) {
-    let row = adw::ActionRow::builder()
-        .title(&pattern)
-        .subtitle(format!("{} · {}", domain_kind_label(kind), action_label(action)))
-        .build();
-    let remove = gtk::Button::from_icon_name("user-trash-symbolic");
-    remove.add_css_class("flat");
-    remove.set_tooltip_text(Some("Remove"));
-    row.add_suffix(&remove);
-    let group_ref = group.clone();
-    let config_ref = config.clone();
-    let row_ref = row.clone();
-    remove.connect_clicked(move |_| {
-        let mut current = config_ref.borrow_mut();
-        current.settings.domain_rules.retain(|rule| !(rule.pattern == pattern && rule.kind == kind));
-        if current.save().is_ok() {
-            group_ref.remove(&row_ref);
-        }
-    });
-    group.add(&row);
+fn custom_rules(config: &AppConfig) -> Vec<ListedRule> {
+    config
+        .settings
+        .domain_rules
+        .iter()
+        .cloned()
+        .map(ListedRule::Domain)
+        .chain(config.settings.ip_rules.iter().cloned().map(ListedRule::Ip))
+        .collect()
 }
 
-fn add_ip_rule_row(
-    group: &adw::PreferencesGroup,
-    config: &Rc<RefCell<AppConfig>>,
-    network: String,
-    action: RuleAction,
+fn imported_rules(config: &AppConfig) -> Vec<ListedRule> {
+    config
+        .settings
+        .imported_domain_rules
+        .iter()
+        .cloned()
+        .map(ListedRule::Domain)
+        .chain(config.settings.imported_ip_rules.iter().cloned().map(ListedRule::Ip))
+        .collect()
+}
+
+fn rule_source_name(source_url: &str) -> String {
+    source_url
+        .split(['?', '#'])
+        .next()
+        .and_then(|url| url.rsplit('/').find(|part| !part.is_empty()))
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Imported Configuration")
+        .to_string()
+}
+
+fn remove_listed_rule(config: &mut AppConfig, rule: &ListedRule) {
+    match rule {
+        ListedRule::Domain(rule) => config
+            .settings
+            .domain_rules
+            .retain(|item| !(item.pattern == rule.pattern && item.kind == rule.kind)),
+        ListedRule::Ip(rule) => config.settings.ip_rules.retain(|item| item.network != rule.network),
+    }
+}
+
+fn show_rule_dialog(
+    parent: &adw::ApplicationWindow,
+    config: Rc<RefCell<AppConfig>>,
+    existing: Option<ListedRule>,
+    refresh_rules: RefreshRules,
 ) {
-    let row = adw::ActionRow::builder()
-        .title(&network)
-        .subtitle(format!("IP-CIDR · {}", action_label(action)))
+    let dialog = adw::AlertDialog::new(
+        Some(if existing.is_some() { "Edit Rule" } else { "Add Rule" }),
+        None,
+    );
+    let group = adw::PreferencesGroup::new();
+    let pattern = adw::EntryRow::builder()
+        .title("Domain, IP, or CIDR")
+        .text(existing.as_ref().map(ListedRule::value).unwrap_or_default())
         .build();
-    let remove = gtk::Button::from_icon_name("user-trash-symbolic");
-    remove.add_css_class("flat");
-    remove.set_tooltip_text(Some("Remove"));
-    row.add_suffix(&remove);
-    let group_ref = group.clone();
-    let config_ref = config.clone();
-    let row_ref = row.clone();
-    remove.connect_clicked(move |_| {
-        let mut current = config_ref.borrow_mut();
-        current.settings.ip_rules.retain(|rule| rule.network.to_string() != network);
+    let rule_type = adw::ComboRow::builder()
+        .title("Rule Type")
+        .model(&gtk::StringList::new(&[
+            "DOMAIN-SUFFIX",
+            "DOMAIN",
+            "DOMAIN-KEYWORD",
+            "IP-CIDR",
+        ]))
+        .selected(match existing.as_ref().map(ListedRule::kind_label) {
+            Some("DOMAIN") => 1,
+            Some("DOMAIN-KEYWORD") => 2,
+            Some("IP-CIDR") => 3,
+            _ => 0,
+        })
+        .build();
+    let action = adw::ComboRow::builder()
+        .title("Action")
+        .model(&gtk::StringList::new(&["DIRECT", "PROXY", "REJECT"]))
+        .selected(match existing.as_ref().map(ListedRule::action) {
+            Some(RuleAction::Direct) => 0,
+            Some(RuleAction::Block) => 2,
+            _ => 1,
+        })
+        .build();
+    group.add(&pattern);
+    group.add(&rule_type);
+    group.add(&action);
+    dialog.set_extra_child(Some(&group));
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("save", "Save");
+    dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+    dialog.connect_response(None, move |dialog, response| {
+        if response != "save" {
+            return;
+        }
+        let value = pattern.text().trim().to_string();
+        if value.is_empty() {
+            dialog.set_body("Enter a domain, IP, or CIDR.");
+            return;
+        }
+        let rule_type_text = match rule_type.selected() {
+            1 => "DOMAIN",
+            2 => "DOMAIN-KEYWORD",
+            3 => "IP-CIDR",
+            _ => "DOMAIN-SUFFIX",
+        };
+        let selected_action = match action.selected() {
+            0 => RuleAction::Direct,
+            2 => RuleAction::Block,
+            _ => RuleAction::Proxy,
+        };
+        let mut parsed = parse_rule_set(&format!("{rule_type_text},{value}"), selected_action);
+        if parsed.rule_count() != 1 {
+            dialog.set_body("The rule is invalid.");
+            return;
+        }
+
+        let mut current = config.borrow_mut();
+        if let Some(existing) = &existing {
+            remove_listed_rule(&mut current, existing);
+        }
+        if let Some(rule) = parsed.domain_rules.pop() {
+            current.settings.domain_rules.retain(|item| {
+                !(item.pattern == rule.pattern && item.kind == rule.kind)
+            });
+            current.settings.domain_rules.push(rule);
+        } else if let Some(rule) = parsed.ip_rules.pop() {
+            current.settings.ip_rules.retain(|item| item.network != rule.network);
+            current.settings.ip_rules.push(rule);
+        }
         if current.save().is_ok() {
-            group_ref.remove(&row_ref);
+            drop(current);
+            if let Some(refresh) = refresh_rules.borrow().as_ref() {
+                refresh();
+            }
         }
     });
-    group.add(&row);
+    dialog.present(Some(parent));
+}
+
+fn append_rule_batch(
+    group: &adw::PreferencesGroup,
+    state: &Rc<RefCell<RuleListState>>,
+    load_more: &gtk::Button,
+    editable: bool,
+    parent: &adw::ApplicationWindow,
+    config: &Rc<RefCell<AppConfig>>,
+    refresh_rules: &RefreshRules,
+) {
+    let items = {
+        let mut state = state.borrow_mut();
+        let end = (state.loaded + RULE_BATCH_SIZE).min(state.filtered.len());
+        let items = state.filtered[state.loaded..end].to_vec();
+        state.loaded = end;
+        items
+    };
+    for item in items {
+        let row = adw::ActionRow::builder()
+            .title(item.value())
+            .subtitle(item.kind_label())
+            .build();
+        row.set_use_markup(false);
+        let icon_name = match item.action() {
+            RuleAction::Proxy => "ssh-rocket-symbolic",
+            RuleAction::Direct => "network-wired-symbolic",
+            RuleAction::Block => "network-offline-symbolic",
+        };
+        row.add_prefix(&gtk::Image::from_icon_name(icon_name));
+        let action = gtk::Label::new(Some(action_label(item.action())));
+        action.add_css_class("dim-label");
+        row.add_suffix(&action);
+        if editable {
+            let edit = gtk::Button::from_icon_name("document-edit-symbolic");
+            edit.add_css_class("flat");
+            edit.set_tooltip_text(Some("Edit Rule"));
+            let edit_parent = parent.clone();
+            let edit_config = config.clone();
+            let edit_rule = item.clone();
+            let edit_refresh = refresh_rules.clone();
+            edit.connect_clicked(move |_| {
+                show_rule_dialog(
+                    &edit_parent,
+                    edit_config.clone(),
+                    Some(edit_rule.clone()),
+                    edit_refresh.clone(),
+                );
+            });
+            row.add_suffix(&edit);
+            let remove = gtk::Button::from_icon_name("user-trash-symbolic");
+            remove.add_css_class("flat");
+            remove.set_tooltip_text(Some("Delete Rule"));
+            let remove_config = config.clone();
+            let remove_rule = item.clone();
+            let remove_refresh = refresh_rules.clone();
+            remove.connect_clicked(move |_| {
+                let mut current = remove_config.borrow_mut();
+                remove_listed_rule(&mut current, &remove_rule);
+                if current.save().is_ok() {
+                    drop(current);
+                    if let Some(refresh) = remove_refresh.borrow().as_ref() {
+                        refresh();
+                    }
+                }
+            });
+            row.add_suffix(&remove);
+        }
+        group.add(&row);
+        state.borrow_mut().rendered_rows.push(row);
+    }
+    let state = state.borrow();
+    load_more.set_visible(state.loaded < state.filtered.len());
+}
+
+fn refresh_rule_list(
+    group: &adw::PreferencesGroup,
+    state: &Rc<RefCell<RuleListState>>,
+    load_more: &gtk::Button,
+    rules: Vec<ListedRule>,
+    query: &str,
+    editable: bool,
+    parent: &adw::ApplicationWindow,
+    config: &Rc<RefCell<AppConfig>>,
+    refresh_rules: &RefreshRules,
+) {
+    {
+        let mut state = state.borrow_mut();
+        for row in state.rendered_rows.drain(..) {
+            group.remove(&row);
+        }
+        let query = query.trim().to_lowercase();
+        state.filtered = rules.into_iter().filter(|rule| rule.matches(&query)).collect();
+        state.loaded = 0;
+    }
+    append_rule_batch(
+        group,
+        state,
+        load_more,
+        editable,
+        parent,
+        config,
+        refresh_rules,
+    );
 }
 
 fn show_profile_dialog(
@@ -439,6 +670,11 @@ impl RuntimeController {
                                 }
                             }
                         }
+                    }
+                }
+                if let Some(pid) = process.id() {
+                    unsafe {
+                        libc::kill(pid as i32, libc::SIGTERM);
                     }
                 }
                 process.stdin.take();
@@ -807,10 +1043,17 @@ fn build_ui(app: &adw::Application) {
     applications_page.append(&page_scroller(&applications_preferences));
     rules_stack.add_titled(&applications_page, Some("applications"), "Applications");
 
-    let routing_page = adw::PreferencesPage::new();
-    let routing_group = adw::PreferencesGroup::builder().title("Routing").build();
+    let routing_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let domain_stack = gtk::Stack::new();
+    domain_stack.set_transition_type(gtk::StackTransitionType::SlideLeftRight);
+    domain_stack.set_vexpand(true);
+    routing_page.append(&domain_stack);
+    let refresh_rule_views: RefreshRules = Rc::new(RefCell::new(None));
+
+    let overview_page = adw::PreferencesPage::new();
+    let routing_group = adw::PreferencesGroup::builder().title("Default Policy").build();
     let policy = adw::ComboRow::builder()
-        .title("Default Policy")
+        .title("Unmatched Traffic")
         .model(&gtk::StringList::new(&["Proxy", "Direct", "Block"]))
         .selected(match config.borrow().settings.default_policy {
             RuleAction::Proxy => 0,
@@ -819,6 +1062,10 @@ fn build_ui(app: &adw::Application) {
         })
         .build();
     let ipv6 = adw::SwitchRow::builder().title("IPv6").active(config.borrow().settings.ipv6).build();
+    routing_group.add(&policy);
+    routing_group.add(&ipv6);
+    overview_page.add(&routing_group);
+
     let initial_rule_source = {
         let current = config.borrow();
         if current.settings.rule_source_url.is_empty() {
@@ -831,138 +1078,426 @@ fn build_ui(app: &adw::Application) {
         .title("Shadowrocket Rule Source")
         .text(&initial_rule_source)
         .build();
-    let import_rules = gtk::Button::with_label("Import");
-    import_rules.set_valign(gtk::Align::Center);
-    import_rules.add_css_class("suggested-action");
-    rule_source.add_suffix(&import_rules);
-    let rule_status = adw::ActionRow::builder().title("Imported Rules").build();
-    {
-        let settings = &config.borrow().settings;
-        let total = settings.imported_domain_rules.len() + settings.imported_ip_rules.len();
-        let subtitle = if total == 0 { "None".to_string() } else { format!("{total} rules") };
-        rule_status.set_subtitle(&subtitle);
-    }
-    routing_group.add(&policy);
-    routing_group.add(&ipv6);
-    routing_group.add(&rule_source);
-    routing_group.add(&rule_status);
-    routing_page.add(&routing_group);
+    let import_rules = gtk::Button::new();
+    import_rules.set_visible(false);
+    let configurations_group = adw::PreferencesGroup::builder().title("Configurations").build();
+    let import_button = gtk::Button::with_label("Import…");
+    import_button.set_valign(gtk::Align::Center);
+    import_button.add_css_class("suggested-action");
+    configurations_group.set_header_suffix(Some(&import_button));
+    let rule_status = adw::ActionRow::new();
+    rule_status.set_activatable(true);
+    rule_status.add_prefix(&gtk::Image::from_icon_name("object-select-symbolic"));
+    rule_status.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+    configurations_group.add(&rule_status);
+    overview_page.add(&configurations_group);
 
+    let custom_summary_group = adw::PreferencesGroup::builder().title("Custom Rules").build();
+    let custom_summary = adw::ActionRow::builder()
+        .title("Custom Overrides")
+        .activatable(true)
+        .build();
+    custom_summary.add_prefix(&gtk::Image::from_icon_name("document-edit-symbolic"));
+    custom_summary.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+    custom_summary_group.add(&custom_summary);
+    overview_page.add(&custom_summary_group);
+    domain_stack.add_named(&page_scroller(&overview_page), Some("overview"));
+
+    let detail_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let detail_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    detail_header.set_margin_start(12);
+    detail_header.set_margin_end(12);
+    detail_header.set_margin_top(8);
+    detail_header.set_margin_bottom(8);
+    let detail_back = gtk::Button::from_icon_name("go-previous-symbolic");
+    detail_back.add_css_class("flat");
+    detail_back.set_tooltip_text(Some("Back"));
+    detail_header.append(&detail_back);
+    let detail_title = gtk::Label::new(Some("Configuration"));
+    detail_title.add_css_class("title-4");
+    detail_title.set_halign(gtk::Align::Start);
+    detail_header.append(&detail_title);
+    detail_page.append(&detail_header);
+    detail_page.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    let detail_preferences = adw::PreferencesPage::new();
+    let source_group = adw::PreferencesGroup::builder().title("Source").build();
+    let source_detail = adw::ActionRow::new();
+    source_detail.add_prefix(&gtk::Image::from_icon_name("folder-download-symbolic"));
+    let update_source = gtk::Button::from_icon_name("view-refresh-symbolic");
+    update_source.add_css_class("flat");
+    update_source.set_tooltip_text(Some("Update Configuration"));
+    source_detail.add_suffix(&update_source);
+    let remove_source = gtk::Button::from_icon_name("user-trash-symbolic");
+    remove_source.add_css_class("flat");
+    remove_source.set_tooltip_text(Some("Remove Configuration"));
+    source_detail.add_suffix(&remove_source);
+    source_group.add(&source_detail);
+    detail_preferences.add(&source_group);
+    let contents_group = adw::PreferencesGroup::builder().title("Contents").build();
+    let imported_summary = adw::ActionRow::builder().title("Rules").activatable(true).build();
+    imported_summary.add_prefix(&gtk::Image::from_icon_name("view-list-symbolic"));
+    imported_summary.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+    contents_group.add(&imported_summary);
+    detail_preferences.add(&contents_group);
+    detail_page.append(&page_scroller(&detail_preferences));
+    domain_stack.add_named(&detail_page, Some("detail"));
+
+    let imported_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let imported_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    imported_header.set_margin_start(12);
+    imported_header.set_margin_end(12);
+    imported_header.set_margin_top(8);
+    imported_header.set_margin_bottom(8);
+    let imported_back = gtk::Button::from_icon_name("go-previous-symbolic");
+    imported_back.add_css_class("flat");
+    imported_back.set_tooltip_text(Some("Back"));
+    imported_header.append(&imported_back);
+    let imported_title = gtk::Label::new(Some("Rules"));
+    imported_title.add_css_class("title-4");
+    imported_header.append(&imported_title);
+    imported_page.append(&imported_header);
+    imported_page.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    let imported_search = gtk::SearchEntry::builder().placeholder_text("Search Rules").build();
+    imported_search.set_margin_start(18);
+    imported_search.set_margin_end(18);
+    imported_search.set_margin_top(12);
+    imported_search.set_margin_bottom(12);
+    imported_page.append(&imported_search);
+    let imported_body = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    imported_body.set_margin_start(18);
+    imported_body.set_margin_end(18);
+    imported_body.set_margin_bottom(18);
+    let imported_rules_group = adw::PreferencesGroup::builder().title("Imported Rules").build();
+    imported_body.append(&imported_rules_group);
+    let imported_load_more = gtk::Button::with_label("Load More");
+    imported_load_more.set_halign(gtk::Align::Center);
+    imported_body.append(&imported_load_more);
+    let imported_scroller = gtk::ScrolledWindow::builder()
+        .child(&imported_body)
+        .vexpand(true)
+        .build();
+    imported_page.append(&imported_scroller);
+    domain_stack.add_named(&imported_page, Some("imported"));
+
+    let custom_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let custom_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    custom_header.set_margin_start(12);
+    custom_header.set_margin_end(12);
+    custom_header.set_margin_top(8);
+    custom_header.set_margin_bottom(8);
+    let custom_back = gtk::Button::from_icon_name("go-previous-symbolic");
+    custom_back.add_css_class("flat");
+    custom_back.set_tooltip_text(Some("Back"));
+    custom_header.append(&custom_back);
+    let custom_title = gtk::Label::new(Some("Custom Rules"));
+    custom_title.add_css_class("title-4");
+    custom_header.append(&custom_title);
+    custom_page.append(&custom_header);
+    custom_page.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    let custom_search = gtk::SearchEntry::builder().placeholder_text("Search Rules").build();
+    custom_search.set_margin_start(18);
+    custom_search.set_margin_end(18);
+    custom_search.set_margin_top(12);
+    custom_search.set_margin_bottom(12);
+    custom_page.append(&custom_search);
+    let custom_body = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    custom_body.set_margin_start(18);
+    custom_body.set_margin_end(18);
+    custom_body.set_margin_bottom(18);
     let custom_rules_group = adw::PreferencesGroup::builder().title("Custom Rules").build();
+    let custom_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let clear_rules = gtk::Button::with_label("Clear");
+    clear_rules.add_css_class("destructive-action");
+    custom_actions.append(&clear_rules);
     let add_rule = gtk::Button::with_label("Add Rule");
     add_rule.add_css_class("suggested-action");
-    add_rule.set_valign(gtk::Align::Center);
-    custom_rules_group.set_header_suffix(Some(&add_rule));
-    {
-        let settings = &config.borrow().settings;
-        for rule in &settings.domain_rules {
-            add_domain_rule_row(
-                &custom_rules_group,
-                &config,
-                rule.pattern.clone(),
-                rule.kind,
-                rule.action,
-            );
-        }
-        for rule in &settings.ip_rules {
-            add_ip_rule_row(&custom_rules_group, &config, rule.network.to_string(), rule.action);
-        }
-    }
+    custom_actions.append(&add_rule);
+    custom_rules_group.set_header_suffix(Some(&custom_actions));
+    custom_body.append(&custom_rules_group);
+    let custom_load_more = gtk::Button::with_label("Load More");
+    custom_load_more.set_halign(gtk::Align::Center);
+    custom_body.append(&custom_load_more);
+    let custom_scroller = gtk::ScrolledWindow::builder().child(&custom_body).vexpand(true).build();
+    custom_page.append(&custom_scroller);
+    domain_stack.add_named(&custom_page, Some("custom"));
+
+    domain_stack.set_visible_child_name("overview");
     {
         let parent = window.clone();
         let config = config.clone();
-        let custom_rules_group = custom_rules_group.clone();
+        let refresh_rule_views = refresh_rule_views.clone();
         add_rule.connect_clicked(move |_| {
-            let dialog = adw::AlertDialog::new(Some("Add Rule"), None);
+            show_rule_dialog(
+                &parent,
+                config.clone(),
+                None,
+                refresh_rule_views.clone(),
+            );
+        });
+    }
+
+    let imported_state = Rc::new(RefCell::new(RuleListState::default()));
+    let custom_state = Rc::new(RefCell::new(RuleListState::default()));
+    {
+        let group = imported_rules_group.clone();
+        let state = imported_state.clone();
+        let load_more = imported_load_more.clone();
+        let parent = window.clone();
+        let config = config.clone();
+        let refresh = refresh_rule_views.clone();
+        imported_load_more.connect_clicked(move |_| {
+            append_rule_batch(&group, &state, &load_more, false, &parent, &config, &refresh);
+        });
+    }
+    {
+        let group = custom_rules_group.clone();
+        let state = custom_state.clone();
+        let load_more = custom_load_more.clone();
+        let parent = window.clone();
+        let config = config.clone();
+        let refresh = refresh_rule_views.clone();
+        custom_load_more.connect_clicked(move |_| {
+            append_rule_batch(&group, &state, &load_more, true, &parent, &config, &refresh);
+        });
+    }
+    {
+        let group = imported_rules_group.clone();
+        let state = imported_state.clone();
+        let load_more = imported_load_more.clone();
+        let parent = window.clone();
+        let config = config.clone();
+        let refresh = refresh_rule_views.clone();
+        imported_scroller.vadjustment().connect_value_changed(move |adjustment| {
+            if adjustment.value() + adjustment.page_size() >= adjustment.upper() - 160.0 {
+                append_rule_batch(&group, &state, &load_more, false, &parent, &config, &refresh);
+            }
+        });
+    }
+    {
+        let group = custom_rules_group.clone();
+        let state = custom_state.clone();
+        let load_more = custom_load_more.clone();
+        let parent = window.clone();
+        let config = config.clone();
+        let refresh = refresh_rule_views.clone();
+        custom_scroller.vadjustment().connect_value_changed(move |adjustment| {
+            if adjustment.value() + adjustment.page_size() >= adjustment.upper() - 160.0 {
+                append_rule_batch(&group, &state, &load_more, true, &parent, &config, &refresh);
+            }
+        });
+    }
+
+    let refresh_rule_views_impl: Rc<dyn Fn()> = {
+        let config = config.clone();
+        let rule_status = rule_status.clone();
+        let custom_summary = custom_summary.clone();
+        let detail_title = detail_title.clone();
+        let source_detail = source_detail.clone();
+        let imported_summary = imported_summary.clone();
+        let imported_search = imported_search.clone();
+        let imported_rules_group = imported_rules_group.clone();
+        let imported_state = imported_state.clone();
+        let imported_load_more = imported_load_more.clone();
+        let custom_search = custom_search.clone();
+        let custom_rules_group = custom_rules_group.clone();
+        let custom_state = custom_state.clone();
+        let custom_load_more = custom_load_more.clone();
+        let clear_rules = clear_rules.clone();
+        let parent = window.clone();
+        let refresh_rule_views = refresh_rule_views.clone();
+        Rc::new(move || {
+            let current = config.borrow();
+            let imported = imported_rules(&current);
+            let custom = custom_rules(&current);
+            let source_name = if current.settings.rule_source_name.is_empty() {
+                "Imported Configuration"
+            } else {
+                &current.settings.rule_source_name
+            };
+            if imported.is_empty() {
+                rule_status.set_title("No Configurations");
+                rule_status.set_subtitle("");
+                rule_status.set_activatable(false);
+            } else {
+                rule_status.set_title(source_name);
+                rule_status.set_subtitle(&format!("{} rules", imported.len()));
+                rule_status.set_activatable(true);
+            }
+            custom_summary.set_subtitle(&format!("{} rules", custom.len()));
+            detail_title.set_text(source_name);
+            source_detail.set_title(source_name);
+            source_detail.set_subtitle(&current.settings.rule_source_url);
+            let (direct, proxy, reject) = imported.iter().fold((0, 0, 0), |counts, rule| {
+                match rule.action() {
+                    RuleAction::Direct => (counts.0 + 1, counts.1, counts.2),
+                    RuleAction::Proxy => (counts.0, counts.1 + 1, counts.2),
+                    RuleAction::Block => (counts.0, counts.1, counts.2 + 1),
+                }
+            });
+            imported_summary.set_subtitle(&format!(
+                "{} rules · {direct} direct · {proxy} proxy · {reject} reject",
+                imported.len()
+            ));
+            clear_rules.set_visible(!custom.is_empty());
+            let imported_query = imported_search.text().to_string();
+            let custom_query = custom_search.text().to_string();
+            drop(current);
+            refresh_rule_list(
+                &imported_rules_group,
+                &imported_state,
+                &imported_load_more,
+                imported,
+                &imported_query,
+                false,
+                &parent,
+                &config,
+                &refresh_rule_views,
+            );
+            refresh_rule_list(
+                &custom_rules_group,
+                &custom_state,
+                &custom_load_more,
+                custom,
+                &custom_query,
+                true,
+                &parent,
+                &config,
+                &refresh_rule_views,
+            );
+        })
+    };
+    *refresh_rule_views.borrow_mut() = Some(refresh_rule_views_impl.clone());
+    refresh_rule_views_impl();
+
+    {
+        let refresh = refresh_rule_views_impl.clone();
+        imported_search.connect_search_changed(move |_| refresh());
+    }
+    {
+        let refresh = refresh_rule_views_impl.clone();
+        custom_search.connect_search_changed(move |_| refresh());
+    }
+    {
+        let stack = domain_stack.clone();
+        rule_status.connect_activated(move |_| stack.set_visible_child_name("detail"));
+    }
+    {
+        let stack = domain_stack.clone();
+        custom_summary.connect_activated(move |_| stack.set_visible_child_name("custom"));
+    }
+    {
+        let stack = domain_stack.clone();
+        detail_back.connect_clicked(move |_| stack.set_visible_child_name("overview"));
+    }
+    {
+        let stack = domain_stack.clone();
+        imported_summary.connect_activated(move |_| stack.set_visible_child_name("imported"));
+    }
+    {
+        let stack = domain_stack.clone();
+        imported_back.connect_clicked(move |_| stack.set_visible_child_name("detail"));
+    }
+    {
+        let stack = domain_stack.clone();
+        custom_back.connect_clicked(move |_| stack.set_visible_child_name("overview"));
+    }
+    {
+        let parent = window.clone();
+        let trigger = import_rules.clone();
+        let rule_source = rule_source.clone();
+        import_button.connect_clicked(move |_| {
+            let dialog = adw::AlertDialog::new(Some("Import Configuration"), None);
             let group = adw::PreferencesGroup::new();
-            let pattern = adw::EntryRow::builder().title("Domain, IP, or CIDR").build();
-            let rule_type = adw::ComboRow::builder()
-                .title("Rule Type")
-                .model(&gtk::StringList::new(&[
-                    "DOMAIN-SUFFIX",
-                    "DOMAIN",
-                    "DOMAIN-KEYWORD",
-                    "IP-CIDR",
-                ]))
+            let url = adw::EntryRow::builder()
+                .title("HTTPS URL")
+                .text(rule_source.text())
                 .build();
-            let action = adw::ComboRow::builder()
-                .title("Action")
-                .model(&gtk::StringList::new(&["DIRECT", "PROXY", "REJECT"]))
-                .selected(1)
-                .build();
-            group.add(&pattern);
-            group.add(&rule_type);
-            group.add(&action);
+            group.add(&url);
             dialog.set_extra_child(Some(&group));
             dialog.add_response("cancel", "Cancel");
-            dialog.add_response("save", "Save");
-            dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
-            let config = config.clone();
-            let custom_rules_group = custom_rules_group.clone();
-            dialog.connect_response(None, move |dialog, response| {
-                if response != "save" {
-                    return;
-                }
-                let value = pattern.text().trim().to_string();
-                if value.is_empty() {
-                    dialog.set_body("Enter a domain, IP, or CIDR.");
-                    return;
-                }
-                let rule_type_text = match rule_type.selected() {
-                    1 => "DOMAIN",
-                    2 => "DOMAIN-KEYWORD",
-                    3 => "IP-CIDR",
-                    _ => "DOMAIN-SUFFIX",
-                };
-                let selected_action = match action.selected() {
-                    0 => RuleAction::Direct,
-                    2 => RuleAction::Block,
-                    _ => RuleAction::Proxy,
-                };
-                let parsed = parse_rule_set(&format!("{rule_type_text},{value}"), selected_action);
-                if parsed.rule_count() != 1 {
-                    dialog.set_body("The rule is invalid.");
-                    return;
-                }
-
-                if let Some(rule) = parsed.domain_rules.into_iter().next() {
-                    {
-                        let mut current = config.borrow_mut();
-                        current.settings.domain_rules.retain(|existing| {
-                            !(existing.pattern == rule.pattern && existing.kind == rule.kind)
-                        });
-                        current.settings.domain_rules.push(rule.clone());
-                        if current.save().is_err() {
-                            dialog.set_body("Failed to save the rule.");
-                            return;
-                        }
-                    }
-                    add_domain_rule_row(
-                        &custom_rules_group,
-                        &config,
-                        rule.pattern,
-                        rule.kind,
-                        rule.action,
-                    );
-                } else if let Some(rule) = parsed.ip_rules.into_iter().next() {
-                    let network = rule.network.to_string();
-                    {
-                        let mut current = config.borrow_mut();
-                        current.settings.ip_rules.retain(|existing| existing.network != rule.network);
-                        current.settings.ip_rules.push(rule.clone());
-                        if current.save().is_err() {
-                            dialog.set_body("Failed to save the rule.");
-                            return;
-                        }
-                    }
-                    add_ip_rule_row(&custom_rules_group, &config, network, rule.action);
+            dialog.add_response("import", "Import");
+            dialog.set_response_appearance("import", adw::ResponseAppearance::Suggested);
+            let trigger = trigger.clone();
+            let rule_source = rule_source.clone();
+            dialog.connect_response(None, move |_, response| {
+                if response == "import" {
+                    rule_source.set_text(url.text().trim());
+                    trigger.emit_clicked();
                 }
             });
             dialog.present(Some(&parent));
         });
     }
-    routing_page.add(&custom_rules_group);
-    rules_stack.add_titled(&page_scroller(&routing_page), Some("routing"), "Domains & IPs");
+    {
+        let trigger = import_rules.clone();
+        let rule_source = rule_source.clone();
+        let config = config.clone();
+        update_source.connect_clicked(move |_| {
+            rule_source.set_text(&config.borrow().settings.rule_source_url);
+            trigger.emit_clicked();
+        });
+    }
+    {
+        let parent = window.clone();
+        let config = config.clone();
+        let stack = domain_stack.clone();
+        let refresh = refresh_rule_views.clone();
+        remove_source.connect_clicked(move |_| {
+            let dialog = adw::AlertDialog::new(Some("Remove Configuration?"), None);
+            dialog.add_response("cancel", "Cancel");
+            dialog.add_response("remove", "Remove");
+            dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+            let config = config.clone();
+            let stack = stack.clone();
+            let refresh = refresh.clone();
+            dialog.connect_response(None, move |_, response| {
+                if response == "remove" {
+                    let mut current = config.borrow_mut();
+                    current.settings.imported_domain_rules.clear();
+                    current.settings.imported_ip_rules.clear();
+                    current.settings.rule_source_url.clear();
+                    current.settings.rule_source_name.clear();
+                    current.settings.rule_source_updated_at = 0;
+                    if current.save().is_ok() {
+                        drop(current);
+                        stack.set_visible_child_name("overview");
+                        if let Some(refresh) = refresh.borrow().as_ref() {
+                            refresh();
+                        }
+                    }
+                }
+            });
+            dialog.present(Some(&parent));
+        });
+    }
+    {
+        let parent = window.clone();
+        let config = config.clone();
+        let refresh = refresh_rule_views.clone();
+        clear_rules.connect_clicked(move |_| {
+            let dialog = adw::AlertDialog::new(Some("Clear Custom Rules?"), None);
+            dialog.add_response("cancel", "Cancel");
+            dialog.add_response("clear", "Clear");
+            dialog.set_response_appearance("clear", adw::ResponseAppearance::Destructive);
+            let config = config.clone();
+            let refresh = refresh.clone();
+            dialog.connect_response(None, move |_, response| {
+                if response == "clear" {
+                    let mut current = config.borrow_mut();
+                    current.settings.domain_rules.clear();
+                    current.settings.ip_rules.clear();
+                    if current.save().is_ok() {
+                        drop(current);
+                        if let Some(refresh) = refresh.borrow().as_ref() {
+                            refresh();
+                        }
+                    }
+                }
+            });
+            dialog.present(Some(&parent));
+        });
+    }
+    rules_stack.add_titled(&routing_page, Some("routing"), "Domains & IPs");
 
     let blocked_page = adw::PreferencesPage::new();
     let blocked_group = adw::PreferencesGroup::builder().title("Blocked Applications").build();
@@ -1001,7 +1536,13 @@ fn build_ui(app: &adw::Application) {
     traffic_page.add(&traffic_rules_group);
     view_stack.add_named(&page_scroller(&traffic_page), Some("traffic"));
 
-    let log_page = adw::PreferencesPage::new();
+    let log_page = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    log_page.set_margin_start(18);
+    log_page.set_margin_end(18);
+    log_page.set_margin_top(18);
+    log_page.set_margin_bottom(18);
+    log_page.set_hexpand(true);
+    log_page.set_vexpand(true);
     let log_group = adw::PreferencesGroup::builder().title("Proxy Logs").build();
     let log_actions = adw::ActionRow::builder().title("SSH and routing output").build();
     let copy_logs = gtk::Button::from_icon_name("edit-copy-symbolic");
@@ -1013,6 +1554,7 @@ fn build_ui(app: &adw::Application) {
     clear_logs.set_tooltip_text(Some("Clear logs"));
     log_actions.add_suffix(&clear_logs);
     log_group.add(&log_actions);
+    log_page.append(&log_group);
     let log_view = gtk::TextView::builder()
         .editable(false)
         .cursor_visible(false)
@@ -1023,11 +1565,11 @@ fn build_ui(app: &adw::Application) {
     let log_scroller = gtk::ScrolledWindow::builder()
         .child(&log_view)
         .min_content_height(180)
+        .hexpand(true)
         .vexpand(true)
         .build();
-    log_group.add(&log_scroller);
-    log_page.add(&log_group);
-    view_stack.add_named(&page_scroller(&log_page), Some("logs"));
+    log_page.append(&log_scroller);
+    view_stack.add_named(&log_page, Some("logs"));
 
     {
         let log_buffer = log_buffer.clone();
@@ -1409,6 +1951,7 @@ fn build_ui(app: &adw::Application) {
         let event_tx = event_tx.clone();
         let rule_source = rule_source.clone();
         let import_rules = import_rules.clone();
+        let import_button = import_button.clone();
         let rule_status = rule_status.clone();
         import_rules.clone().connect_clicked(move |_| {
             let url = rule_source.text().trim().to_string();
@@ -1417,6 +1960,7 @@ fn build_ui(app: &adw::Application) {
                 return;
             }
             import_rules.set_sensitive(false);
+            import_button.set_sensitive(false);
             rule_status.set_subtitle("Downloading and parsing…");
             let events = event_tx.clone();
             thread::spawn(move || match import_rule_source(&url) {
@@ -1436,6 +1980,8 @@ fn build_ui(app: &adw::Application) {
         let policy = policy.clone();
         let rule_status = rule_status.clone();
         let import_rules = import_rules.clone();
+        let import_button = import_button.clone();
+        let refresh_rule_views = refresh_rule_views.clone();
         let log_buffer = log_buffer.clone();
         let log_view = log_view.clone();
         let bottom_status = bottom_status.clone();
@@ -1491,6 +2037,7 @@ fn build_ui(app: &adw::Application) {
                             button.set_sensitive(true);
                         }
                         import_rules.set_sensitive(true);
+                        import_button.set_sensitive(true);
                     }
                     RuntimeEvent::Log(line) => {
                         let mut end = log_buffer.end_iter();
@@ -1516,6 +2063,7 @@ fn build_ui(app: &adw::Application) {
                     RuntimeEvent::RuleImportFailed(error) => {
                         rule_status.set_subtitle(&format!("Import failed: {error}"));
                         import_rules.set_sensitive(true);
+                        import_button.set_sensitive(true);
                     }
                     RuntimeEvent::RulesImported { result, source_url } => {
                         let (direct, proxy, block) = result.action_counts();
@@ -1525,14 +2073,15 @@ fn build_ui(app: &adw::Application) {
                             current.settings.imported_domain_rules = result.domain_rules;
                             current.settings.imported_ip_rules = result.ip_rules;
                             current.settings.default_policy = result.default_policy;
+                            current.settings.rule_source_name = rule_source_name(&source_url);
                             current.settings.rule_source_url = source_url;
-                            current.settings.rule_source_name = "Shadowrocket Rule Source".into();
                             current.settings.rule_source_updated_at = SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
                                 .map_or(0, |duration| duration.as_secs() as i64);
                             if let Err(error) = current.save() {
                                 rule_status.set_subtitle(&format!("Config error: {error}"));
                                 import_rules.set_sensitive(true);
+                                import_button.set_sensitive(true);
                                 continue;
                             }
                         }
@@ -1555,6 +2104,10 @@ fn build_ui(app: &adw::Application) {
                             log_buffer.insert(&mut end, &format!("[rules] warning: {warning}\n"));
                         }
                         import_rules.set_sensitive(true);
+                        import_button.set_sensitive(true);
+                        if let Some(refresh) = refresh_rule_views.borrow().as_ref() {
+                            refresh();
+                        }
                     }
                 }
             }
