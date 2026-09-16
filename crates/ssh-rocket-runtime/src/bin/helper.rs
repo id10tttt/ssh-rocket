@@ -5,9 +5,10 @@ use ssh_rocket_runtime::ipc::{HelperCommand, HelperEvent};
 use std::{
     collections::HashMap,
     env,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
     process::Stdio,
+    sync::Arc,
     time::Duration,
 };
 use tokio::{
@@ -346,7 +347,7 @@ async fn start_proxy_session(
     };
 
     // 2. 绑定 DNS 路由
-    let dns_socket = match UdpSocket::bind(("127.0.0.1", DNS_LISTEN_PORT)).await {
+    let dns_socket = match UdpSocket::bind(("0.0.0.0", DNS_LISTEN_PORT)).await {
         Ok(socket) => socket,
         Err(error) => {
             shutdown.cancel();
@@ -633,8 +634,6 @@ impl SystemState {
             .await?;
         }
         command("nft", &["add", "rule", "inet", NFT_TABLE, "dns_output", "meta", "skuid", "0", "return"]).await?;
-        command("nft", &["add", "rule", "inet", NFT_TABLE, "dns_output", "ip", "daddr", "223.5.5.5", "return"]).await?;
-        command("nft", &["add", "rule", "inet", NFT_TABLE, "dns_output", "ip", "daddr", "114.114.114.114", "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "dns_output", "udp", "dport", "53", "redirect", "to", &format!(":{DNS_LISTEN_PORT}")]).await?;
 
         self.install_ip_rules(&self.config.settings.custom_overrides).await?;
@@ -752,60 +751,77 @@ async fn run_dns_router(
     ipv6_enabled: bool,
     shutdown: CancellationToken,
 ) -> Result<()> {
+    let socket = Arc::new(socket);
+    let routing_engine = Arc::new(routing_engine);
     let mut buffer = [0_u8; 4096];
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => return Ok(()),
             received = socket.recv_from(&mut buffer) => {
                 let (size, peer) = received?;
-                let packet = &buffer[..size];
-                let Some((domain, qtype)) = parse_dns_query(packet) else {
-                    continue;
-                };
-
-                // 如果未开启 IPv6，对 AAAA 查询 (type 28) 立即返回 NODATA，促使客户端秒级回退至 IPv4
-                if !ipv6_enabled && qtype == 28 {
-                    let response = nodata_response(packet);
-                    let _ = socket.send_to(&response, peer).await;
-                    continue;
-                }
-
-                let decision = routing_engine.decide(&FlowContext {
-                    domain: Some(domain.clone()),
-                    ..FlowContext::default()
+                let packet = buffer[..size].to_vec();
+                let socket = socket.clone();
+                let routing_engine = routing_engine.clone();
+                tokio::spawn(async move {
+                    handle_dns_query(socket, peer, packet, remote_dns_port, routing_engine, ipv6_enabled).await;
                 });
-                eprintln!("[routing] {} (type {qtype}) -> {:?} ({:?})", domain, decision.action, decision.source);
-
-                if decision.action == RuleAction::Block {
-                    let response = nxdomain_response(packet);
-                    let _ = socket.send_to(&response, peer).await;
-                    continue;
-                }
-
-                let resolve_result = if decision.action == RuleAction::Direct {
-                    forward_dns_local(packet).await
-                } else {
-                    forward_dns_over_tcp(remote_dns_port, packet).await
-                };
-
-                let response = match resolve_result {
-                    Ok(resp) => resp,
-                    Err(err) => {
-                        eprintln!("[dns] resolution failed for {domain}: {err}");
-                        let servfail = servfail_response(packet);
-                        let _ = socket.send_to(&servfail, peer).await;
-                        continue;
-                    }
-                };
-
-                let _ = socket.send_to(&response, peer).await;
-
-                let addresses = parse_dns_addresses(&response);
-                if !addresses.is_empty() {
-                    update_domain_addresses(&addresses, decision.action).await;
-                }
             }
         }
+    }
+}
+
+async fn handle_dns_query(
+    socket: Arc<UdpSocket>,
+    peer: SocketAddr,
+    packet: Vec<u8>,
+    remote_dns_port: u16,
+    routing_engine: Arc<RoutingEngine>,
+    ipv6_enabled: bool,
+) {
+    let Some((domain, qtype)) = parse_dns_query(&packet) else {
+        return;
+    };
+
+    // 如果未开启 IPv6，对 AAAA 查询 (type 28) 立即返回 NODATA，促使客户端秒级回退至 IPv4
+    if !ipv6_enabled && qtype == 28 {
+        let response = nodata_response(&packet);
+        let _ = socket.send_to(&response, peer).await;
+        return;
+    }
+
+    let decision = routing_engine.decide(&FlowContext {
+        domain: Some(domain.clone()),
+        ..FlowContext::default()
+    });
+    eprintln!("[routing] {} (type {qtype}) -> {:?} ({:?})", domain, decision.action, decision.source);
+
+    if decision.action == RuleAction::Block {
+        let response = nxdomain_response(&packet);
+        let _ = socket.send_to(&response, peer).await;
+        return;
+    }
+
+    let resolve_result = if decision.action == RuleAction::Direct {
+        forward_dns_local(&packet).await
+    } else {
+        forward_dns_over_tcp(remote_dns_port, &packet).await
+    };
+
+    let response = match resolve_result {
+        Ok(resp) => resp,
+        Err(err) => {
+            eprintln!("[dns] resolution failed for {domain}: {err}");
+            let servfail = servfail_response(&packet);
+            let _ = socket.send_to(&servfail, peer).await;
+            return;
+        }
+    };
+
+    let _ = socket.send_to(&response, peer).await;
+
+    let addresses = parse_dns_addresses(&response);
+    if !addresses.is_empty() {
+        update_domain_addresses(&addresses, decision.action).await;
     }
 }
 
@@ -980,7 +996,7 @@ async fn update_domain_addresses(addresses: &[IpAddr], action: RuleAction) {
         let value = address.to_string();
         for category in ["proxy", "direct", "block"] {
             if category != target_cat {
-                batch.push_str(&format!("delete element inet {NFT_TABLE} domain_{category}{suffix} {{ {value} }}\n"));
+                batch.push_str(&format!("destroy element inet {NFT_TABLE} domain_{category}{suffix} {{ {value} }}\n"));
             }
         }
         batch.push_str(&format!("add element inet {NFT_TABLE} domain_{target_cat}{suffix} {{ {value} timeout 300s }}\n"));
@@ -990,13 +1006,18 @@ async fn update_domain_addresses(addresses: &[IpAddr], action: RuleAction) {
         .arg("-")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
     {
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(batch.as_bytes()).await;
         }
-        let _ = child.wait().await;
+        if let Ok(output) = child.wait_with_output().await {
+            if !output.status.success() {
+                let err = String::from_utf8_lossy(&output.stderr);
+                eprintln!("[nft] update_domain_addresses failed: {err}");
+            }
+        }
     }
 }
 
