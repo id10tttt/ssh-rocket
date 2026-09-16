@@ -1,11 +1,11 @@
 mod tray;
 
 use adw::prelude::*;
-use gtk4 as gtk;
+use gtk4::{self as gtk, gio};
 use libadwaita as adw;
 use ssh_rocket_core::{
     AppConfig, AppRule, DomainRule, DomainRuleKind, IpRule, Profile, RuleAction, RuleImportResult,
-    parse_rule_set, parse_shadowrocket_rules,
+    parse_omega_rules, parse_rule_set, parse_shadowrocket_rules,
 };
 use ssh_rocket_runtime::{PrivilegedHelperSession, SshSession};
 use tray::{TrayConnectionState, TrayManager};
@@ -1572,6 +1572,8 @@ fn build_ui(app: &adw::Application) {
     custom_body.set_margin_bottom(18);
     let custom_rules_group = adw::PreferencesGroup::builder().title("Custom Rules").build();
     let custom_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let import_rules = gtk::Button::with_label("Import");
+    custom_actions.append(&import_rules);
     let clear_rules = gtk::Button::with_label("Clear");
     clear_rules.add_css_class("destructive-action");
     custom_actions.append(&clear_rules);
@@ -1869,6 +1871,144 @@ fn build_ui(app: &adw::Application) {
                 }
             });
             dialog.present(Some(&parent));
+        });
+    }
+    {
+        let parent = window.clone();
+        let config = config.clone();
+        let refresh = refresh_rule_views.clone();
+        import_rules.connect_clicked(move |_| {
+            let file_dialog = gtk::FileDialog::builder()
+                .title("Import Omega Configuration")
+                .accept_label("Open")
+                .build();
+
+            let filter = gtk::FileFilter::new();
+            filter.add_pattern("*.bak");
+            filter.add_pattern("*.json");
+            filter.set_name(Some("Omega Backup (*.bak, *.json)"));
+
+            let all_filter = gtk::FileFilter::new();
+            all_filter.add_pattern("*");
+            all_filter.set_name(Some("All Files"));
+
+            let filters = gio::ListStore::new::<gtk::FileFilter>();
+            filters.append(&filter);
+            filters.append(&all_filter);
+            file_dialog.set_filters(Some(&filters));
+
+            let dialog_parent = parent.clone();
+            let config = config.clone();
+            let refresh = refresh.clone();
+            file_dialog.open(Some(&parent), gio::Cancellable::NONE, move |result| {
+                let parent = dialog_parent;
+                let Ok(file) = result else {
+                    return;
+                };
+                let Some(path) = file.path() else {
+                    return;
+                };
+                let content = match fs::read_to_string(&path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let dialog = adw::AlertDialog::new(
+                            Some("Import Failed"),
+                            Some(&format!("Failed to read file: {e}")),
+                        );
+                        dialog.add_response("ok", "OK");
+                        dialog.present(Some(&parent));
+                        return;
+                    }
+                };
+
+                let parsed = match parse_omega_rules(&content) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let dialog = adw::AlertDialog::new(
+                            Some("Import Failed"),
+                            Some(&format!("Failed to parse configuration: {e}")),
+                        );
+                        dialog.add_response("ok", "OK");
+                        dialog.present(Some(&parent));
+                        return;
+                    }
+                };
+
+                let rule_count = parsed.rule_count();
+                let domain_count = parsed.domain_rules.len();
+                let ip_count = parsed.ip_rules.len();
+                let file_name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("backup file");
+
+                let dialog = adw::AlertDialog::new(
+                    Some("Import Omega Rules"),
+                    Some(&format!(
+                        "Found {rule_count} rules ({domain_count} domain, {ip_count} IP) in \"{file_name}\".\n\nChoose how to import:",
+                    )),
+                );
+                dialog.add_response("cancel", "Cancel");
+                dialog.add_response("replace", "Replace All");
+                dialog.set_response_appearance("replace", adw::ResponseAppearance::Destructive);
+                dialog.add_response("merge", "Merge");
+                dialog.set_response_appearance("merge", adw::ResponseAppearance::Suggested);
+
+                let config = config.clone();
+                let refresh = refresh.clone();
+                let err_parent = parent.clone();
+                dialog.connect_response(None, move |_, response| {
+                    if response == "cancel" {
+                        return;
+                    }
+                    let mut current = config.borrow_mut();
+                    if response == "replace" {
+                        current.settings.domain_rules = parsed.domain_rules.clone();
+                        current.settings.ip_rules = parsed.ip_rules.clone();
+                    } else if response == "merge" {
+                        for new_domain in &parsed.domain_rules {
+                            if let Some(existing) = current
+                                .settings
+                                .domain_rules
+                                .iter_mut()
+                                .find(|item| item.pattern == new_domain.pattern && item.kind == new_domain.kind)
+                            {
+                                existing.action = new_domain.action;
+                            } else {
+                                current.settings.domain_rules.push(new_domain.clone());
+                            }
+                        }
+                        for new_ip in &parsed.ip_rules {
+                            if let Some(existing) = current
+                                .settings
+                                .ip_rules
+                                .iter_mut()
+                                .find(|item| item.network == new_ip.network)
+                            {
+                                existing.action = new_ip.action;
+                            } else {
+                                current.settings.ip_rules.push(new_ip.clone());
+                            }
+                        }
+                    }
+
+                    if let Err(e) = current.save() {
+                        let err_dialog = adw::AlertDialog::new(
+                            Some("Save Failed"),
+                            Some(&format!("Failed to save rules: {e}")),
+                        );
+                        err_dialog.add_response("ok", "OK");
+                        err_dialog.present(Some(&err_parent));
+                        return;
+                    }
+                    drop(current);
+                    if let Some(refresh) = refresh.borrow().as_ref() {
+                        refresh();
+                    }
+                });
+
+                dialog.present(Some(&parent));
+            });
         });
     }
     rules_stack.add_titled(&routing_page, Some("routing"), "Domains & IPs");
