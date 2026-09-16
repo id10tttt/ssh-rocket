@@ -82,16 +82,15 @@ impl RoutingEngine {
 
 fn domain_matches_rule(rule: &DomainRule, domain: &str) -> bool {
     let pattern = rule.pattern.trim().trim_end_matches('.').to_ascii_lowercase();
+    let clean_pattern = pattern.trim_start_matches('*').trim_start_matches('.');
     match rule.kind {
-        DomainRuleKind::Domain => domain == pattern,
-        DomainRuleKind::DomainSuffix => domain == pattern || domain.ends_with(&format!(".{pattern}")),
-        DomainRuleKind::DomainKeyword => domain.contains(&pattern),
+        DomainRuleKind::Domain => domain == pattern || domain == clean_pattern,
+        DomainRuleKind::DomainSuffix => {
+            domain == clean_pattern || domain.ends_with(&format!(".{clean_pattern}"))
+        }
+        DomainRuleKind::DomainKeyword => domain.contains(&clean_pattern),
         DomainRuleKind::Legacy => {
-            if let Some(suffix) = pattern.strip_prefix("*.") {
-                domain == suffix || domain.ends_with(&format!(".{suffix}"))
-            } else {
-                domain == pattern
-            }
+            domain == clean_pattern || domain.ends_with(&format!(".{clean_pattern}"))
         }
     }
 }
@@ -126,5 +125,38 @@ mod tests {
         });
         assert_eq!(decision.action, RuleAction::Block);
         assert_eq!(decision.source, MatchSource::CustomOverride);
+    }
+
+    #[test]
+    fn test_wildcard_domain_matching() {
+        let mut settings = GlobalSettings::default();
+        settings.default_policy = RuleAction::Direct;
+        settings.domain_rules.push(DomainRule {
+            pattern: "*.reddit.com".into(),
+            action: RuleAction::Proxy,
+            kind: DomainRuleKind::DomainSuffix,
+        });
+
+        let engine = RoutingEngine::new(settings);
+        let d1 = engine.decide(&FlowContext {
+            domain: Some("reddit.com".into()),
+            ..FlowContext::default()
+        });
+        assert_eq!(d1.action, RuleAction::Proxy);
+        assert_eq!(d1.source, MatchSource::DomainRule);
+
+        let d2 = engine.decide(&FlowContext {
+            domain: Some("www.reddit.com".into()),
+            ..FlowContext::default()
+        });
+        assert_eq!(d2.action, RuleAction::Proxy);
+        assert_eq!(d2.source, MatchSource::DomainRule);
+
+        let d3 = engine.decide(&FlowContext {
+            domain: Some("notreddit.com".into()),
+            ..FlowContext::default()
+        });
+        assert_eq!(d3.action, RuleAction::Direct);
+        assert_eq!(d3.source, MatchSource::DefaultPolicy);
     }
 }

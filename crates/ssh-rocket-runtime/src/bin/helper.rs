@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use ipnet::IpNet;
-use ssh_rocket_core::{AppConfig, FlowContext, MatchSource, RoutingEngine, RuleAction};
+use ssh_rocket_core::{AppConfig, FlowContext, RoutingEngine, RuleAction};
 use ssh_rocket_runtime::ipc::{HelperCommand, HelperEvent};
 use std::{
     collections::HashMap,
@@ -211,6 +211,10 @@ async fn run_daemon() -> Result<()> {
                 send_event(&mut stdout, &HelperEvent::Error { message: msg }).await?;
             }
             _ = app_scan.tick() => {
+                if unsafe { libc::getppid() } == 1 {
+                    eprintln!("[helper] parent process exited (orphaned), exiting daemon");
+                    break;
+                }
                 if let Some(session) = active_session.as_mut() {
                     if let Err(error) = session.system.assign_apps().await {
                         eprintln!("app rule synchronization failed: {error}");
@@ -374,8 +378,9 @@ async fn start_proxy_session(
 
     let dns_shutdown = shutdown.clone();
     let routing_engine = RoutingEngine::new(config.settings.clone());
+    let ipv6_enabled = config.settings.ipv6;
     let dns_task = tokio::spawn(async move {
-        run_dns_router(dns_socket, dns_port, routing_engine, dns_shutdown).await
+        run_dns_router(dns_socket, dns_port, routing_engine, ipv6_enabled, dns_shutdown).await
     });
 
     Ok(ActiveSession {
@@ -425,6 +430,10 @@ async fn run_oneshot(
                 break;
             }
             _ = app_scan.tick() => {
+                if unsafe { libc::getppid() } == 1 {
+                    eprintln!("[helper] parent process exited (orphaned), exiting oneshot");
+                    break;
+                }
                 if let Err(error) = session.system.assign_apps().await {
                     eprintln!("app rule synchronization failed: {error}");
                 }
@@ -437,6 +446,18 @@ async fn run_oneshot(
 }
 
 async fn clean_stale_resources() {
+    let my_pid = std::process::id();
+    if let Ok(mut entries) = tokio::fs::read_dir("/proc").await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else { continue; };
+            if pid == my_pid { continue; }
+            if let Ok(cmdline) = tokio::fs::read_to_string(format!("/proc/{pid}/cmdline")).await {
+                if cmdline.contains("ssh-rocket-helper") {
+                    unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+                }
+            }
+        }
+    }
     let _ = command("nft", &["delete", "table", "inet", NFT_TABLE]).await;
     let _ = command("ip", &["-4", "rule", "del", "priority", TABLE]).await;
     let _ = command("ip", &["-6", "rule", "del", "priority", TABLE]).await;
@@ -584,8 +605,11 @@ impl SystemState {
 
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "meta", "skuid", "!=", &self.uid.to_string(), "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip", "daddr", "127.0.0.0/8", "return"]).await?;
+        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip6", "daddr", "::1", "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "tcp", "dport", &self.socks_port.to_string(), "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "tcp", "dport", &self.dns_port.to_string(), "return"]).await?;
+        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip", "daddr", "223.5.5.5", "return"]).await?;
+        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip", "daddr", "114.114.114.114", "return"]).await?;
         for address in &self.ssh_addresses {
             let family = if address.is_ipv4() { "ip" } else { "ip6" };
             let address = address.to_string();
@@ -608,7 +632,9 @@ impl SystemState {
             )
             .await?;
         }
-        command("nft", &["add", "rule", "inet", NFT_TABLE, "dns_output", "meta", "skuid", "!=", &self.uid.to_string(), "return"]).await?;
+        command("nft", &["add", "rule", "inet", NFT_TABLE, "dns_output", "meta", "skuid", "0", "return"]).await?;
+        command("nft", &["add", "rule", "inet", NFT_TABLE, "dns_output", "ip", "daddr", "223.5.5.5", "return"]).await?;
+        command("nft", &["add", "rule", "inet", NFT_TABLE, "dns_output", "ip", "daddr", "114.114.114.114", "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "dns_output", "udp", "dport", "53", "redirect", "to", &format!(":{DNS_LISTEN_PORT}")]).await?;
 
         self.install_ip_rules(&self.config.settings.custom_overrides).await?;
@@ -618,7 +644,10 @@ impl SystemState {
         self.install_ip_rules(&self.config.settings.imported_ip_rules).await?;
 
         match self.config.settings.default_policy {
-            RuleAction::Proxy => command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "meta", "l4proto", "tcp", "meta", "mark", "set", MARK]).await?,
+            RuleAction::Proxy => {
+                command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "udp", "dport", "443", "reject"]).await?;
+                command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "meta", "l4proto", "tcp", "meta", "mark", "set", MARK]).await?;
+            }
             RuleAction::Block => command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "meta", "l4proto", "tcp", "reject"]).await?,
             RuleAction::Direct => {}
         }
@@ -641,6 +670,7 @@ impl SystemState {
             let suffix = if family == "ip" { "4" } else { "6" };
             command("nft", &["add", "rule", "inet", NFT_TABLE, "output", family, "daddr", &format!("@domain_block{suffix}"), "reject"]).await?;
             command("nft", &["add", "rule", "inet", NFT_TABLE, "output", family, "daddr", &format!("@domain_direct{suffix}"), "return"]).await?;
+            command("nft", &["add", "rule", "inet", NFT_TABLE, "output", family, "daddr", &format!("@domain_proxy{suffix}"), "udp", "dport", "443", "reject"]).await?;
             command("nft", &["add", "rule", "inet", NFT_TABLE, "output", family, "daddr", &format!("@domain_proxy{suffix}"), "meta", "l4proto", "tcp", "meta", "mark", "set", MARK, "return"]).await?;
         }
         Ok(())
@@ -654,11 +684,22 @@ impl SystemState {
         ] {
             let mut args = vec!["add", "rule", "inet", NFT_TABLE, "output", "socket", "cgroupv2", "level", "1", group];
             match action {
-                RuleAction::Block => args.push("reject"),
-                RuleAction::Direct => args.push("return"),
-                RuleAction::Proxy => args.extend(["meta", "l4proto", "tcp", "meta", "mark", "set", MARK, "return"]),
+                RuleAction::Block => {
+                    args.push("reject");
+                    command("nft", &args).await?;
+                }
+                RuleAction::Direct => {
+                    args.push("return");
+                    command("nft", &args).await?;
+                }
+                RuleAction::Proxy => {
+                    let mut reject_quic = args.clone();
+                    reject_quic.extend(["udp", "dport", "443", "reject"]);
+                    command("nft", &reject_quic).await?;
+                    args.extend(["meta", "l4proto", "tcp", "meta", "mark", "set", MARK, "return"]);
+                    command("nft", &args).await?;
+                }
             }
-            command("nft", &args).await?;
         }
         Ok(())
     }
@@ -672,11 +713,22 @@ impl SystemState {
             let network = rule.network.to_string();
             let mut args = vec!["add", "rule", "inet", NFT_TABLE, "output", family, "daddr", network.as_str()];
             match rule.action {
-                RuleAction::Block => args.push("reject"),
-                RuleAction::Direct => args.push("return"),
-                RuleAction::Proxy => args.extend(["meta", "l4proto", "tcp", "meta", "mark", "set", MARK, "return"]),
+                RuleAction::Block => {
+                    args.push("reject");
+                    command("nft", &args).await?;
+                }
+                RuleAction::Direct => {
+                    args.push("return");
+                    command("nft", &args).await?;
+                }
+                RuleAction::Proxy => {
+                    let mut reject_quic = args.clone();
+                    reject_quic.extend(["udp", "dport", "443", "reject"]);
+                    command("nft", &reject_quic).await?;
+                    args.extend(["meta", "l4proto", "tcp", "meta", "mark", "set", MARK, "return"]);
+                    command("nft", &args).await?;
+                }
             }
-            command("nft", &args).await?;
         }
         Ok(())
     }
@@ -697,6 +749,7 @@ async fn run_dns_router(
     socket: UdpSocket,
     remote_dns_port: u16,
     routing_engine: RoutingEngine,
+    ipv6_enabled: bool,
     shutdown: CancellationToken,
 ) -> Result<()> {
     let mut buffer = [0_u8; 4096];
@@ -706,14 +759,22 @@ async fn run_dns_router(
             received = socket.recv_from(&mut buffer) => {
                 let (size, peer) = received?;
                 let packet = &buffer[..size];
-                let Some(domain) = parse_dns_question(packet) else {
+                let Some((domain, qtype)) = parse_dns_query(packet) else {
                     continue;
                 };
+
+                // 如果未开启 IPv6，对 AAAA 查询 (type 28) 立即返回 NODATA，促使客户端秒级回退至 IPv4
+                if !ipv6_enabled && qtype == 28 {
+                    let response = nodata_response(packet);
+                    let _ = socket.send_to(&response, peer).await;
+                    continue;
+                }
+
                 let decision = routing_engine.decide(&FlowContext {
                     domain: Some(domain.clone()),
                     ..FlowContext::default()
                 });
-                eprintln!("[routing] {} -> {:?} ({:?})", domain, decision.action, decision.source);
+                eprintln!("[routing] {} (type {qtype}) -> {:?} ({:?})", domain, decision.action, decision.source);
 
                 if decision.action == RuleAction::Block {
                     let response = nxdomain_response(packet);
@@ -721,21 +782,54 @@ async fn run_dns_router(
                     continue;
                 }
 
-                let Ok(response) = forward_dns_over_tcp(remote_dns_port, packet).await else {
-                    continue;
+                let resolve_result = if decision.action == RuleAction::Direct {
+                    forward_dns_local(packet).await
+                } else {
+                    forward_dns_over_tcp(remote_dns_port, packet).await
                 };
-                if decision.source == MatchSource::DomainRule {
-                    let addresses = parse_dns_addresses(&response);
+
+                let response = match resolve_result {
+                    Ok(resp) => resp,
+                    Err(err) => {
+                        eprintln!("[dns] resolution failed for {domain}: {err}");
+                        let servfail = servfail_response(packet);
+                        let _ = socket.send_to(&servfail, peer).await;
+                        continue;
+                    }
+                };
+
+                let _ = socket.send_to(&response, peer).await;
+
+                let addresses = parse_dns_addresses(&response);
+                if !addresses.is_empty() {
                     update_domain_addresses(&addresses, decision.action).await;
                 }
-                let _ = socket.send_to(&response, peer).await;
             }
         }
     }
 }
 
+async fn forward_dns_local(packet: &[u8]) -> Result<Vec<u8>> {
+    match forward_dns_over_udp("223.5.5.5:53", packet, Duration::from_millis(1500)).await {
+        Ok(resp) => Ok(resp),
+        Err(_) => forward_dns_over_udp("114.114.114.114:53", packet, Duration::from_secs(3)).await,
+    }
+}
+
+async fn forward_dns_over_udp(server: &str, packet: &[u8], timeout_dur: Duration) -> Result<Vec<u8>> {
+    timeout(timeout_dur, async move {
+        let socket = UdpSocket::bind("0.0.0.0:0").await?;
+        socket.send_to(packet, server).await?;
+        let mut buffer = [0_u8; 4096];
+        let (size, _) = socket.recv_from(&mut buffer).await?;
+        Ok::<_, anyhow::Error>(buffer[..size].to_vec())
+    })
+    .await
+    .context("UDP DNS query timed out")?
+}
+
 async fn forward_dns_over_tcp(port: u16, packet: &[u8]) -> Result<Vec<u8>> {
-    timeout(Duration::from_secs(5), async move {
+    timeout(Duration::from_secs(6), async move {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).await?;
         let length = u16::try_from(packet.len()).context("DNS packet too large")?;
         stream.write_all(&length.to_be_bytes()).await?;
@@ -751,7 +845,7 @@ async fn forward_dns_over_tcp(port: u16, packet: &[u8]) -> Result<Vec<u8>> {
     .context("DNS forwarding timed out")?
 }
 
-fn parse_dns_question(packet: &[u8]) -> Option<String> {
+fn parse_dns_query(packet: &[u8]) -> Option<(String, u16)> {
     if packet.len() < 12 || u16::from_be_bytes([packet[4], packet[5]]) == 0 {
         return None;
     }
@@ -769,13 +863,37 @@ fn parse_dns_question(packet: &[u8]) -> Option<String> {
         labels.push(std::str::from_utf8(&packet[offset..offset + length]).ok()?);
         offset += length;
     }
-    (!labels.is_empty()).then(|| labels.join("."))
+    if labels.is_empty() || offset + 4 > packet.len() {
+        return None;
+    }
+    let qtype = u16::from_be_bytes([packet[offset], packet[offset + 1]]);
+    Some((labels.join("."), qtype))
+}
+
+fn nodata_response(packet: &[u8]) -> Vec<u8> {
+    let mut response = packet.to_vec();
+    if response.len() >= 12 {
+        response[2] = 0x81 | (response[2] & 0x01);
+        response[3] = 0x80;
+        response[6..12].fill(0);
+    }
+    response
+}
+
+fn servfail_response(packet: &[u8]) -> Vec<u8> {
+    let mut response = packet.to_vec();
+    if response.len() >= 12 {
+        response[2] = 0x81 | (response[2] & 0x01);
+        response[3] = 0x82;
+        response[6..12].fill(0);
+    }
+    response
 }
 
 fn nxdomain_response(packet: &[u8]) -> Vec<u8> {
     let mut response = packet.to_vec();
     if response.len() >= 12 {
-        response[2] = 0x80 | (response[2] & 0x01);
+        response[2] = 0x81 | (response[2] & 0x01);
         response[3] = 0x83;
         response[6..12].fill(0);
     }
@@ -848,20 +966,37 @@ fn skip_dns_name(packet: &[u8], mut offset: usize) -> Option<usize> {
 }
 
 async fn update_domain_addresses(addresses: &[IpAddr], action: RuleAction) {
+    if addresses.is_empty() {
+        return;
+    }
+    let target_cat = match action {
+        RuleAction::Proxy => "proxy",
+        RuleAction::Direct => "direct",
+        RuleAction::Block => "block",
+    };
+    let mut batch = String::new();
     for address in addresses {
         let suffix = if address.is_ipv4() { "4" } else { "6" };
         let value = address.to_string();
         for category in ["proxy", "direct", "block"] {
-            let set = format!("domain_{category}{suffix}");
-            let _ = command("nft", &["delete", "element", "inet", NFT_TABLE, &set, "{", &value, "}"]).await;
+            if category != target_cat {
+                batch.push_str(&format!("delete element inet {NFT_TABLE} domain_{category}{suffix} {{ {value} }}\n"));
+            }
         }
-        let category = match action {
-            RuleAction::Proxy => "proxy",
-            RuleAction::Direct => "direct",
-            RuleAction::Block => "block",
-        };
-        let set = format!("domain_{category}{suffix}");
-        let _ = command("nft", &["add", "element", "inet", NFT_TABLE, &set, "{", &value, "timeout", "300s", "}"]).await;
+        batch.push_str(&format!("add element inet {NFT_TABLE} domain_{target_cat}{suffix} {{ {value} timeout 300s }}\n"));
+    }
+    if let Ok(mut child) = Command::new("nft")
+        .arg("-f")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(batch.as_bytes()).await;
+        }
+        let _ = child.wait().await;
     }
 }
 
