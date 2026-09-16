@@ -754,8 +754,12 @@ impl RuntimeController {
                                 break;
                             }
                             _ = tokio::time::sleep(Duration::from_millis(500)) => {
-                                if !helper_guard.as_mut().map_or(false, |h| h.is_alive()) {
-                                    disconnect_reason = "Privileged helper process died unexpectedly".into();
+                                let helper_health = match helper_guard.as_mut() {
+                                    Some(helper) => helper.check_active().await,
+                                    None => Err(anyhow::anyhow!("privileged helper session is unavailable")),
+                                };
+                                if let Err(error) = helper_health {
+                                    disconnect_reason = format!("Transparent proxy health check failed: {error}");
                                     let _ = events.send(RuntimeEvent::Log(format!("[helper] {disconnect_reason}")));
                                     break;
                                 }

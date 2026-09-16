@@ -84,8 +84,12 @@ struct ActiveSession {
 impl ActiveSession {
     async fn stop(self) {
         self.shutdown.cancel();
-        let _ = self.dns_task.await;
-        let _ = self.tun_task.await;
+        if !self.dns_task.is_finished() {
+            let _ = self.dns_task.await;
+        }
+        if !self.tun_task.is_finished() {
+            let _ = self.tun_task.await;
+        }
         self.system.cleanup().await;
         clean_stale_resources().await;
         eprintln!("[helper] routing stopped");
@@ -186,7 +190,30 @@ async fn run_daemon() -> Result<()> {
                         send_event(&mut stdout, &HelperEvent::RulesSynced).await?;
                     }
                     HelperCommand::Status => {
-                        send_event(&mut stdout, &HelperEvent::Status { active: active_session.is_some() }).await?;
+                        let unhealthy = active_session.as_ref().is_some_and(|session| {
+                            session.tun_task.is_finished() || session.dns_task.is_finished()
+                        });
+                        if unhealthy {
+                            eprintln!("[helper] active routing task exited unexpectedly");
+                            if let Some(session) = active_session.take() {
+                                session.stop().await;
+                            }
+                            send_event(
+                                &mut stdout,
+                                &HelperEvent::Error {
+                                    message: "transparent proxy routing task exited unexpectedly".into(),
+                                },
+                            )
+                            .await?;
+                        } else {
+                            send_event(
+                                &mut stdout,
+                                &HelperEvent::Status {
+                                    active: active_session.is_some(),
+                                },
+                            )
+                            .await?;
+                        }
                     }
                     HelperCommand::Quit => {
                         eprintln!("[helper] quit command received");

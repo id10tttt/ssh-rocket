@@ -66,6 +66,29 @@ impl PrivilegedHelperSession {
         self.is_active
     }
 
+    /// 查询 helper 中透明代理会话的实际运行状态。
+    pub async fn check_active(&mut self) -> Result<()> {
+        if !self.is_alive() {
+            self.is_active = false;
+            bail!("privileged helper process exited");
+        }
+        match self.send_command(&HelperCommand::Status).await? {
+            HelperEvent::Status { active: true } => {
+                self.is_active = true;
+                Ok(())
+            }
+            HelperEvent::Status { active: false } => {
+                self.is_active = false;
+                bail!("transparent proxy session is inactive")
+            }
+            HelperEvent::Error { message } => {
+                self.is_active = false;
+                bail!("{message}")
+            }
+            other => bail!("unexpected response from helper: {other:?}"),
+        }
+    }
+
     async fn send_command(&mut self, cmd: &HelperCommand) -> Result<HelperEvent> {
         let mut json = serde_json::to_string(cmd)?;
         json.push('\n');
