@@ -863,6 +863,133 @@ fn create_app_icon(icon_name: &str) -> gtk::Image {
     icon
 }
 
+fn format_duration(seconds: u64) -> String {
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let secs = seconds % 60;
+    format!("{hours:02}:{minutes:02}:{secs:02}")
+}
+
+fn create_traffic_stat_column(
+    title: &str,
+    up_label: &gtk::Label,
+    down_label: &gtk::Label,
+) -> gtk::Box {
+    let col = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    col.set_margin_start(16);
+    col.set_margin_end(16);
+    col.set_margin_top(14);
+    col.set_margin_bottom(14);
+
+    let title_lbl = gtk::Label::builder()
+        .label(title)
+        .halign(gtk::Align::Start)
+        .css_classes(["dim-label", "heading"])
+        .build();
+    col.append(&title_lbl);
+
+    let up_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let up_arrow = gtk::Label::builder().label("↑").css_classes(["stat-arrow-up", "heading"]).build();
+    up_box.append(&up_arrow);
+    up_label.set_halign(gtk::Align::Start);
+    up_label.add_css_class("numeric");
+    up_label.add_css_class("heading");
+    up_box.append(up_label);
+    col.append(&up_box);
+
+    let down_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let down_arrow = gtk::Label::builder().label("↓").css_classes(["stat-arrow-down", "heading"]).build();
+    down_box.append(&down_arrow);
+    down_label.set_halign(gtk::Align::Start);
+    down_label.add_css_class("numeric");
+    down_label.add_css_class("heading");
+    down_box.append(down_label);
+    col.append(&down_box);
+
+    col
+}
+
+fn create_chart_column(
+    title: &str,
+    count_label: &gtk::Label,
+    fill_box: &gtk::Box,
+    fill_class: &str,
+) -> gtk::Box {
+    let col = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    col.set_halign(gtk::Align::Center);
+    col.set_margin_top(16);
+    col.set_margin_bottom(16);
+    col.set_margin_start(12);
+    col.set_margin_end(12);
+
+    count_label.add_css_class("title-3");
+    count_label.add_css_class("numeric");
+    count_label.set_halign(gtk::Align::Center);
+    col.append(count_label);
+
+    let track = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    track.add_css_class("chart-track");
+    track.set_width_request(42);
+    track.set_height_request(100);
+    track.set_halign(gtk::Align::Center);
+
+    let spacer = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    spacer.set_vexpand(true);
+    track.append(&spacer);
+
+    fill_box.set_valign(gtk::Align::End);
+    fill_box.add_css_class(fill_class);
+    fill_box.set_height_request(0);
+    track.append(fill_box);
+    col.append(&track);
+
+    let title_lbl = gtk::Label::builder()
+        .label(title)
+        .halign(gtk::Align::Center)
+        .css_classes(["heading", "dim-label"])
+        .build();
+    col.append(&title_lbl);
+
+    col
+}
+
+fn init_dashboard_styles() {
+    let provider = gtk::CssProvider::new();
+    provider.load_from_string(
+        ".chart-track {
+            background-color: alpha(currentColor, 0.12);
+            border-radius: 6px;
+        }
+        .chart-fill-direct {
+            background-color: #2ec27e;
+            border-radius: 6px;
+        }
+        .chart-fill-proxy {
+            background-color: #2ec27e;
+            border-radius: 6px;
+        }
+        .chart-fill-reject {
+            background-color: #2ec27e;
+            border-radius: 6px;
+        }
+        .stat-arrow-up {
+            color: #e01b24;
+            font-weight: bold;
+        }
+        .stat-arrow-down {
+            color: #2ec27e;
+            font-weight: bold;
+        }"
+    );
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+}
+
 #[derive(Default)]
 struct AppTrafficTracker {
     active_sockets: std::collections::HashMap<String, (u64, u64)>,
@@ -1077,10 +1204,12 @@ fn main() {
 }
 
 fn build_ui(app: &adw::Application) {
+    init_dashboard_styles();
     let config = Rc::new(RefCell::new(AppConfig::load().unwrap_or_default()));
     let controller = Rc::new(RefCell::new(RuntimeController::default()));
     let (event_tx, event_rx) = mpsc::channel::<RuntimeEvent>();
     let is_connected = Rc::new(RefCell::new(false));
+    let connect_start_time = Rc::new(RefCell::new(None::<std::time::Instant>));
     let connection_buttons = Rc::new(RefCell::new(Vec::<(String, gtk::Button)>::new()));
     let refresh_connections: RefreshConnections = Rc::new(RefCell::new(None));
     let tray_manager = Rc::new(RefCell::new(None::<Rc<TrayManager>>));
@@ -1792,25 +1921,80 @@ fn build_ui(app: &adw::Application) {
 
     // --- Traffic Page ---
     let traffic_page = adw::PreferencesPage::new();
-    let traffic_group = adw::PreferencesGroup::builder().title("Current Session").build();
-    let uploaded_row = adw::ActionRow::builder().title("Uploaded").subtitle("0 B").build();
-    let downloaded_row = adw::ActionRow::builder().title("Downloaded").subtitle("0 B").build();
-    let total_row = adw::ActionRow::builder().title("Total").subtitle("0 B").build();
-    traffic_group.add(&uploaded_row);
-    traffic_group.add(&downloaded_row);
-    traffic_group.add(&total_row);
+
+    // 1. 服务器节点
+    let session_group = adw::PreferencesGroup::builder().title("服务器节点").build();
+    let started_row = adw::ActionRow::builder().title("开始时间").build();
+    let started_label = gtk::Label::builder()
+        .label("—")
+        .css_classes(["dim-label", "numeric"])
+        .build();
+    started_row.add_suffix(&started_label);
+    session_group.add(&started_row);
+
+    let duration_row = adw::ActionRow::builder().title("连接时间").build();
+    let duration_label = gtk::Label::builder()
+        .label("—")
+        .css_classes(["dim-label", "numeric"])
+        .build();
+    duration_row.add_suffix(&duration_label);
+    session_group.add(&duration_row);
+    traffic_page.add(&session_group);
+
+    // 2. 流量
+    let traffic_group = adw::PreferencesGroup::builder().title("流量").build();
+    let traffic_card = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    traffic_card.add_css_class("card");
+    traffic_card.set_homogeneous(true);
+
+    let total_up_label = gtk::Label::builder().label("0 B").build();
+    let total_down_label = gtk::Label::builder().label("0 B").build();
+    let total_col = create_traffic_stat_column("全部", &total_up_label, &total_down_label);
+    traffic_card.append(&total_col);
+
+    traffic_card.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+
+    let proxy_up_label = gtk::Label::builder().label("0 B").build();
+    let proxy_down_label = gtk::Label::builder().label("0 B").build();
+    let proxy_col = create_traffic_stat_column("代理", &proxy_up_label, &proxy_down_label);
+    traffic_card.append(&proxy_col);
+
+    traffic_card.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+
+    let direct_up_label = gtk::Label::builder().label("0 B").build();
+    let direct_down_label = gtk::Label::builder().label("0 B").build();
+    let direct_col = create_traffic_stat_column("直连", &direct_up_label, &direct_down_label);
+    traffic_card.append(&direct_col);
+
+    traffic_group.add(&traffic_card);
     traffic_page.add(&traffic_group);
 
-    let traffic_rules_group = adw::PreferencesGroup::builder().title("Application Rules").build();
-    let proxy_apps_row = adw::ActionRow::builder().title("PROXY").build();
-    let direct_apps_row = adw::ActionRow::builder().title("DIRECT").build();
-    let blocked_apps_row = adw::ActionRow::builder().title("REJECT").build();
-    traffic_rules_group.add(&proxy_apps_row);
-    traffic_rules_group.add(&direct_apps_row);
-    traffic_rules_group.add(&blocked_apps_row);
-    traffic_page.add(&traffic_rules_group);
+    // 3. 配置
+    let config_group = adw::PreferencesGroup::builder().title("配置").build();
+    let config_card = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    config_card.add_css_class("card");
+    config_card.set_homogeneous(true);
 
-    let app_usage_group = adw::PreferencesGroup::builder().title("Application Usage").build();
+    let direct_count_label = gtk::Label::builder().label("0").build();
+    let direct_fill_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let direct_chart_col = create_chart_column("直连", &direct_count_label, &direct_fill_box, "chart-fill-direct");
+    config_card.append(&direct_chart_col);
+
+    let proxy_count_label = gtk::Label::builder().label("0").build();
+    let proxy_fill_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let proxy_chart_col = create_chart_column("代理", &proxy_count_label, &proxy_fill_box, "chart-fill-proxy");
+    config_card.append(&proxy_chart_col);
+
+    let reject_count_label = gtk::Label::builder().label("0").build();
+    let reject_fill_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let reject_chart_col = create_chart_column("拒绝", &reject_count_label, &reject_fill_box, "chart-fill-reject");
+    config_card.append(&reject_chart_col);
+
+    config_group.add(&config_card);
+    traffic_page.add(&config_group);
+
+    // 4. 应用流量
+    let app_usage_group = adw::PreferencesGroup::builder().title("应用流量").build();
     let app_traffic_toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let app_traffic_search = gtk::SearchEntry::builder().placeholder_text("Search").hexpand(true).build();
     app_traffic_toolbar.append(&app_traffic_search);
@@ -1830,17 +2014,67 @@ fn build_ui(app: &adw::Application) {
 
     let refresh_traffic_rule_counts_impl = {
         let config = config.clone();
-        let proxy_apps_row = proxy_apps_row.clone();
-        let direct_apps_row = direct_apps_row.clone();
-        let blocked_apps_row = blocked_apps_row.clone();
+        let direct_count_label = direct_count_label.clone();
+        let proxy_count_label = proxy_count_label.clone();
+        let reject_count_label = reject_count_label.clone();
+        let direct_fill_box = direct_fill_box.clone();
+        let proxy_fill_box = proxy_fill_box.clone();
+        let reject_fill_box = reject_fill_box.clone();
         Rc::new(move || {
-            let app_count = scan_desktop_apps().len();
             let current = config.borrow();
-            let proxy_count = current.settings.app_rules.iter().filter(|r| r.action == RuleAction::Proxy).count();
-            let block_count = current.settings.app_rules.iter().filter(|r| r.action == RuleAction::Block).count();
-            proxy_apps_row.set_subtitle(&format!("{proxy_count} applications"));
-            blocked_apps_row.set_subtitle(&format!("{block_count} applications"));
-            direct_apps_row.set_subtitle(&format!("{} applications", app_count.saturating_sub(proxy_count + block_count)));
+            let imported = imported_rules(&current);
+            let custom = custom_rules(&current);
+            let app_count = scan_desktop_apps().len();
+
+            let mut direct_count = 0usize;
+            let mut proxy_count = 0usize;
+            let mut reject_count = 0usize;
+
+            for rule in &imported {
+                match rule.action() {
+                    RuleAction::Direct => direct_count += 1,
+                    RuleAction::Proxy => proxy_count += 1,
+                    RuleAction::Block => reject_count += 1,
+                }
+            }
+            for rule in &custom {
+                match rule.action() {
+                    RuleAction::Direct => direct_count += 1,
+                    RuleAction::Proxy => proxy_count += 1,
+                    RuleAction::Block => reject_count += 1,
+                }
+            }
+            let mut app_proxy = 0;
+            let mut app_block = 0;
+            for r in &current.settings.app_rules {
+                match r.action {
+                    RuleAction::Proxy => app_proxy += 1,
+                    RuleAction::Block => app_block += 1,
+                    RuleAction::Direct => {}
+                }
+            }
+            let app_direct = app_count.saturating_sub(app_proxy + app_block);
+            direct_count += app_direct;
+            proxy_count += app_proxy;
+            reject_count += app_block;
+
+            direct_count_label.set_text(&direct_count.to_string());
+            proxy_count_label.set_text(&proxy_count.to_string());
+            reject_count_label.set_text(&reject_count.to_string());
+
+            let max_count = direct_count.max(proxy_count).max(reject_count);
+            let calc_height = |count: usize| -> i32 {
+                if count == 0 || max_count == 0 {
+                    0
+                } else {
+                    let ratio = count as f64 / max_count as f64;
+                    ((ratio * 100.0).round() as i32).clamp(4, 100)
+                }
+            };
+
+            direct_fill_box.set_height_request(calc_height(direct_count));
+            proxy_fill_box.set_height_request(calc_height(proxy_count));
+            reject_fill_box.set_height_request(calc_height(reject_count));
         })
     };
     *refresh_traffic_rule_counts.borrow_mut() = Some(refresh_traffic_rule_counts_impl.clone());
@@ -2252,28 +2486,30 @@ fn build_ui(app: &adw::Application) {
     log_page.set_margin_bottom(18);
     log_page.set_hexpand(true);
     log_page.set_vexpand(true);
-    let log_group = adw::PreferencesGroup::builder().title("Connection Logs").build();
-    let log_actions = adw::ActionRow::builder().title("Proxy and direct routing output").build();
-    let copy_logs = gtk::Button::from_icon_name("edit-copy-symbolic");
-    copy_logs.add_css_class("flat");
-    copy_logs.set_tooltip_text(Some("Copy logs"));
-    log_actions.add_suffix(&copy_logs);
-    let clear_logs = gtk::Button::from_icon_name("edit-clear-all-symbolic");
-    clear_logs.add_css_class("flat");
-    clear_logs.set_tooltip_text(Some("Clear logs"));
-    log_actions.add_suffix(&clear_logs);
-    log_group.add(&log_actions);
-    log_page.append(&log_group);
+    let log_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    log_header.set_margin_bottom(4);
 
     let log_stack = gtk::Stack::new();
     log_stack.set_vexpand(true);
     log_stack.set_hexpand(true);
+
     let log_switcher = gtk::StackSwitcher::new();
     log_switcher.set_stack(Some(&log_stack));
     log_switcher.set_halign(gtk::Align::Center);
-    log_switcher.set_margin_top(4);
-    log_switcher.set_margin_bottom(4);
-    log_page.append(&log_switcher);
+    log_switcher.set_hexpand(true);
+    log_header.append(&log_switcher);
+
+    let copy_logs = gtk::Button::from_icon_name("edit-copy-symbolic");
+    copy_logs.add_css_class("flat");
+    copy_logs.set_tooltip_text(Some("Copy logs"));
+    log_header.append(&copy_logs);
+
+    let clear_logs = gtk::Button::from_icon_name("edit-clear-all-symbolic");
+    clear_logs.add_css_class("flat");
+    clear_logs.set_tooltip_text(Some("Clear logs"));
+    log_header.append(&clear_logs);
+
+    log_page.append(&log_header);
 
     let proxy_log_view = gtk::TextView::builder()
         .editable(false)
@@ -2740,15 +2976,52 @@ fn build_ui(app: &adw::Application) {
         let direct_log_view = direct_log_view.clone();
         let bottom_status = bottom_status.clone();
         let speed_label = speed_label.clone();
-        let uploaded_row = uploaded_row.clone();
-        let downloaded_row = downloaded_row.clone();
-        let total_row = total_row.clone();
+        let started_label = started_label.clone();
+        let duration_label = duration_label.clone();
+        let connect_start_time = connect_start_time.clone();
+        let total_up_label = total_up_label.clone();
+        let total_down_label = total_down_label.clone();
+        let proxy_up_label = proxy_up_label.clone();
+        let proxy_down_label = proxy_down_label.clone();
+        let direct_up_label = direct_up_label.clone();
+        let direct_down_label = direct_down_label.clone();
         let session_upload = session_upload.clone();
         let session_download = session_download.clone();
         let tray_manager = tray_manager.clone();
         let controller_ref = controller.clone();
         let app_traffic_data = app_traffic_data.clone();
         let refresh_app_traffic = refresh_app_traffic.clone();
+
+        let update_traffic_labels = {
+            let session_upload = session_upload.clone();
+            let session_download = session_download.clone();
+            let app_traffic_data = app_traffic_data.clone();
+            let total_up_label = total_up_label.clone();
+            let total_down_label = total_down_label.clone();
+            let proxy_up_label = proxy_up_label.clone();
+            let proxy_down_label = proxy_down_label.clone();
+            let direct_up_label = direct_up_label.clone();
+            let direct_down_label = direct_down_label.clone();
+            Rc::new(move || {
+                let up_proxy = *session_upload.borrow();
+                let down_proxy = *session_download.borrow();
+                let (apps_up, apps_down) = app_traffic_data.borrow().iter().fold((0u64, 0u64), |(u, d), app| {
+                    (u + app.upload, d + app.download)
+                });
+                let total_up = up_proxy.max(apps_up);
+                let total_down = down_proxy.max(apps_down);
+                let direct_up = total_up.saturating_sub(up_proxy);
+                let direct_down = total_down.saturating_sub(down_proxy);
+
+                total_up_label.set_text(&format_bytes(total_up));
+                total_down_label.set_text(&format_bytes(total_down));
+                proxy_up_label.set_text(&format_bytes(up_proxy));
+                proxy_down_label.set_text(&format_bytes(down_proxy));
+                direct_up_label.set_text(&format_bytes(direct_up));
+                direct_down_label.set_text(&format_bytes(direct_down));
+            })
+        };
+
         gtk::glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
             while let Ok(event) = event_rx.try_recv() {
                 match event {
@@ -2757,9 +3030,12 @@ fn build_ui(app: &adw::Application) {
                         *session_download.borrow_mut() = 0;
                         app_traffic_data.borrow_mut().clear();
                         refresh_app_traffic();
-                        uploaded_row.set_subtitle("0 B");
-                        downloaded_row.set_subtitle("0 B");
-                        total_row.set_subtitle("0 B");
+                        update_traffic_labels();
+                        *connect_start_time.borrow_mut() = Some(std::time::Instant::now());
+                        if let Ok(now) = gtk::glib::DateTime::now_local() {
+                            started_label.set_text(&now.format("%Y-%m-%d %H:%M:%S").map_or_else(|_| "—".into(), |s| s.to_string()));
+                        }
+                        duration_label.set_text("00:00:00");
                         *is_connected.borrow_mut() = true;
                         bottom_status.set_text("Connected");
                         if let Some(tray) = tray_manager.borrow().as_ref() {
@@ -2774,6 +3050,7 @@ fn build_ui(app: &adw::Application) {
                     }
                     RuntimeEvent::Disconnected => {
                         *is_connected.borrow_mut() = false;
+                        *connect_start_time.borrow_mut() = None;
                         bottom_status.set_text("Disconnected");
                         if let Some(tray) = tray_manager.borrow().as_ref() {
                             tray.set_state(TrayConnectionState::Disconnected);
@@ -2803,6 +3080,7 @@ fn build_ui(app: &adw::Application) {
                     }
                     RuntimeEvent::Error(error) => {
                         *is_connected.borrow_mut() = false;
+                        *connect_start_time.borrow_mut() = None;
                         bottom_status.set_text(&error);
                         if let Some(tray) = tray_manager.borrow().as_ref() {
                             tray.set_state(TrayConnectionState::Disconnected);
@@ -2833,9 +3111,7 @@ fn build_ui(app: &adw::Application) {
                         *session_download.borrow_mut() += download;
                         let up_total = *session_upload.borrow();
                         let down_total = *session_download.borrow();
-                        uploaded_row.set_subtitle(&format_bytes(up_total));
-                        downloaded_row.set_subtitle(&format_bytes(down_total));
-                        total_row.set_subtitle(&format_bytes(up_total + down_total));
+                        update_traffic_labels();
                         speed_label.set_text(&format!(
                             "↑ {} ({})   ↓ {} ({})",
                             format_speed(upload), format_bytes(up_total),
@@ -2845,6 +3121,7 @@ fn build_ui(app: &adw::Application) {
                     RuntimeEvent::AppTraffic(stats) => {
                         *app_traffic_data.borrow_mut() = stats;
                         refresh_app_traffic();
+                        update_traffic_labels();
                     }
                     RuntimeEvent::RuleImportFailed(error) => {
                         rule_status.set_subtitle(&format!("Import failed: {error}"));
@@ -2897,6 +3174,10 @@ fn build_ui(app: &adw::Application) {
                         controller_ref.borrow().sync_rules();
                     }
                 }
+            }
+            if let Some(start) = *connect_start_time.borrow() {
+                let elapsed = start.elapsed().as_secs();
+                duration_label.set_text(&format_duration(elapsed));
             }
             gtk::glib::ControlFlow::Continue
         });
