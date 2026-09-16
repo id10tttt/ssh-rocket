@@ -1,18 +1,26 @@
 use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
-use ssh_rocket_core::{AppConfig, Profile, RuleAction};
+use ssh_rocket_core::{AppConfig, Profile, RuleAction, RuleImportResult, parse_rule_set, parse_shadowrocket_rules};
 use ssh_rocket_runtime::SshSession;
-use std::{cell::RefCell, path::PathBuf, process::Stdio, rc::Rc, sync::mpsc, thread, time::Duration};
-use tokio::{process::Command, sync::oneshot};
+use std::{cell::RefCell, path::PathBuf, process::{Command as StdCommand, Stdio}, rc::Rc, sync::mpsc, thread, time::{Duration, SystemTime, UNIX_EPOCH}};
+use tokio::{io::{AsyncBufReadExt, BufReader}, process::Command, sync::oneshot};
 
 const APP_ID: &str = "io.github.idi0t.SshRocket";
 const SOCKS_PORT: u16 = 17880;
+const DEFAULT_RULE_SOURCE: &str = "https://johnshall.github.io/Shadowrocket-ADBlock-Rules-Forever/sr_top500_banlist_ad.conf";
+const MAX_RULE_SOURCE_SIZE: usize = 16 * 1024 * 1024;
 
 enum RuntimeEvent {
     Connected,
     Disconnected,
     Error(String),
+    Log(String),
+    RuleImportFailed(String),
+    RulesImported {
+        result: RuleImportResult,
+        source_url: String,
+    },
 }
 
 #[derive(Default)]
@@ -46,6 +54,9 @@ impl RuntimeController {
                         return;
                     }
                 };
+                if let Some(stderr) = ssh.take_stderr() {
+                    spawn_log_reader(stderr, "ssh", events.clone());
+                }
 
                 let helper = helper_path();
                 let uid = unsafe { libc::getuid() };
@@ -69,6 +80,9 @@ impl RuntimeController {
                         return;
                     }
                 };
+                if let Some(stderr) = process.stderr.take() {
+                    spawn_log_reader(stderr, "helper", events.clone());
+                }
 
                 let _ = events.send(RuntimeEvent::Connected);
                 tokio::select! {
@@ -101,6 +115,76 @@ impl RuntimeController {
             let _ = stop.send(());
         }
     }
+}
+
+fn spawn_log_reader<R>(reader: R, source: &'static str, events: mpsc::Sender<RuntimeEvent>)
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(reader).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let _ = events.send(RuntimeEvent::Log(format!("[{source}] {line}")));
+        }
+    });
+}
+
+fn import_rule_source(url: &str) -> Result<RuleImportResult, String> {
+    if !url.starts_with("https://") {
+        return Err("Only HTTPS rule URLs are supported".into());
+    }
+    let content = download_rule_text(url)?;
+    let mut result = parse_shadowrocket_rules(&content);
+    let rule_sets = result.rule_sets.clone();
+    for reference in rule_sets.into_iter().take(8) {
+        match download_rule_text(&reference.url) {
+            Ok(content) => result.merge(parse_rule_set(&content, reference.action)),
+            Err(error) => {
+                result.ignored_count += 1;
+                result.warnings.push(format!("Rule set skipped: {error}"));
+            }
+        }
+    }
+    if result.rule_sets.len() > 8 {
+        result.ignored_count += result.rule_sets.len() - 8;
+        result.warnings.push("Additional rule sets were skipped".into());
+    }
+    if result.rule_count() == 0 {
+        return Err("The source contains no supported rules".into());
+    }
+    Ok(result)
+}
+
+fn download_rule_text(url: &str) -> Result<String, String> {
+    if !url.starts_with("https://") {
+        return Err("Only HTTPS rule URLs are supported".into());
+    }
+    let output = StdCommand::new("curl")
+        .args([
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--max-time",
+            "120",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--max-filesize",
+            &MAX_RULE_SOURCE_SIZE.to_string(),
+            url,
+        ])
+        .output()
+        .map_err(|error| format!("Failed to start curl: {error}"))?;
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if error.is_empty() { format!("curl exited with {}", output.status) } else { error });
+    }
+    if output.stdout.len() > MAX_RULE_SOURCE_SIZE {
+        return Err("Rule source exceeds 16 MB".into());
+    }
+    String::from_utf8(output.stdout).map_err(|_| "Rule source is not UTF-8".into())
 }
 
 fn helper_path() -> PathBuf {
@@ -176,8 +260,33 @@ fn build_ui(app: &adw::Application) {
         })
         .build();
     let ipv6 = adw::SwitchRow::builder().title("IPv6").active(config.borrow().settings.ipv6).build();
+    let initial_rule_source = {
+        let current = config.borrow();
+        if current.settings.rule_source_url.is_empty() {
+            DEFAULT_RULE_SOURCE.to_string()
+        } else {
+            current.settings.rule_source_url.clone()
+        }
+    };
+    let rule_source = adw::EntryRow::builder()
+        .title("Shadowrocket Rule Source")
+        .text(&initial_rule_source)
+        .build();
+    let import_rules = gtk::Button::with_label("Import");
+    import_rules.set_valign(gtk::Align::Center);
+    import_rules.add_css_class("suggested-action");
+    rule_source.add_suffix(&import_rules);
+    let rule_status = adw::ActionRow::builder().title("Imported Rules").build();
+    {
+        let settings = &config.borrow().settings;
+        let total = settings.imported_domain_rules.len() + settings.imported_ip_rules.len();
+        let subtitle = if total == 0 { "None".to_string() } else { format!("{total} rules") };
+        rule_status.set_subtitle(&subtitle);
+    }
     routing_group.add(&policy);
     routing_group.add(&ipv6);
+    routing_group.add(&rule_source);
+    routing_group.add(&rule_status);
     page.add(&routing_group);
 
     let runtime_group = adw::PreferencesGroup::builder().title("Runtime").build();
@@ -189,11 +298,75 @@ fn build_ui(app: &adw::Application) {
     runtime_group.add(&status);
     page.add(&runtime_group);
 
+    let log_group = adw::PreferencesGroup::builder().title("Proxy Logs").build();
+    let log_actions = adw::ActionRow::builder().title("SSH and routing output").build();
+    let copy_logs = gtk::Button::from_icon_name("edit-copy-symbolic");
+    copy_logs.add_css_class("flat");
+    copy_logs.set_tooltip_text(Some("Copy logs"));
+    log_actions.add_suffix(&copy_logs);
+    let clear_logs = gtk::Button::from_icon_name("edit-clear-all-symbolic");
+    clear_logs.add_css_class("flat");
+    clear_logs.set_tooltip_text(Some("Clear logs"));
+    log_actions.add_suffix(&clear_logs);
+    log_group.add(&log_actions);
+    let log_view = gtk::TextView::builder()
+        .editable(false)
+        .cursor_visible(false)
+        .monospace(true)
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .build();
+    let log_buffer = log_view.buffer();
+    let log_scroller = gtk::ScrolledWindow::builder()
+        .child(&log_view)
+        .min_content_height(180)
+        .vexpand(true)
+        .build();
+    log_group.add(&log_scroller);
+    page.add(&log_group);
+
+    {
+        let log_buffer = log_buffer.clone();
+        clear_logs.connect_clicked(move |_| log_buffer.set_text(""));
+    }
+    {
+        let log_buffer = log_buffer.clone();
+        copy_logs.connect_clicked(move |_| {
+            let text = log_buffer.text(&log_buffer.start_iter(), &log_buffer.end_iter(), false);
+            if let Some(display) = gtk::gdk::Display::default() {
+                display.clipboard().set_text(&text);
+            }
+        });
+    }
+
     let scroller = gtk::ScrolledWindow::builder().child(&page).vexpand(true).build();
     toolbar.set_content(Some(&scroller));
     window.set_content(Some(&toolbar));
 
     let is_connected = Rc::new(RefCell::new(false));
+    {
+        let event_tx = event_tx.clone();
+        let rule_source = rule_source.clone();
+        let import_rules = import_rules.clone();
+        let rule_status = rule_status.clone();
+        import_rules.clone().connect_clicked(move |_| {
+            let url = rule_source.text().trim().to_string();
+            if url.is_empty() {
+                rule_status.set_subtitle("Rule source URL is empty");
+                return;
+            }
+            import_rules.set_sensitive(false);
+            rule_status.set_subtitle("Downloading and parsing…");
+            let events = event_tx.clone();
+            thread::spawn(move || match import_rule_source(&url) {
+                Ok(result) => {
+                    let _ = events.send(RuntimeEvent::RulesImported { result, source_url: url });
+                }
+                Err(error) => {
+                    let _ = events.send(RuntimeEvent::RuleImportFailed(error));
+                }
+            });
+        });
+    }
     {
         let config = config.clone();
         let controller = controller.clone();
@@ -201,6 +374,7 @@ fn build_ui(app: &adw::Application) {
         let is_connected = is_connected.clone();
         let status = status.clone();
         let connect = connect.clone();
+        let policy = policy.clone();
         connect.clone().connect_clicked(move |_| {
             if *is_connected.borrow() {
                 status.set_subtitle("Disconnecting…");
@@ -247,6 +421,12 @@ fn build_ui(app: &adw::Application) {
         let is_connected = is_connected.clone();
         let connect = connect.clone();
         let status = status.clone();
+        let config = config.clone();
+        let policy = policy.clone();
+        let rule_status = rule_status.clone();
+        let import_rules = import_rules.clone();
+        let log_buffer = log_buffer.clone();
+        let log_view = log_view.clone();
         gtk::glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
             while let Ok(event) = event_rx.try_recv() {
                 match event {
@@ -267,6 +447,57 @@ fn build_ui(app: &adw::Application) {
                         status.set_subtitle(&error);
                         connect.set_label("Connect");
                         connect.set_sensitive(true);
+                        import_rules.set_sensitive(true);
+                    }
+                    RuntimeEvent::Log(line) => {
+                        let mut end = log_buffer.end_iter();
+                        log_buffer.insert(&mut end, &format!("{line}\n"));
+                        let end = log_buffer.end_iter();
+                        let mark = log_buffer.create_mark(None, &end, false);
+                        log_view.scroll_mark_onscreen(&mark);
+                    }
+                    RuntimeEvent::RuleImportFailed(error) => {
+                        rule_status.set_subtitle(&format!("Import failed: {error}"));
+                        import_rules.set_sensitive(true);
+                    }
+                    RuntimeEvent::RulesImported { result, source_url } => {
+                        let (direct, proxy, block) = result.action_counts();
+                        let total = result.rule_count();
+                        {
+                            let mut current = config.borrow_mut();
+                            current.settings.imported_domain_rules = result.domain_rules;
+                            current.settings.imported_ip_rules = result.ip_rules;
+                            current.settings.default_policy = result.default_policy;
+                            current.settings.rule_source_url = source_url;
+                            current.settings.rule_source_name = "Shadowrocket Rule Source".into();
+                            current.settings.rule_source_updated_at = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .map_or(0, |duration| duration.as_secs() as i64);
+                            if let Err(error) = current.save() {
+                                rule_status.set_subtitle(&format!("Config error: {error}"));
+                                import_rules.set_sensitive(true);
+                                continue;
+                            }
+                        }
+                        policy.set_selected(match result.default_policy {
+                            RuleAction::Proxy => 0,
+                            RuleAction::Direct => 1,
+                            RuleAction::Block => 2,
+                        });
+                        rule_status.set_subtitle(&format!(
+                            "{total} rules · {direct} direct · {proxy} proxy · {block} block · {} ignored",
+                            result.ignored_count
+                        ));
+                        let mut end = log_buffer.end_iter();
+                        log_buffer.insert(
+                            &mut end,
+                            &format!("[rules] imported {total} rules ({direct} direct, {proxy} proxy, {block} block)\n"),
+                        );
+                        for warning in result.warnings.iter().take(3) {
+                            let mut end = log_buffer.end_iter();
+                            log_buffer.insert(&mut end, &format!("[rules] warning: {warning}\n"));
+                        }
+                        import_rules.set_sensitive(true);
                     }
                 }
             }

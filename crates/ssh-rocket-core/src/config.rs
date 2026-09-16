@@ -14,7 +14,7 @@ pub enum ConfigError {
     Json(#[from] serde_json::Error),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RuleAction {
     Direct,
@@ -62,6 +62,18 @@ pub struct AppRule {
 pub struct DomainRule {
     pub pattern: String,
     pub action: RuleAction,
+    #[serde(default)]
+    pub kind: DomainRuleKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum DomainRuleKind {
+    #[default]
+    Legacy,
+    Domain,
+    DomainSuffix,
+    DomainKeyword,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,7 +87,17 @@ pub struct GlobalSettings {
     #[serde(default)]
     pub domain_rules: Vec<DomainRule>,
     #[serde(default)]
+    pub imported_domain_rules: Vec<DomainRule>,
+    #[serde(default)]
     pub ip_rules: Vec<IpRule>,
+    #[serde(default)]
+    pub imported_ip_rules: Vec<IpRule>,
+    #[serde(default)]
+    pub rule_source_url: String,
+    #[serde(default)]
+    pub rule_source_name: String,
+    #[serde(default)]
+    pub rule_source_updated_at: i64,
     #[serde(default = "default_dns")]
     pub dns_server: IpAddr,
     #[serde(default)]
@@ -93,7 +115,12 @@ impl Default for GlobalSettings {
             custom_overrides: Vec::new(),
             app_rules: Vec::new(),
             domain_rules: Vec::new(),
+            imported_domain_rules: Vec::new(),
             ip_rules: Vec::new(),
+            imported_ip_rules: Vec::new(),
+            rule_source_url: String::new(),
+            rule_source_name: String::new(),
+            rule_source_updated_at: 0,
             dns_server: default_dns(),
             ipv6: false,
         }

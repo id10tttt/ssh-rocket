@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use ssh_rocket_core::Profile;
 use std::{net::IpAddr, process::Stdio, time::Duration};
-use tokio::{net::TcpStream, process::{Child, Command}, time::{sleep, timeout}};
+use tokio::{net::TcpStream, process::{Child, ChildStderr, Command}, time::{sleep, timeout}};
 
 pub struct SshSession {
     child: Child,
@@ -57,6 +57,10 @@ impl SshSession {
             self.child.kill().await.context("failed to stop SSH")?;
         }
         Ok(())
+    }
+
+    pub fn take_stderr(&mut self) -> Option<ChildStderr> {
+        self.child.stderr.take()
     }
 }
 

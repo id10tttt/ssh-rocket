@@ -14,6 +14,7 @@ const DNS_LISTEN_PORT: u16 = 15353;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let mut args = env::args().skip(1);
     let command = args.next().unwrap_or_default();
     if command != "run" {
@@ -29,6 +30,7 @@ async fn main() -> Result<()> {
     }
 
     let config: AppConfig = serde_json::from_slice(&tokio::fs::read(&config_path).await?)?;
+    eprintln!("[helper] starting transparent proxy");
     let routing_engine = RoutingEngine::new(config.settings.clone());
     let shutdown = CancellationToken::new();
     let proxy = ArgProxy::try_from(format!("socks5://127.0.0.1:{socks_port}").as_str())?;
@@ -56,6 +58,7 @@ async fn main() -> Result<()> {
         system.cleanup().await;
         return Err(error);
     }
+    eprintln!("[helper] routing is active on {TUN_NAME}");
 
     let dns_shutdown = shutdown.clone();
     let dns_task = tokio::spawn(async move {
@@ -90,6 +93,7 @@ async fn main() -> Result<()> {
     shutdown.cancel();
     let _ = dns_task.await;
     system.cleanup().await;
+    eprintln!("[helper] routing stopped");
     Ok(())
 }
 
@@ -204,6 +208,7 @@ impl SystemState {
         self.install_cgroup_rules().await?;
         self.install_domain_sets().await?;
         self.install_ip_rules(&self.config.settings.ip_rules).await?;
+        self.install_ip_rules(&self.config.settings.imported_ip_rules).await?;
 
         match self.config.settings.default_policy {
             RuleAction::Proxy => command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "meta", "l4proto", "tcp", "meta", "mark", "set", MARK]).await?,
@@ -298,9 +303,10 @@ async fn run_dns_router(
                     continue;
                 };
                 let decision = routing_engine.decide(&FlowContext {
-                    domain: Some(domain),
+                    domain: Some(domain.clone()),
                     ..FlowContext::default()
                 });
+                eprintln!("[routing] {} -> {:?} ({:?})", domain, decision.action, decision.source);
 
                 if decision.action == RuleAction::Block {
                     let response = nxdomain_response(packet);

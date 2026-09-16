@@ -1,4 +1,4 @@
-use crate::{GlobalSettings, RuleAction};
+use crate::{DomainRule, DomainRuleKind, GlobalSettings, RuleAction};
 use std::{net::IpAddr, path::PathBuf};
 
 #[derive(Debug, Clone, Default)]
@@ -57,14 +57,21 @@ impl RoutingEngine {
                 .settings
                 .domain_rules
                 .iter()
-                .find(|rule| domain_matches(&rule.pattern, &domain))
+                .chain(self.settings.imported_domain_rules.iter())
+                .find(|rule| domain_matches_rule(rule, &domain))
             {
                 return RouteDecision { action: rule.action, source: MatchSource::DomainRule };
             }
         }
 
         if let Some(destination) = flow.destination {
-            if let Some(rule) = self.settings.ip_rules.iter().find(|rule| rule.network.contains(&destination)) {
+            if let Some(rule) = self
+                .settings
+                .ip_rules
+                .iter()
+                .chain(self.settings.imported_ip_rules.iter())
+                .find(|rule| rule.network.contains(&destination))
+            {
                 return RouteDecision { action: rule.action, source: MatchSource::IpRule };
             }
         }
@@ -73,12 +80,20 @@ impl RoutingEngine {
     }
 }
 
-fn domain_matches(pattern: &str, domain: &str) -> bool {
-    let pattern = pattern.trim().trim_end_matches('.').to_ascii_lowercase();
-    if let Some(suffix) = pattern.strip_prefix("*.") {
-        return domain == suffix || domain.ends_with(&format!(".{suffix}"));
+fn domain_matches_rule(rule: &DomainRule, domain: &str) -> bool {
+    let pattern = rule.pattern.trim().trim_end_matches('.').to_ascii_lowercase();
+    match rule.kind {
+        DomainRuleKind::Domain => domain == pattern,
+        DomainRuleKind::DomainSuffix => domain == pattern || domain.ends_with(&format!(".{pattern}")),
+        DomainRuleKind::DomainKeyword => domain.contains(&pattern),
+        DomainRuleKind::Legacy => {
+            if let Some(suffix) = pattern.strip_prefix("*.") {
+                domain == suffix || domain.ends_with(&format!(".{suffix}"))
+            } else {
+                domain == pattern
+            }
+        }
     }
-    domain == pattern
 }
 
 #[cfg(test)]
@@ -94,7 +109,11 @@ mod tests {
             action: RuleAction::Block,
         });
         settings.app_rules.push(AppRule { executable: "/usr/bin/firefox".into(), action: RuleAction::Direct });
-        settings.domain_rules.push(DomainRule { pattern: "*.example.com".into(), action: RuleAction::Proxy });
+        settings.domain_rules.push(DomainRule {
+            pattern: "*.example.com".into(),
+            action: RuleAction::Proxy,
+            kind: DomainRuleKind::Legacy,
+        });
         settings.ip_rules.push(crate::config::IpRule {
             network: "10.0.0.0/8".parse().unwrap(),
             action: RuleAction::Direct,
