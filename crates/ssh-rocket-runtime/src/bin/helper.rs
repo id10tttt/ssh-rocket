@@ -702,7 +702,6 @@ impl SystemState {
         command("nft", &["add", "chain", "inet", NFT_TABLE, "dns_output", "{", "type", "nat", "hook", "output", "priority", "dstnat", ";", "policy", "accept", ";", "}"]).await?;
 
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "meta", "skuid", "!=", &self.uid.to_string(), "return"]).await?;
-        command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "oifname", "lo", "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "fib", "daddr", "type", "local", "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip", "daddr", "{", "127.0.0.0/8", ",", "169.254.0.0/16", ",", "192.168.0.0/16", ",", "172.16.0.0/12", ",", "10.0.0.0/8", ",", "224.0.0.0/4", ",", "255.255.255.255", "}", "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip6", "daddr", "{", "::1", ",", "fc00::/7", ",", "fe80::/10", ",", "ff00::/8", "}", "return"]).await?;
@@ -734,7 +733,6 @@ impl SystemState {
         }
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip", "daddr", "198.18.0.0/15", "meta", "l4proto", "tcp", "meta", "mark", "set", MARK, "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "dns_output", "meta", "skuid", "0", "return"]).await?;
-        command("nft", &["add", "rule", "inet", NFT_TABLE, "dns_output", "oifname", "lo", "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "dns_output", "udp", "dport", "53", "redirect", "to", &format!(":{DNS_LISTEN_PORT}")]).await?;
 
         self.install_ip_rules(&self.config.settings.custom_overrides).await?;
