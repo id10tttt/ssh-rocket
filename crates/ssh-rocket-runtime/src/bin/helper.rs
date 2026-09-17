@@ -12,8 +12,8 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::UdpSocket,
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    net::{TcpStream, UdpSocket},
     process::Command,
     signal,
     task::JoinHandle,
@@ -28,6 +28,7 @@ const TABLE: &str = "21330";
 const DNS_RULE_PRIORITY: &str = "21328";
 const NFT_TABLE: &str = "ssh_rocket";
 const DNS_LISTEN_PORT: u16 = 15353;
+const TUN_DNS_ADDRESS: &str = "10.0.0.33";
 const MAX_TUN_RETRIES: usize = 3;
 const CGROUPS: [&str; 3] = ["sshrocket-proxy", "sshrocket-direct", "sshrocket-block"];
 
@@ -289,7 +290,7 @@ async fn start_proxy_session(
     proxy_args
         .proxy(proxy)
         .tun(TUN_NAME.to_string())
-        .dns(ArgDns::Virtual)
+        .dns(ArgDns::Direct)
         .ipv6_enabled(config.settings.ipv6)
         .setup(false);
 
@@ -407,11 +408,37 @@ async fn start_proxy_session(
     }
     eprintln!("[helper] routing is active on {TUN_NAME}");
 
+    let resolver_socket = match UdpSocket::bind((TUN_DNS_ADDRESS, 53)).await {
+        Ok(socket) => socket,
+        Err(error) => {
+            shutdown.cancel();
+            let _ = tun_task.await;
+            system.cleanup().await;
+            clean_stale_resources().await;
+            return Err(error).context("failed to bind system resolver DNS endpoint");
+        }
+    };
+    if let Err(error) = system.configure_system_resolver().await {
+        shutdown.cancel();
+        let _ = tun_task.await;
+        system.cleanup().await;
+        clean_stale_resources().await;
+        return Err(error).context("failed to configure system resolver");
+    }
+
     let dns_shutdown = shutdown.clone();
     let routing_engine = RoutingEngine::new(config.settings.clone());
     let ipv6_enabled = config.settings.ipv6;
     let dns_task = tokio::spawn(async move {
-        run_dns_router(dns_socket, dns_port, routing_engine, ipv6_enabled, dns_shutdown).await
+        run_dns_router(
+            dns_socket,
+            resolver_socket,
+            dns_port,
+            routing_engine,
+            ipv6_enabled,
+            dns_shutdown,
+        )
+        .await
     });
 
     Ok(ActiveSession {
@@ -490,6 +517,7 @@ async fn clean_stale_resources() {
         }
     }
     let _ = command("nft", &["delete", "table", "inet", NFT_TABLE]).await;
+    let _ = command("resolvectl", &["revert", TUN_NAME]).await;
     let _ = command("ip", &["-4", "rule", "del", "priority", DNS_RULE_PRIORITY]).await;
     let _ = command("ip", &["-4", "rule", "del", "priority", "21329"]).await;
     let _ = command("ip", &["-4", "rule", "del", "priority", TABLE]).await;
@@ -576,6 +604,7 @@ impl SystemState {
 
     async fn cleanup(&self) {
         let _ = command("nft", &["delete", "table", "inet", NFT_TABLE]).await;
+        let _ = command("resolvectl", &["revert", TUN_NAME]).await;
         let _ = command("ip", &["-4", "rule", "del", "priority", DNS_RULE_PRIORITY]).await;
         let _ = command("ip", &["-4", "rule", "del", "priority", "21329"]).await;
         let _ = command("ip", &["-4", "rule", "del", "priority", TABLE]).await;
@@ -628,6 +657,12 @@ impl SystemState {
                 .with_context(|| format!("failed to create cgroup {name}"))?;
         }
         Ok(())
+    }
+
+    async fn configure_system_resolver(&self) -> Result<()> {
+        command("resolvectl", &["dns", TUN_NAME, TUN_DNS_ADDRESS]).await?;
+        command("resolvectl", &["domain", TUN_NAME, "~."]).await?;
+        command("resolvectl", &["default-route", TUN_NAME, "yes"]).await
     }
 
     async fn assign_apps(&mut self) -> Result<()> {
@@ -733,6 +768,7 @@ impl SystemState {
         }
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip", "daddr", "198.18.0.0/15", "meta", "l4proto", "tcp", "meta", "mark", "set", MARK, "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "dns_output", "meta", "skuid", "0", "return"]).await?;
+        command("nft", &["add", "rule", "inet", NFT_TABLE, "dns_output", "ip", "daddr", TUN_DNS_ADDRESS, "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "dns_output", "udp", "dport", "53", "redirect", "to", &format!(":{DNS_LISTEN_PORT}")]).await?;
 
         self.install_ip_rules(&self.config.settings.custom_overrides).await?;
@@ -857,22 +893,34 @@ async fn read_cgroup_pids() -> HashMap<u32, &'static str> {
 }
 
 async fn run_dns_router(
-    socket: UdpSocket,
+    intercept_socket: UdpSocket,
+    resolver_socket: UdpSocket,
     remote_dns_port: u16,
     routing_engine: RoutingEngine,
     ipv6_enabled: bool,
     shutdown: CancellationToken,
 ) -> Result<()> {
-    let socket = Arc::new(socket);
+    let intercept_socket = Arc::new(intercept_socket);
+    let resolver_socket = Arc::new(resolver_socket);
     let routing_engine = Arc::new(routing_engine);
-    let mut buffer = [0_u8; 4096];
+    let mut intercept_buffer = [0_u8; 4096];
+    let mut resolver_buffer = [0_u8; 4096];
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => return Ok(()),
-            received = socket.recv_from(&mut buffer) => {
+            received = intercept_socket.recv_from(&mut intercept_buffer) => {
                 let (size, peer) = received?;
-                let packet = buffer[..size].to_vec();
-                let socket = socket.clone();
+                let packet = intercept_buffer[..size].to_vec();
+                let socket = intercept_socket.clone();
+                let routing_engine = routing_engine.clone();
+                tokio::spawn(async move {
+                    handle_dns_query(socket, peer, packet, remote_dns_port, routing_engine, ipv6_enabled).await;
+                });
+            }
+            received = resolver_socket.recv_from(&mut resolver_buffer) => {
+                let (size, peer) = received?;
+                let packet = resolver_buffer[..size].to_vec();
+                let socket = resolver_socket.clone();
                 let routing_engine = routing_engine.clone();
                 tokio::spawn(async move {
                     handle_dns_query(socket, peer, packet, remote_dns_port, routing_engine, ipv6_enabled).await;
@@ -886,7 +934,7 @@ async fn handle_dns_query(
     socket: Arc<UdpSocket>,
     peer: SocketAddr,
     packet: Vec<u8>,
-    _remote_dns_port: u16,
+    remote_dns_port: u16,
     routing_engine: Arc<RoutingEngine>,
     ipv6_enabled: bool,
 ) {
@@ -925,11 +973,14 @@ async fn handle_dns_query(
     let resolve_result = if decision.action == RuleAction::Direct {
         forward_dns_local(&packet).await
     } else {
-        forward_dns_virtual(&packet).await
+        forward_dns_over_tcp(remote_dns_port, &packet).await
     };
 
     let response = match resolve_result {
-        Ok(resp) => resp,
+        Ok(mut response) => {
+            normalize_dns_response(&mut response);
+            response
+        }
         Err(err) => {
             eprintln!("[error] DNS query failed for {domain} (action: {:?}, source: {:?}): {err}", decision.action, decision.source);
             let servfail = servfail_response(&packet);
@@ -938,9 +989,15 @@ async fn handle_dns_query(
         }
     };
 
-    let _ = socket.send_to(&response, peer).await;
-
     let addresses = parse_dns_addresses(&response);
+    if !addresses.is_empty() {
+        update_domain_addresses(&addresses, decision.action).await;
+    }
+    if let Err(error) = socket.send_to(&response, peer).await {
+        eprintln!("[error] failed to return DNS response for {domain} to {peer}: {error}");
+        return;
+    }
+
     let elapsed = start_time.elapsed().as_millis();
     let addr_strs: Vec<String> = addresses.iter().map(|a| a.to_string()).collect();
     let addr_display = if addr_strs.is_empty() { "none".to_string() } else { addr_strs.join(", ") };
@@ -956,10 +1013,6 @@ async fn handle_dns_query(
             eprintln!("[block] {domain} (type {qtype}) -> Block ({:?})", decision.source);
         }
     }
-
-    if !addresses.is_empty() {
-        update_domain_addresses(&addresses, decision.action).await;
-    }
 }
 
 async fn forward_dns_local(packet: &[u8]) -> Result<Vec<u8>> {
@@ -967,10 +1020,6 @@ async fn forward_dns_local(packet: &[u8]) -> Result<Vec<u8>> {
         Ok(resp) => Ok(resp),
         Err(_) => forward_dns_over_udp("114.114.114.114:53", packet, Duration::from_secs(3)).await,
     }
-}
-
-async fn forward_dns_virtual(packet: &[u8]) -> Result<Vec<u8>> {
-    forward_dns_over_udp("10.0.0.1:53", packet, Duration::from_millis(1500)).await
 }
 
 async fn forward_dns_over_udp(server: &str, packet: &[u8], timeout_dur: Duration) -> Result<Vec<u8>> {
@@ -983,6 +1032,23 @@ async fn forward_dns_over_udp(server: &str, packet: &[u8], timeout_dur: Duration
     })
     .await
     .context("UDP DNS query timed out")?
+}
+
+async fn forward_dns_over_tcp(port: u16, packet: &[u8]) -> Result<Vec<u8>> {
+    timeout(Duration::from_secs(6), async move {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).await?;
+        let length = u16::try_from(packet.len()).context("DNS packet too large")?;
+        stream.write_all(&length.to_be_bytes()).await?;
+        stream.write_all(packet).await?;
+        let mut header = [0_u8; 2];
+        stream.read_exact(&mut header).await?;
+        let response_length = u16::from_be_bytes(header) as usize;
+        let mut response = vec![0_u8; response_length];
+        stream.read_exact(&mut response).await?;
+        Ok::<_, anyhow::Error>(response)
+    })
+    .await
+    .context("DNS forwarding over SSH timed out")?
 }
 
 fn parse_dns_query(packet: &[u8]) -> Option<(String, u16)> {
@@ -1011,33 +1077,51 @@ fn parse_dns_query(packet: &[u8]) -> Option<(String, u16)> {
 }
 
 fn nodata_response(packet: &[u8]) -> Vec<u8> {
-    let mut response = packet.to_vec();
-    if response.len() >= 12 {
-        response[2] = 0x81 | (response[2] & 0x01);
-        response[3] = 0x80;
-        response[6..12].fill(0);
-    }
-    response
+    empty_dns_response(packet, 0)
 }
 
 fn servfail_response(packet: &[u8]) -> Vec<u8> {
-    let mut response = packet.to_vec();
-    if response.len() >= 12 {
-        response[2] = 0x81 | (response[2] & 0x01);
-        response[3] = 0x82;
-        response[6..12].fill(0);
-    }
-    response
+    empty_dns_response(packet, 2)
 }
 
 fn nxdomain_response(packet: &[u8]) -> Vec<u8> {
-    let mut response = packet.to_vec();
-    if response.len() >= 12 {
-        response[2] = 0x81 | (response[2] & 0x01);
-        response[3] = 0x83;
-        response[6..12].fill(0);
-    }
+    empty_dns_response(packet, 3)
+}
+
+/// 构造只保留问题区的空 DNS 响应，避免查询中的 EDNS 记录与清零后的附加记录计数冲突。
+fn empty_dns_response(packet: &[u8], response_code: u8) -> Vec<u8> {
+    let Some(question_end) = dns_question_end(packet) else {
+        return Vec::new();
+    };
+    let mut response = packet[..question_end].to_vec();
+    response[2] = 0x80 | (packet[2] & 0x79);
+    response[3] = 0x80 | (response_code & 0x0f);
+    response[6..12].fill(0);
     response
+}
+
+/// 统一声明递归可用，避免 systemd-resolved 将转发响应判定为不可用服务器。
+fn normalize_dns_response(response: &mut [u8]) {
+    if response.len() < 12 {
+        return;
+    }
+    response[2] |= 0x80;
+    response[3] |= 0x80;
+}
+
+fn dns_question_end(packet: &[u8]) -> Option<usize> {
+    if packet.len() < 12 {
+        return None;
+    }
+    let questions = u16::from_be_bytes([packet[4], packet[5]]) as usize;
+    let mut offset = 12;
+    for _ in 0..questions {
+        offset = skip_dns_name(packet, offset)?.checked_add(4)?;
+        if offset > packet.len() {
+            return None;
+        }
+    }
+    Some(offset)
 }
 
 fn parse_dns_addresses(packet: &[u8]) -> Vec<IpAddr> {
@@ -1205,4 +1289,59 @@ async fn command(program: &str, args: &[&str]) -> Result<()> {
         bail!("{} {} failed: {}", program, args.join(" "), String::from_utf8_lossy(&output.stderr).trim());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn query_with_edns(qtype: u16) -> Vec<u8> {
+        let mut packet = vec![
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+            0x07, b'c', b'h', b'a', b't', b'g', b'p', b't',
+            0x03, b'c', b'o', b'm', 0x00,
+        ];
+        packet.extend_from_slice(&qtype.to_be_bytes());
+        packet.extend_from_slice(&1_u16.to_be_bytes());
+        packet.extend_from_slice(&[0x00, 0x00, 0x29, 0x04, 0xd0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        packet
+    }
+
+    #[test]
+    fn empty_response_removes_edns_record_and_keeps_question() {
+        let query = query_with_edns(28);
+        let response = nodata_response(&query);
+
+        assert_eq!(&response[..2], &[0x12, 0x34]);
+        assert_eq!(u16::from_be_bytes([response[4], response[5]]), 1);
+        assert_eq!(&response[6..12], &[0, 0, 0, 0, 0, 0]);
+        assert_eq!(response.len(), 29);
+        assert_eq!(parse_dns_query(&response), Some(("chatgpt.com".into(), 28)));
+    }
+
+    #[test]
+    fn empty_response_sets_expected_status_and_recursion_flags() {
+        for (response, response_code) in [
+            (nodata_response(&query_with_edns(65)), 0),
+            (servfail_response(&query_with_edns(1)), 2),
+            (nxdomain_response(&query_with_edns(1)), 3),
+        ] {
+            assert_ne!(response[2] & 0x80, 0);
+            assert_ne!(response[2] & 0x01, 0);
+            assert_ne!(response[3] & 0x80, 0);
+            assert_eq!(response[3] & 0x0f, response_code);
+        }
+    }
+
+    #[test]
+    fn successful_response_is_marked_recursive() {
+        let mut response = query_with_edns(1);
+        response[2] |= 0x80;
+        response[3] &= !0x80;
+
+        normalize_dns_response(&mut response);
+
+        assert_ne!(response[2] & 0x80, 0);
+        assert_ne!(response[3] & 0x80, 0);
+    }
 }
