@@ -92,6 +92,9 @@ impl RoutingEngine {
 
         if let Some(domain) = &flow.domain {
             let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+            if domain == "localhost" {
+                return RouteDecision { action: RuleAction::Direct, source: MatchSource::CustomOverride };
+            }
             if let Some(action) = self.match_domain(&domain) {
                 return RouteDecision { action, source: MatchSource::DomainRule };
             }
@@ -255,5 +258,17 @@ mod tests {
         });
         assert_eq!(d3.action, RuleAction::Proxy);
         assert_eq!(d3.source, MatchSource::DomainRule);
+    }
+
+    #[test]
+    fn test_localhost_always_direct() {
+        let mut settings = GlobalSettings::default();
+        settings.default_policy = RuleAction::Proxy;
+        let engine = RoutingEngine::new(settings);
+        let decision = engine.decide(&FlowContext {
+            domain: Some("localhost".into()),
+            ..FlowContext::default()
+        });
+        assert_eq!(decision.action, RuleAction::Direct);
     }
 }
