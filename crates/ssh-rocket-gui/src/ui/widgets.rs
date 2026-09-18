@@ -37,11 +37,33 @@ pub fn format_duration(seconds: u64) -> String {
     format!("{hours:02}:{minutes:02}:{secs:02}")
 }
 
-/// 创建应用桌面图标
+use std::{cell::RefCell, collections::HashMap};
+
+thread_local! {
+    static ICON_CACHE: RefCell<HashMap<String, Option<gtk::gdk::Paintable>>> = RefCell::new(HashMap::new());
+}
+
+/// 创建应用桌面图标（带内存缓存，避免主线程重复磁盘 I/O 与解码）
 pub fn create_app_icon(icon_name: &str) -> gtk::Image {
     let icon = if !icon_name.is_empty() {
         if icon_name.starts_with('/') {
-            gtk::Image::from_file(icon_name)
+            let cached_paintable = ICON_CACHE.with(|cache| cache.borrow().get(icon_name).cloned());
+            match cached_paintable {
+                Some(Some(paintable)) => gtk::Image::from_paintable(Some(&paintable)),
+                Some(None) => gtk::Image::from_icon_name("application-x-executable-symbolic"),
+                None => {
+                    let img = gtk::Image::from_file(icon_name);
+                    let paintable = img.paintable();
+                    ICON_CACHE.with(|cache| {
+                        cache.borrow_mut().insert(icon_name.to_string(), paintable.clone());
+                    });
+                    if paintable.is_some() {
+                        img
+                    } else {
+                        gtk::Image::from_icon_name("application-x-executable-symbolic")
+                    }
+                }
+            }
         } else {
             gtk::Image::from_icon_name(icon_name)
         }

@@ -263,7 +263,15 @@ pub fn remove_listed_rule(config: &mut AppConfig, rule: &ListedRule) {
     }
 }
 
+static DESKTOP_APPS_CACHE: std::sync::OnceLock<Vec<DesktopApp>> = std::sync::OnceLock::new();
+
 pub fn scan_desktop_apps() -> Vec<DesktopApp> {
+    DESKTOP_APPS_CACHE
+        .get_or_init(scan_desktop_apps_uncached)
+        .clone()
+}
+
+fn scan_desktop_apps_uncached() -> Vec<DesktopApp> {
     let mut dirs = vec![
         PathBuf::from("/usr/share/applications"),
         PathBuf::from("/usr/local/share/applications"),
@@ -1082,10 +1090,12 @@ fn build_ui(app: &adw::Application) {
     win.view_stack.add_named(&logs_view.container, Some("logs"));
 
     // 3. 侧边栏导航切换
+    let refresh_active_traffic_tab: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
     {
         let view_stack = win.view_stack.clone();
         let page_title = win.page_title.clone();
         let add_connection = win.add_connection.clone();
+        let refresh_traffic_tab = refresh_active_traffic_tab.clone();
         win.navigation.connect_row_selected(move |_, row| {
             let Some(row) = row else { return; };
             let (name, title) = match row.index() {
@@ -1097,6 +1107,11 @@ fn build_ui(app: &adw::Application) {
             view_stack.set_visible_child_name(name);
             page_title.set_text(title);
             add_connection.set_visible(name == "connect");
+            if name == "traffic" {
+                if let Some(refresh) = refresh_traffic_tab.borrow().as_ref() {
+                    refresh();
+                }
+            }
         });
     }
     win.navigation.select_row(Some(&win.connect_nav));
@@ -2138,6 +2153,27 @@ fn build_ui(app: &adw::Application) {
             .connect_search_changed(move |_| refresh());
     }
 
+    let refresh_active_traffic_tab_impl = {
+        let refresh_apps = refresh_app_traffic.clone();
+        let refresh_connections = refresh_conns.clone();
+        let stack = traffic_view.stack.clone();
+        Rc::new(move || {
+            match stack.visible_child_name().as_deref() {
+                Some("apps") => refresh_apps(),
+                Some("connections") => refresh_connections(),
+                _ => {}
+            }
+        })
+    };
+    *refresh_active_traffic_tab.borrow_mut() = Some(refresh_active_traffic_tab_impl.clone());
+
+    {
+        let refresh = refresh_active_traffic_tab_impl.clone();
+        traffic_view.stack.connect_visible_child_name_notify(move |_| {
+            refresh();
+        });
+    }
+
     // 9. 日志视图逻辑
     {
         let all_buffer = logs_view.all_log_buffer.clone();
@@ -2316,6 +2352,7 @@ fn build_ui(app: &adw::Application) {
         let bottom_status_dot = win.bottom_status_dot.clone();
         let bottom_status = win.bottom_status.clone();
         let speed_label = win.speed_label.clone();
+        let view_stack = win.view_stack.clone();
         let session_started = Rc::new(RefCell::new(String::from("—")));
         let session_duration = Rc::new(RefCell::new(String::from("00:00:00")));
         let update_session_status = {
@@ -2425,8 +2462,13 @@ fn build_ui(app: &adw::Application) {
                         traffic_view.speed_current_label.set_text("↓ 0 B/s   ↑ 0 B/s");
                         app_traffic_data.borrow_mut().clear();
                         active_conns_data.borrow_mut().clear();
-                        refresh_app_traffic();
-                        refresh_conns();
+                        if view_stack.visible_child_name().as_deref() == Some("traffic") {
+                            match traffic_view.stack.visible_child_name().as_deref() {
+                                Some("apps") => refresh_app_traffic(),
+                                Some("connections") => refresh_conns(),
+                                _ => {}
+                            }
+                        }
                         update_traffic_labels();
                         *connect_start_time.borrow_mut() = Some(std::time::Instant::now());
                         if let Ok(now) = gtk::glib::DateTime::now_local() {
@@ -2566,8 +2608,13 @@ fn build_ui(app: &adw::Application) {
                     RuntimeEvent::AppTraffic { stats, conns } => {
                         *app_traffic_data.borrow_mut() = stats;
                         *active_conns_data.borrow_mut() = conns;
-                        refresh_app_traffic();
-                        refresh_conns();
+                        if view_stack.visible_child_name().as_deref() == Some("traffic") {
+                            match traffic_view.stack.visible_child_name().as_deref() {
+                                Some("apps") => refresh_app_traffic(),
+                                Some("connections") => refresh_conns(),
+                                _ => {}
+                            }
+                        }
                         update_traffic_labels();
                     }
                     RuntimeEvent::RuleImportFailed(error) => {

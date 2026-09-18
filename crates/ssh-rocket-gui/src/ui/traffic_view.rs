@@ -150,13 +150,18 @@ impl TrafficView {
             .build();
 
         speed_drawing_area.add_tick_callback(|area, _| {
-            area.queue_draw();
+            if area.is_mapped() {
+                area.queue_draw();
+            }
             gtk::glib::ControlFlow::Continue
         });
 
         let draw_speed_history = speed_history.clone();
         let draw_display_peak = display_peak.clone();
-        speed_drawing_area.set_draw_func(move |_area, cr, width, height| {
+        speed_drawing_area.set_draw_func(move |area, cr, width, height| {
+            if !area.is_mapped() {
+                return;
+            }
             let w = width as f64;
             let h = height as f64;
             if w <= 0.0 || h <= 0.0 {
@@ -898,6 +903,7 @@ pub fn refresh_app_traffic_list(
     } else {
         items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     }
+    items.truncate(80);
 
     while let Some(child) = app_traffic_list_box.first_child() {
         app_traffic_list_box.remove(&child);
@@ -966,7 +972,7 @@ pub fn refresh_connection_list(
     conn_list_box: &gtk::Box,
 ) {
     let query = conn_search.text().trim().to_lowercase();
-    let items: Vec<ActiveConnectionStat> = conns_data
+    let mut items: Vec<ActiveConnectionStat> = conns_data
         .borrow()
         .iter()
         .filter(|conn| {
@@ -979,6 +985,7 @@ pub fn refresh_connection_list(
         .collect();
 
     conn_stats_label.set_text(&format!("共 {} 个活跃连接", items.len()));
+    items.truncate(100);
 
     while let Some(child) = conn_list_box.first_child() {
         conn_list_box.remove(&child);
