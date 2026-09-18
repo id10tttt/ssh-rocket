@@ -15,6 +15,7 @@ use crate::{
 pub struct RulesView {
     pub container: gtk::Box,
     pub rules_stack: gtk::Stack,
+    pub rules_switcher: gtk::StackSwitcher,
 
     // Applications tab
     pub app_search: gtk::SearchEntry,
@@ -28,6 +29,7 @@ pub struct RulesView {
     pub ipv6_row: adw::SwitchRow,
     pub rule_status_row: adw::ActionRow,
     pub custom_summary_row: adw::ActionRow,
+    pub quick_add_rule_btn: gtk::Button,
     pub import_button: gtk::Button,
     pub rule_source_entry: adw::EntryRow,
     pub import_trigger_btn: gtk::Button,
@@ -79,10 +81,6 @@ impl RulesView {
         let rules_switcher = gtk::StackSwitcher::new();
         rules_switcher.set_stack(Some(&rules_stack));
         rules_switcher.set_halign(gtk::Align::Center);
-        rules_switcher.set_margin_top(12);
-        rules_switcher.set_margin_bottom(12);
-        rules_page.append(&rules_switcher);
-        rules_page.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         rules_page.append(&rules_stack);
 
         // --- 1. 应用分流 (Applications) ---
@@ -136,10 +134,12 @@ impl RulesView {
                 RuleAction::Block => 2,
             })
             .build();
+        policy_row.add_prefix(&gtk::Image::from_icon_name("network-workgroup-symbolic"));
         let ipv6_row = adw::SwitchRow::builder()
             .title("IPv6 路由分流")
             .active(config.borrow().settings.ipv6)
             .build();
+        ipv6_row.add_prefix(&gtk::Image::from_icon_name("network-wired-symbolic"));
         routing_group.add(&policy_row);
         routing_group.add(&ipv6_row);
         overview_page.add(&routing_group);
@@ -162,16 +162,22 @@ impl RulesView {
         let configurations_group = adw::PreferencesGroup::builder().title("远程规则订阅").build();
         let import_button = gtk::Button::with_label("导入…");
         import_button.set_valign(gtk::Align::Center);
-        import_button.add_css_class("suggested-action");
+        import_button.add_css_class("flat");
         configurations_group.set_header_suffix(Some(&import_button));
         let rule_status_row = adw::ActionRow::new();
         rule_status_row.set_activatable(true);
-        rule_status_row.add_prefix(&gtk::Image::from_icon_name("object-select-symbolic"));
+        rule_status_row.add_prefix(&gtk::Image::from_icon_name("folder-download-symbolic"));
         rule_status_row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
         configurations_group.add(&rule_status_row);
         overview_page.add(&configurations_group);
 
         let custom_summary_group = adw::PreferencesGroup::builder().title("用户自定义规则").build();
+        let quick_add_rule_btn = gtk::Button::from_icon_name("list-add-symbolic");
+        quick_add_rule_btn.add_css_class("flat");
+        quick_add_rule_btn.set_valign(gtk::Align::Center);
+        quick_add_rule_btn.set_tooltip_text(Some("添加规则"));
+        custom_summary_group.set_header_suffix(Some(&quick_add_rule_btn));
+
         let custom_summary_row = adw::ActionRow::builder()
             .title("自定义分流列表")
             .activatable(true)
@@ -190,20 +196,11 @@ impl RulesView {
         // 2.2 订阅详情 (Detail)
         let detail_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let detail_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        detail_header.set_margin_start(12);
-        detail_header.set_margin_end(12);
-        detail_header.set_margin_top(8);
-        detail_header.set_margin_bottom(8);
+        detail_header.set_visible(false);
         let detail_back_btn = gtk::Button::from_icon_name("go-previous-symbolic");
-        detail_back_btn.add_css_class("flat");
-        detail_back_btn.set_tooltip_text(Some("返回"));
-        detail_header.append(&detail_back_btn);
         let detail_title_lbl = gtk::Label::new(Some("订阅配置"));
-        detail_title_lbl.add_css_class("title-4");
-        detail_title_lbl.set_halign(gtk::Align::Start);
+        detail_header.append(&detail_back_btn);
         detail_header.append(&detail_title_lbl);
-        detail_page.append(&detail_header);
-        detail_page.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 
         let detail_preferences = adw::PreferencesPage::new();
         let source_group = adw::PreferencesGroup::builder().title("订阅源").build();
@@ -240,19 +237,11 @@ impl RulesView {
         // 2.3 订阅规则列表 (Imported)
         let imported_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let imported_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        imported_header.set_margin_start(12);
-        imported_header.set_margin_end(12);
-        imported_header.set_margin_top(8);
-        imported_header.set_margin_bottom(8);
+        imported_header.set_visible(false);
         let imported_back_btn = gtk::Button::from_icon_name("go-previous-symbolic");
-        imported_back_btn.add_css_class("flat");
-        imported_back_btn.set_tooltip_text(Some("返回"));
-        imported_header.append(&imported_back_btn);
         let imported_title_lbl = gtk::Label::new(Some("订阅规则条目"));
-        imported_title_lbl.add_css_class("title-4");
+        imported_header.append(&imported_back_btn);
         imported_header.append(&imported_title_lbl);
-        imported_page.append(&imported_header);
-        imported_page.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 
         let imported_search = gtk::SearchEntry::builder()
             .placeholder_text("搜索订阅规则")
@@ -283,19 +272,11 @@ impl RulesView {
         // 2.4 用户自定义规则列表 (Custom)
         let custom_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let custom_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        custom_header.set_margin_start(12);
-        custom_header.set_margin_end(12);
-        custom_header.set_margin_top(8);
-        custom_header.set_margin_bottom(8);
+        custom_header.set_visible(false);
         let custom_back_btn = gtk::Button::from_icon_name("go-previous-symbolic");
-        custom_back_btn.add_css_class("flat");
-        custom_back_btn.set_tooltip_text(Some("返回"));
-        custom_header.append(&custom_back_btn);
         let custom_title_lbl = gtk::Label::new(Some("自定义分流规则"));
-        custom_title_lbl.add_css_class("title-4");
+        custom_header.append(&custom_back_btn);
         custom_header.append(&custom_title_lbl);
-        custom_page.append(&custom_header);
-        custom_page.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 
         let custom_search = gtk::SearchEntry::builder()
             .placeholder_text("搜索自定义规则")
@@ -313,8 +294,10 @@ impl RulesView {
         let custom_rules_group = adw::PreferencesGroup::builder().title("规则列表").build();
         let custom_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let import_omega_btn = gtk::Button::with_label("导入 Omega 备份");
+        import_omega_btn.add_css_class("flat");
         custom_actions.append(&import_omega_btn);
         let clear_rules_btn = gtk::Button::with_label("清空");
+        clear_rules_btn.add_css_class("flat");
         clear_rules_btn.add_css_class("destructive-action");
         custom_actions.append(&clear_rules_btn);
         let add_rule_btn = gtk::Button::with_label("添加规则");
@@ -391,6 +374,7 @@ impl RulesView {
         Self {
             container: rules_page,
             rules_stack,
+            rules_switcher,
             app_search,
             app_sort,
             applications_group,
@@ -400,6 +384,7 @@ impl RulesView {
             ipv6_row,
             rule_status_row,
             custom_summary_row,
+            quick_add_rule_btn,
             import_button,
             rule_source_entry,
             import_trigger_btn,

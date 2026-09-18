@@ -11,6 +11,7 @@ pub struct MainWindowWidgets {
     pub traffic_nav: gtk::ListBoxRow,
     pub logs_nav: gtk::ListBoxRow,
     pub header: adw::HeaderBar,
+    pub back_button: gtk::Button,
     pub page_title: gtk::Label,
     pub add_connection: gtk::Button,
     pub view_stack: gtk::Stack,
@@ -73,6 +74,12 @@ pub fn create_main_window(app: &adw::Application) -> MainWindowWidgets {
     toolbar.set_hexpand(true);
 
     let header = adw::HeaderBar::new();
+    let back_button = gtk::Button::from_icon_name("go-previous-symbolic");
+    back_button.add_css_class("flat");
+    back_button.set_tooltip_text(Some("返回"));
+    back_button.set_visible(false);
+    header.pack_start(&back_button);
+
     let page_title = gtk::Label::new(Some("节点连接"));
     page_title.add_css_class("title-3");
     header.set_title_widget(Some(&page_title));
@@ -127,6 +134,7 @@ pub fn create_main_window(app: &adw::Application) -> MainWindowWidgets {
         traffic_nav,
         logs_nav,
         header,
+        back_button,
         page_title,
         add_connection,
         view_stack,

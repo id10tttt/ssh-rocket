@@ -1095,6 +1095,10 @@ fn build_ui(app: &adw::Application) {
         let view_stack = win.view_stack.clone();
         let page_title = win.page_title.clone();
         let add_connection = win.add_connection.clone();
+        let header = win.header.clone();
+        let back_button = win.back_button.clone();
+        let rules_switcher = rules_view.rules_switcher.clone();
+        let rules_domain_stack = rules_view.domain_stack.clone();
         let refresh_traffic_tab = refresh_active_traffic_tab.clone();
         win.navigation.connect_row_selected(move |_, row| {
             let Some(row) = row else { return; };
@@ -1105,8 +1109,16 @@ fn build_ui(app: &adw::Application) {
                 _ => ("connect", "节点连接"),
             };
             view_stack.set_visible_child_name(name);
-            page_title.set_text(title);
             add_connection.set_visible(name == "connect");
+            if name == "rules" {
+                rules_domain_stack.set_visible_child_name("overview");
+                back_button.set_visible(false);
+                header.set_title_widget(Some(&rules_switcher));
+            } else {
+                back_button.set_visible(false);
+                header.set_title_widget(Some(&page_title));
+                page_title.set_text(title);
+            }
             if name == "traffic" {
                 if let Some(refresh) = refresh_traffic_tab.borrow().as_ref() {
                     refresh();
@@ -1429,39 +1441,97 @@ fn build_ui(app: &adw::Application) {
     }
     {
         let stack = rules_view.domain_stack.clone();
+        let header = win.header.clone();
+        let page_title = win.page_title.clone();
+        let back_btn = win.back_button.clone();
+        let source_title = rules_view.detail_title_lbl.clone();
         rules_view
             .rule_status_row
-            .connect_activated(move |_| stack.set_visible_child_name("detail"));
+            .connect_activated(move |_| {
+                stack.set_visible_child_name("detail");
+                back_btn.set_visible(true);
+                let title = source_title.text();
+                page_title.set_text(if title.is_empty() { "订阅配置" } else { title.as_str() });
+                header.set_title_widget(Some(&page_title));
+            });
     }
     {
         let stack = rules_view.domain_stack.clone();
+        let header = win.header.clone();
+        let page_title = win.page_title.clone();
+        let back_btn = win.back_button.clone();
         rules_view
             .custom_summary_row
-            .connect_activated(move |_| stack.set_visible_child_name("custom"));
+            .connect_activated(move |_| {
+                stack.set_visible_child_name("custom");
+                back_btn.set_visible(true);
+                page_title.set_text("自定义分流规则");
+                header.set_title_widget(Some(&page_title));
+            });
     }
     {
         let stack = rules_view.domain_stack.clone();
-        rules_view
-            .detail_back_btn
-            .connect_clicked(move |_| stack.set_visible_child_name("overview"));
-    }
-    {
-        let stack = rules_view.domain_stack.clone();
+        let header = win.header.clone();
+        let page_title = win.page_title.clone();
+        let back_btn = win.back_button.clone();
         rules_view
             .imported_summary_row
-            .connect_activated(move |_| stack.set_visible_child_name("imported"));
+            .connect_activated(move |_| {
+                stack.set_visible_child_name("imported");
+                back_btn.set_visible(true);
+                page_title.set_text("订阅规则条目");
+                header.set_title_widget(Some(&page_title));
+            });
     }
     {
         let stack = rules_view.domain_stack.clone();
-        rules_view
-            .imported_back_btn
-            .connect_clicked(move |_| stack.set_visible_child_name("detail"));
+        let header = win.header.clone();
+        let page_title = win.page_title.clone();
+        let back_btn = win.back_button.clone();
+        let rules_switcher = rules_view.rules_switcher.clone();
+        let source_title = rules_view.detail_title_lbl.clone();
+        win.back_button.connect_clicked(move |_| {
+            match stack.visible_child_name().as_deref() {
+                Some("imported") => {
+                    stack.set_visible_child_name("detail");
+                    let title = source_title.text();
+                    page_title.set_text(if title.is_empty() { "订阅配置" } else { title.as_str() });
+                    header.set_title_widget(Some(&page_title));
+                    back_btn.set_visible(true);
+                }
+                _ => {
+                    stack.set_visible_child_name("overview");
+                    back_btn.set_visible(false);
+                    header.set_title_widget(Some(&rules_switcher));
+                }
+            }
+        });
     }
     {
-        let stack = rules_view.domain_stack.clone();
-        rules_view
-            .custom_back_btn
-            .connect_clicked(move |_| stack.set_visible_child_name("overview"));
+        let back_btn = win.back_button.clone();
+        rules_view.detail_back_btn.connect_clicked(move |_| {
+            back_btn.emit_clicked();
+        });
+    }
+    {
+        let back_btn = win.back_button.clone();
+        rules_view.imported_back_btn.connect_clicked(move |_| {
+            back_btn.emit_clicked();
+        });
+    }
+    {
+        let back_btn = win.back_button.clone();
+        rules_view.custom_back_btn.connect_clicked(move |_| {
+            back_btn.emit_clicked();
+        });
+    }
+    {
+        let parent = win.window.clone();
+        let config = config.clone();
+        let refresh = refresh_rule_views.clone();
+        rules_view.quick_add_rule_btn.connect_clicked(move |_| {
+            show_rule_dialog(&parent, config.clone(), None, refresh.clone());
+        });
     }
     {
         let parent = win.window.clone();
@@ -1504,6 +1574,9 @@ fn build_ui(app: &adw::Application) {
         let config = config.clone();
         let stack = rules_view.domain_stack.clone();
         let refresh = refresh_rule_views.clone();
+        let back_btn = win.back_button.clone();
+        let header = win.header.clone();
+        let rules_switcher = rules_view.rules_switcher.clone();
         rules_view.remove_source_btn.connect_clicked(move |_| {
             let dialog = adw::AlertDialog::new(Some("确认删除该订阅配置？"), None);
             dialog.add_response("cancel", "取消");
@@ -1512,6 +1585,9 @@ fn build_ui(app: &adw::Application) {
             let config = config.clone();
             let stack = stack.clone();
             let refresh = refresh.clone();
+            let back_btn = back_btn.clone();
+            let header = header.clone();
+            let rules_switcher = rules_switcher.clone();
             dialog.connect_response(None, move |_, response| {
                 if response == "remove" {
                     let mut current = config.borrow_mut();
@@ -1523,6 +1599,8 @@ fn build_ui(app: &adw::Application) {
                     if current.save().is_ok() {
                         drop(current);
                         stack.set_visible_child_name("overview");
+                        back_btn.set_visible(false);
+                        header.set_title_widget(Some(&rules_switcher));
                         if let Some(refresh) = refresh.borrow().as_ref() {
                             refresh();
                         }
