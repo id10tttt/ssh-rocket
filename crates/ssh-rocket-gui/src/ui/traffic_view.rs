@@ -10,12 +10,12 @@ use crate::{
     AppTrafficStat,
 };
 
+#[derive(Clone)]
 pub struct TrafficView {
     pub page: gtk::ScrolledWindow,
 
-    // 1. KPI 概览面板组件
-    pub started_label: gtk::Label,
-    pub duration_label: gtk::Label,
+    // 1. 会话与传输总览
+    pub overview_group: adw::PreferencesGroup,
     pub total_hero_label: gtk::Label,
     pub total_up_label: gtk::Label,
     pub total_down_label: gtk::Label,
@@ -26,11 +26,10 @@ pub struct TrafficView {
     pub direct_up_label: gtk::Label,
     pub direct_down_label: gtk::Label,
 
-    // 2. 规则策略横向分段比例条
+    // 2. 规则策略横向分段比例条 (自适应 DrawingArea)
     pub total_rules_label: gtk::Label,
-    pub proxy_seg: gtk::Box,
-    pub reject_seg: gtk::Box,
-    pub direct_seg: gtk::Box,
+    pub distribution_data: Rc<RefCell<(f64, f64, f64)>>,
+    pub distribution_area: gtk::DrawingArea,
     pub proxy_legend_label: gtk::Label,
     pub reject_legend_label: gtk::Label,
     pub direct_legend_label: gtk::Label,
@@ -42,12 +41,23 @@ pub struct TrafficView {
 }
 
 impl TrafficView {
+    pub fn update_session_subtitle(&self, duration: &str, started: &str) {
+        if started == "—" || started.is_empty() {
+            self.overview_group.set_description(Some("未连接"));
+        } else {
+            self.overview_group.set_description(Some(&format!(
+                "连接时长: {duration} · 始于 {started}"
+            )));
+        }
+    }
+
     pub fn new() -> Self {
         let traffic_page = adw::PreferencesPage::new();
 
-        // --- 1. 会话与传输总览 (4 列统一 KPI 面板) ---
+        // --- 1. 会话与传输总览 (3 列纯流量 KPI 面板，连接信息置于小标题) ---
         let overview_group = adw::PreferencesGroup::builder()
             .title("会话与传输总览")
+            .description("未连接")
             .build();
 
         let overview_card = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -59,46 +69,12 @@ impl TrafficView {
             create_kpi_tile("总传输量", "0 B");
         overview_card.append(&tile_total);
 
-        // 列 2: 连接会话 (时长与开始时间)
-        let tile_session = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        tile_session.add_css_class("metric-tile");
-        tile_session.set_hexpand(true);
-
-        let session_title = gtk::Label::builder()
-            .label("连接时长")
-            .halign(gtk::Align::Start)
-            .css_classes(["metric-title", "dim-label"])
-            .build();
-        tile_session.append(&session_title);
-
-        let duration_label = gtk::Label::builder()
-            .label("00:00:00")
-            .halign(gtk::Align::Start)
-            .css_classes(["metric-hero", "numeric"])
-            .build();
-        tile_session.append(&duration_label);
-
-        let started_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-        let started_prefix = gtk::Label::builder()
-            .label("始于")
-            .css_classes(["dim-label"])
-            .build();
-        started_box.append(&started_prefix);
-        let started_label = gtk::Label::builder()
-            .label("—")
-            .halign(gtk::Align::Start)
-            .css_classes(["dim-label", "numeric"])
-            .build();
-        started_box.append(&started_label);
-        tile_session.append(&started_box);
-        overview_card.append(&tile_session);
-
-        // 列 3: 代理流量
+        // 列 2: 代理流量
         let (tile_proxy, proxy_hero_label, proxy_up_label, proxy_down_label) =
             create_kpi_tile("代理流量", "0 B");
         overview_card.append(&tile_proxy);
 
-        // 列 4: 直连流量
+        // 列 3: 直连流量
         let (tile_direct, direct_hero_label, direct_up_label, direct_down_label) =
             create_kpi_tile("直连流量", "0 B");
         overview_card.append(&tile_direct);
@@ -106,13 +82,13 @@ impl TrafficView {
         overview_group.add(&overview_card);
         traffic_page.add(&overview_group);
 
-        // --- 2. 规则策略分布 (横向分段比例条) ---
+        // --- 2. 规则策略分布 (自适应分段比例条) ---
         let distribution_group = adw::PreferencesGroup::builder()
             .title("规则策略分布")
             .build();
 
         let total_rules_label = gtk::Label::builder()
-            .label("共 0 条规则")
+            .label("共 0 条策略")
             .css_classes(["dim-label", "numeric"])
             .build();
         distribution_group.set_header_suffix(Some(&total_rules_label));
@@ -130,27 +106,72 @@ impl TrafficView {
         dist_content.set_margin_top(16);
         dist_content.set_margin_bottom(16);
 
-        // 横向彩色分段条
-        let distribution_bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
-        distribution_bar.add_css_class("distribution-bar");
-        distribution_bar.set_hexpand(true);
+        // 横向彩色自适应分段条 (DrawingArea 弹性绘制，随窗口宽度自适应)
+        let distribution_data = Rc::new(RefCell::new((0.0f64, 0.0f64, 0.0f64)));
+        let distribution_area = gtk::DrawingArea::builder()
+            .content_height(12)
+            .hexpand(true)
+            .build();
 
-        let proxy_seg = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        proxy_seg.add_css_class("distribution-seg-proxy");
-        proxy_seg.set_hexpand(false);
-        distribution_bar.append(&proxy_seg);
+        let draw_data = distribution_data.clone();
+        distribution_area.set_draw_func(move |_area, cr, width, height| {
+            let (proxy_ratio, reject_ratio, direct_ratio) = *draw_data.borrow();
+            let total_ratio = proxy_ratio + reject_ratio + direct_ratio;
+            let w = width as f64;
+            let h = height as f64;
+            if w <= 0.0 || h <= 0.0 {
+                return;
+            }
 
-        let reject_seg = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        reject_seg.add_css_class("distribution-seg-reject");
-        reject_seg.set_hexpand(false);
-        distribution_bar.append(&reject_seg);
+            // 圆角剪裁 (半径 6px)
+            let r = 6.0f64.min(h / 2.0).min(w / 2.0);
+            cr.new_sub_path();
+            cr.arc(w - r, r, r, -std::f64::consts::FRAC_PI_2, 0.0);
+            cr.arc(w - r, h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
+            cr.arc(r, h - r, r, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
+            cr.arc(r, r, r, std::f64::consts::PI, 3.0 * std::f64::consts::FRAC_PI_2);
+            cr.close_path();
+            let _ = cr.clip();
 
-        let direct_seg = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        direct_seg.add_css_class("distribution-seg-direct");
-        direct_seg.set_hexpand(false);
-        distribution_bar.append(&direct_seg);
+            // 轨道底色
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.08);
+            let _ = cr.paint();
 
-        dist_content.append(&distribution_bar);
+            if total_ratio <= 0.0 {
+                return;
+            }
+
+            let proxy_w = (w * proxy_ratio).round();
+            let reject_w = (w * reject_ratio).round();
+            let direct_w = (w - proxy_w - reject_w).max(0.0);
+
+            let mut current_x = 0.0;
+
+            // 代理绿: #2ec27e
+            if proxy_w > 0.0 {
+                cr.set_source_rgb(0.18, 0.76, 0.49);
+                cr.rectangle(current_x, 0.0, proxy_w, h);
+                let _ = cr.fill();
+                current_x += proxy_w;
+            }
+
+            // 拦截红: #e01b24
+            if reject_w > 0.0 {
+                cr.set_source_rgb(0.88, 0.11, 0.14);
+                cr.rectangle(current_x, 0.0, reject_w, h);
+                let _ = cr.fill();
+                current_x += reject_w;
+            }
+
+            // 直连蓝: #3584e4
+            if direct_w > 0.0 {
+                cr.set_source_rgb(0.21, 0.52, 0.89);
+                cr.rectangle(current_x, 0.0, direct_w, h);
+                let _ = cr.fill();
+            }
+        });
+
+        dist_content.append(&distribution_area);
 
         // 图例与数值指示 (Legend)
         let legend_box = gtk::Box::new(gtk::Orientation::Horizontal, 24);
@@ -200,12 +221,12 @@ impl TrafficView {
         let scroller = gtk::ScrolledWindow::builder()
             .child(&traffic_page)
             .vexpand(true)
+            .hscrollbar_policy(gtk::PolicyType::Never)
             .build();
 
         Self {
             page: scroller,
-            started_label,
-            duration_label,
+            overview_group,
             total_hero_label,
             total_up_label,
             total_down_label,
@@ -216,9 +237,8 @@ impl TrafficView {
             direct_up_label,
             direct_down_label,
             total_rules_label,
-            proxy_seg,
-            reject_seg,
-            direct_seg,
+            distribution_data,
+            distribution_area,
             proxy_legend_label,
             reject_legend_label,
             direct_legend_label,
@@ -307,13 +327,12 @@ fn create_legend_item(dot_class: &str, text: &str) -> (gtk::Box, gtk::Label) {
     (item, label)
 }
 
-/// 刷新规则策略分布分段比例条
+/// 刷新规则策略分布自适应比例条
 pub fn refresh_traffic_rule_counts(
     config: &Rc<RefCell<AppConfig>>,
     total_rules_label: &gtk::Label,
-    proxy_seg: &gtk::Box,
-    reject_seg: &gtk::Box,
-    direct_seg: &gtk::Box,
+    distribution_data: &Rc<RefCell<(f64, f64, f64)>>,
+    distribution_area: &gtk::DrawingArea,
     proxy_legend_label: &gtk::Label,
     reject_legend_label: &gtk::Label,
     direct_legend_label: &gtk::Label,
@@ -359,9 +378,8 @@ pub fn refresh_traffic_rule_counts(
     total_rules_label.set_text(&format!("共 {total} 条策略"));
 
     if total == 0 {
-        proxy_seg.set_visible(false);
-        reject_seg.set_visible(false);
-        direct_seg.set_visible(false);
+        *distribution_data.borrow_mut() = (0.0, 0.0, 0.0);
+        distribution_area.queue_draw();
         proxy_legend_label.set_text("代理: 0 (0.0%)");
         reject_legend_label.set_text("拦截: 0 (0.0%)");
         direct_legend_label.set_text("直连: 0 (0.0%)");
@@ -372,21 +390,8 @@ pub fn refresh_traffic_rule_counts(
     let reject_ratio = reject_count as f64 / total as f64;
     let direct_ratio = direct_count as f64 / total as f64;
 
-    // 动态调整色块可见性与相对宽度分配 (以 1000 为基准权重)
-    let total_width = 1000.0;
-    proxy_seg.set_visible(proxy_count > 0);
-    reject_seg.set_visible(reject_count > 0);
-    direct_seg.set_visible(direct_count > 0);
-
-    if proxy_count > 0 {
-        proxy_seg.set_size_request(((proxy_ratio * total_width).round() as i32).max(4), 12);
-    }
-    if reject_count > 0 {
-        reject_seg.set_size_request(((reject_ratio * total_width).round() as i32).max(4), 12);
-    }
-    if direct_count > 0 {
-        direct_seg.set_size_request(((direct_ratio * total_width).round() as i32).max(4), 12);
-    }
+    *distribution_data.borrow_mut() = (proxy_ratio, reject_ratio, direct_ratio);
+    distribution_area.queue_draw();
 
     proxy_legend_label.set_text(&format!(
         "代理: {proxy_count} ({:.1}%)",

@@ -1884,9 +1884,8 @@ fn build_ui(app: &adw::Application) {
     let refresh_traffic_rule_counts_impl = {
         let config = config.clone();
         let total_rules_label = traffic_view.total_rules_label.clone();
-        let proxy_seg = traffic_view.proxy_seg.clone();
-        let reject_seg = traffic_view.reject_seg.clone();
-        let direct_seg = traffic_view.direct_seg.clone();
+        let distribution_data = traffic_view.distribution_data.clone();
+        let distribution_area = traffic_view.distribution_area.clone();
         let proxy_legend_label = traffic_view.proxy_legend_label.clone();
         let reject_legend_label = traffic_view.reject_legend_label.clone();
         let direct_legend_label = traffic_view.direct_legend_label.clone();
@@ -1894,9 +1893,8 @@ fn build_ui(app: &adw::Application) {
             refresh_traffic_rule_counts(
                 &config,
                 &total_rules_label,
-                &proxy_seg,
-                &reject_seg,
-                &direct_seg,
+                &distribution_data,
+                &distribution_area,
                 &proxy_legend_label,
                 &reject_legend_label,
                 &direct_legend_label,
@@ -2113,8 +2111,24 @@ fn build_ui(app: &adw::Application) {
         let bottom_status_dot = win.bottom_status_dot.clone();
         let bottom_status = win.bottom_status.clone();
         let speed_label = win.speed_label.clone();
-        let started_label = traffic_view.started_label.clone();
-        let duration_label = traffic_view.duration_label.clone();
+        let session_started = Rc::new(RefCell::new(String::from("—")));
+        let session_duration = Rc::new(RefCell::new(String::from("00:00:00")));
+        let update_session_status = {
+            let traffic_view = traffic_view.clone();
+            let session_started = session_started.clone();
+            let session_duration = session_duration.clone();
+            let is_connected = is_connected.clone();
+            Rc::new(move || {
+                if *is_connected.borrow() {
+                    traffic_view.update_session_subtitle(
+                        &session_duration.borrow(),
+                        &session_started.borrow(),
+                    );
+                } else {
+                    traffic_view.update_session_subtitle("00:00:00", "—");
+                }
+            })
+        };
         let connect_start_time = connect_start_time.clone();
         let total_hero_label = traffic_view.total_hero_label.clone();
         let total_up_label = traffic_view.total_up_label.clone();
@@ -2185,13 +2199,13 @@ fn build_ui(app: &adw::Application) {
                         update_traffic_labels();
                         *connect_start_time.borrow_mut() = Some(std::time::Instant::now());
                         if let Ok(now) = gtk::glib::DateTime::now_local() {
-                            started_label.set_text(
-                                &now.format("%Y-%m-%d %H:%M:%S")
-                                    .map_or_else(|_| "—".into(), |s| s.to_string()),
-                            );
+                            *session_started.borrow_mut() = now
+                                .format("%H:%M:%S")
+                                .map_or_else(|_| "—".into(), |s| s.to_string());
                         }
-                        duration_label.set_text("00:00:00");
+                        *session_duration.borrow_mut() = "00:00:00".into();
                         *is_connected.borrow_mut() = true;
+                        update_session_status();
 
                         bottom_status_dot.remove_css_class("status-dot-disconnected");
                         bottom_status_dot.remove_css_class("status-dot-connecting");
@@ -2208,6 +2222,9 @@ fn build_ui(app: &adw::Application) {
                     RuntimeEvent::Disconnected => {
                         *is_connected.borrow_mut() = false;
                         *connect_start_time.borrow_mut() = None;
+                        *session_started.borrow_mut() = "—".into();
+                        *session_duration.borrow_mut() = "00:00:00".into();
+                        update_session_status();
 
                         bottom_status_dot.remove_css_class("status-dot-connected");
                         bottom_status_dot.remove_css_class("status-dot-connecting");
@@ -2238,6 +2255,9 @@ fn build_ui(app: &adw::Application) {
                     RuntimeEvent::Error(error) => {
                         *is_connected.borrow_mut() = false;
                         *connect_start_time.borrow_mut() = None;
+                        *session_started.borrow_mut() = "—".into();
+                        *session_duration.borrow_mut() = "00:00:00".into();
+                        update_session_status();
 
                         bottom_status_dot.remove_css_class("status-dot-connected");
                         bottom_status_dot.remove_css_class("status-dot-connecting");
@@ -2358,7 +2378,8 @@ fn build_ui(app: &adw::Application) {
             }
             if let Some(start) = *connect_start_time.borrow() {
                 let elapsed = start.elapsed().as_secs();
-                duration_label.set_text(&format_duration(elapsed));
+                *session_duration.borrow_mut() = format_duration(elapsed);
+                update_session_status();
             }
             gtk::glib::ControlFlow::Continue
         });
