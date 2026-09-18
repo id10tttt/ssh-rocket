@@ -71,11 +71,27 @@ pub enum RuntimeEvent {
     },
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RuntimeController {
     stop: Rc<RefCell<Option<oneshot::Sender<()>>>>,
     helper: Arc<Mutex<Option<PrivilegedHelperSession>>>,
     is_running: Arc<AtomicBool>,
+    runtime: Arc<tokio::runtime::Runtime>,
+}
+
+impl Default for RuntimeController {
+    fn default() -> Self {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("无法初始化后台 Tokio 运行时");
+        Self {
+            stop: Rc::new(RefCell::new(None)),
+            helper: Arc::new(Mutex::new(None)),
+            is_running: Arc::new(AtomicBool::new(false)),
+            runtime: Arc::new(runtime),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -354,34 +370,23 @@ impl RuntimeController {
     pub fn shutdown(&self) {
         self.stop();
         let helper = self.helper.clone();
+        let runtime = self.runtime.clone();
         thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            if let Ok(rt) = runtime {
-                rt.block_on(async {
-                    let mut guard = helper.lock().await;
-                    if let Some(mut h) = guard.take() {
-                        h.shutdown().await;
-                    }
-                });
-            }
+            runtime.block_on(async {
+                let mut guard = helper.lock().await;
+                if let Some(mut h) = guard.take() {
+                    h.shutdown().await;
+                }
+            });
         });
     }
 
     pub fn sync_rules(&self) {
         let helper = self.helper.clone();
-        thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            if let Ok(rt) = runtime {
-                rt.block_on(async {
-                    let mut guard = helper.lock().await;
-                    if let Some(h) = guard.as_mut() {
-                        let _ = h.sync_rules().await;
-                    }
-                });
+        self.runtime.spawn(async move {
+            let mut guard = helper.lock().await;
+            if let Some(h) = guard.as_mut() {
+                let _ = h.sync_rules().await;
             }
         });
     }
@@ -401,18 +406,9 @@ impl RuntimeController {
         let helper = self.helper.clone();
         let is_running_flag = self.is_running.clone();
 
-        thread::spawn(move || {
+        self.runtime.spawn(async move {
             let desktop_apps = scan_desktop_apps();
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build();
-            let Ok(runtime) = runtime else {
-                let _ = events.send(RuntimeEvent::Error("无法创建异步运行时".into()));
-                is_running_flag.store(false, Ordering::SeqCst);
-                return;
-            };
-            runtime.block_on(async move {
-                let user_cancelled = Arc::new(AtomicBool::new(false));
+            let user_cancelled = Arc::new(AtomicBool::new(false));
                 let mut retry_attempt = 0;
                 let mut app_tracker = AppTrafficTracker::default();
 
@@ -657,7 +653,6 @@ impl RuntimeController {
                 }
 
                 is_running_flag.store(false, Ordering::SeqCst);
-            });
         });
     }
 }
