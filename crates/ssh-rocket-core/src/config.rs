@@ -23,6 +23,14 @@ pub enum RuleAction {
     Block,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthType {
+    #[default]
+    Key,
+    Password,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
     pub id: Uuid,
@@ -31,6 +39,10 @@ pub struct Profile {
     #[serde(default = "default_ssh_port")]
     pub port: u16,
     pub username: String,
+    #[serde(default)]
+    pub auth_type: AuthType,
+    #[serde(default)]
+    pub password: Option<String>,
     #[serde(default)]
     pub identity_file: Option<PathBuf>,
 }
@@ -47,6 +59,8 @@ impl Default for Profile {
             host: String::new(),
             port: 22,
             username: String::new(),
+            auth_type: AuthType::Key,
+            password: None,
             identity_file: None,
         }
     }
@@ -172,3 +186,46 @@ impl AppConfig {
         self.profiles.iter().find(|profile| profile.id == active)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_profile_backward_compatibility() {
+        let old_json = r#"{
+            "id": "a0000000-0000-0000-0000-000000000001",
+            "name": "Old Server",
+            "host": "192.168.1.1",
+            "port": 22,
+            "username": "root",
+            "identity_file": "/home/user/.ssh/id_rsa"
+        }"#;
+
+        let profile: Profile = serde_json::from_str(old_json).expect("should deserialize old profile");
+        assert_eq!(profile.auth_type, AuthType::Key);
+        assert_eq!(profile.password, None);
+        assert_eq!(profile.identity_file, Some(PathBuf::from("/home/user/.ssh/id_rsa")));
+    }
+
+    #[test]
+    fn test_profile_password_auth_roundtrip() {
+        let profile = Profile {
+            id: Uuid::new_v4(),
+            name: "Pwd Server".into(),
+            host: "example.com".into(),
+            port: 2222,
+            username: "admin".into(),
+            auth_type: AuthType::Password,
+            password: Some("mypassword123".into()),
+            identity_file: None,
+        };
+
+        let json = serde_json::to_string(&profile).expect("serialize");
+        let decoded: Profile = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.auth_type, AuthType::Password);
+        assert_eq!(decoded.password.as_deref(), Some("mypassword123"));
+        assert_eq!(decoded.identity_file, None);
+    }
+}
+

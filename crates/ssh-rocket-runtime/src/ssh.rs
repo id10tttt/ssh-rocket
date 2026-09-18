@@ -39,7 +39,17 @@ impl SshSession {
             bail!("the SSH server resolved to no addresses");
         }
 
-        let mut command = Command::new("ssh");
+        let use_sshpass = profile.auth_type == ssh_rocket_core::AuthType::Password && profile.password.is_some();
+        let mut command = if use_sshpass {
+            let mut cmd = Command::new("sshpass");
+            if let Some(password) = &profile.password {
+                cmd.arg("-p").arg(password);
+            }
+            cmd.arg("ssh");
+            cmd
+        } else {
+            Command::new("ssh")
+        };
         command
             .arg("-N")
             .arg("-T")
@@ -54,8 +64,10 @@ impl SshSession {
         if !profile.username.trim().is_empty() {
             command.arg("-l").arg(profile.username.trim());
         }
-        if let Some(identity_file) = &profile.identity_file {
-            command.arg("-i").arg(identity_file);
+        if profile.auth_type == ssh_rocket_core::AuthType::Key {
+            if let Some(identity_file) = &profile.identity_file {
+                command.arg("-i").arg(identity_file);
+            }
         }
         unsafe {
             command.pre_exec(|| {
@@ -110,8 +122,10 @@ async fn effective_server(profile: &Profile) -> (String, u16) {
     if !profile.username.trim().is_empty() {
         command.arg("-l").arg(profile.username.trim());
     }
-    if let Some(identity_file) = &profile.identity_file {
-        command.arg("-i").arg(identity_file);
+    if profile.auth_type == ssh_rocket_core::AuthType::Key {
+        if let Some(identity_file) = &profile.identity_file {
+            command.arg("-i").arg(identity_file);
+        }
     }
     let output = command.arg(profile.host.trim()).output().await;
     let Ok(output) = output else {

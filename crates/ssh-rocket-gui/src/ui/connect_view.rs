@@ -1,7 +1,7 @@
 use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
-use ssh_rocket_core::AppConfig;
+use ssh_rocket_core::{AppConfig, AuthType};
 use std::{cell::RefCell, rc::Rc, sync::mpsc};
 
 use crate::{
@@ -34,19 +34,19 @@ impl ConnectView {
         empty_connections.set_child(Some(&empty_add));
         connect_stack.add_named(&empty_connections, Some("empty"));
 
-        // 节点卡片流式网格
+        // 节点卡片流式网格（50% / 50% 响应式双列等宽均分）
         let connection_flow = gtk::FlowBox::new();
         connection_flow.set_selection_mode(gtk::SelectionMode::None);
-        connection_flow.set_column_spacing(16);
-        connection_flow.set_row_spacing(16);
-        connection_flow.set_min_children_per_line(1);
-        connection_flow.set_max_children_per_line(3);
-        connection_flow.set_homogeneous(false);
+        connection_flow.set_column_spacing(14);
+        connection_flow.set_row_spacing(14);
+        connection_flow.set_min_children_per_line(2);
+        connection_flow.set_max_children_per_line(2);
+        connection_flow.set_homogeneous(true);
         connection_flow.set_valign(gtk::Align::Start);
-        connection_flow.set_margin_start(18);
-        connection_flow.set_margin_end(18);
-        connection_flow.set_margin_top(18);
-        connection_flow.set_margin_bottom(18);
+        connection_flow.set_margin_start(16);
+        connection_flow.set_margin_end(16);
+        connection_flow.set_margin_top(14);
+        connection_flow.set_margin_bottom(14);
 
         let connection_scroller = gtk::ScrolledWindow::builder()
             .child(&connection_flow)
@@ -103,24 +103,24 @@ pub fn render_connection_cards(
     for profile in profiles {
         let is_active = active_profile_id == Some(profile.id);
 
-        let card = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        let card = gtk::Box::new(gtk::Orientation::Vertical, 8);
         card.add_css_class("card");
         if is_active && connected {
             card.add_css_class("active-profile-card");
         }
-        card.set_size_request(280, -1);
+        card.set_hexpand(true);
         card.set_valign(gtk::Align::Start);
         card.set_vexpand(false);
-        card.set_margin_start(4);
-        card.set_margin_end(4);
-        card.set_margin_top(4);
-        card.set_margin_bottom(4);
+        card.set_margin_start(2);
+        card.set_margin_end(2);
+        card.set_margin_top(2);
+        card.set_margin_bottom(2);
 
         // 卡片顶部标题栏
-        let header_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        header_row.set_margin_start(16);
-        header_row.set_margin_end(10);
-        header_row.set_margin_top(14);
+        let header_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        header_row.set_margin_start(14);
+        header_row.set_margin_end(8);
+        header_row.set_margin_top(10);
 
         // 状态圆点
         let dot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -162,9 +162,9 @@ pub fn render_connection_cards(
         card.append(&header_row);
 
         // 参数信息列表
-        let info = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        info.set_margin_start(16);
-        info.set_margin_end(16);
+        let info = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        info.set_margin_start(14);
+        info.set_margin_end(14);
         for (key, value) in [
             ("服务器", profile.host.clone()),
             ("端口", profile.port.to_string()),
@@ -175,14 +175,6 @@ pub fn render_connection_cards(
                 } else {
                     profile.username.clone()
                 },
-            ),
-            (
-                "私钥",
-                profile
-                    .identity_file
-                    .as_ref()
-                    .map(|path| path.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "—".into()),
             ),
         ] {
             let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -197,14 +189,72 @@ pub fn render_connection_cards(
             line.append(&value_label);
             info.append(&line);
         }
+
+        // 认证信息（私钥或密码）及脱敏切换
+        let (auth_key, auth_val) = match profile.auth_type {
+            AuthType::Key => (
+                "私钥",
+                profile
+                    .identity_file
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().to_string()),
+            ),
+            AuthType::Password => ("密码", profile.password.clone()),
+        };
+
+        let auth_line = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let key_label = gtk::Label::new(Some(auth_key));
+        key_label.add_css_class("dim-label");
+        key_label.set_halign(gtk::Align::Start);
+        key_label.set_hexpand(true);
+        auth_line.append(&key_label);
+
+        if let Some(val) = auth_val.filter(|v| !v.trim().is_empty()) {
+            let value_label = gtk::Label::new(Some("••••••••"));
+            value_label.set_halign(gtk::Align::End);
+            value_label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+            auth_line.append(&value_label);
+
+            let eye_btn = gtk::Button::from_icon_name("view-reveal-symbolic");
+            eye_btn.add_css_class("flat");
+            eye_btn.set_valign(gtk::Align::Center);
+            eye_btn.set_tooltip_text(Some("查看明文"));
+
+            let is_revealed = Rc::new(RefCell::new(false));
+            {
+                let is_revealed = is_revealed.clone();
+                let value_label = value_label.clone();
+                let real_text = val.clone();
+                eye_btn.connect_clicked(move |btn| {
+                    let mut rev = is_revealed.borrow_mut();
+                    *rev = !*rev;
+                    if *rev {
+                        value_label.set_text(&real_text);
+                        btn.set_icon_name("view-conceal-symbolic");
+                        btn.set_tooltip_text(Some("隐藏明文"));
+                    } else {
+                        value_label.set_text("••••••••");
+                        btn.set_icon_name("view-reveal-symbolic");
+                        btn.set_tooltip_text(Some("查看明文"));
+                    }
+                });
+            }
+            auth_line.append(&eye_btn);
+        } else {
+            let value_label = gtk::Label::new(Some("—"));
+            value_label.set_halign(gtk::Align::End);
+            auth_line.append(&value_label);
+        }
+        info.append(&auth_line);
+
         card.append(&info);
         card.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 
         // 操作区域
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        actions.set_margin_start(16);
-        actions.set_margin_end(16);
-        actions.set_margin_bottom(14);
+        actions.set_margin_start(14);
+        actions.set_margin_end(14);
+        actions.set_margin_bottom(10);
 
         let connect_button = gtk::Button::with_label(if is_active && connected {
             "断开连接"
@@ -322,6 +372,10 @@ pub fn render_connection_cards(
         }
 
         connection_flow.insert(&card, -1);
+        if let Some(child) = card.parent().and_then(|p| p.downcast::<gtk::FlowBoxChild>().ok()) {
+            child.set_hexpand(true);
+            child.set_halign(gtk::Align::Fill);
+        }
     }
 
     if let Some(tray) = tray_manager.borrow().as_ref() {

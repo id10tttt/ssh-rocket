@@ -1,7 +1,7 @@
 use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
-use ssh_rocket_core::{parse_rule_set, AppConfig, Profile, RuleAction};
+use ssh_rocket_core::{parse_rule_set, AppConfig, AuthType, Profile, RuleAction};
 use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
 use crate::ListedRule;
@@ -39,8 +39,18 @@ pub fn show_profile_dialog(
         .title("用户名")
         .text(&source.username)
         .build();
+
+    let auth_type_row = adw::ComboRow::builder()
+        .title("认证方式")
+        .model(&gtk::StringList::new(&["私钥认证", "密码认证"]))
+        .selected(match source.auth_type {
+            AuthType::Key => 0,
+            AuthType::Password => 1,
+        })
+        .build();
+
     let identity = adw::EntryRow::builder()
-        .title("私钥路径")
+        .title("私钥文件")
         .text(
             source
                 .identity_file
@@ -50,11 +60,60 @@ pub fn show_profile_dialog(
         )
         .build();
 
+    let browse_btn = gtk::Button::from_icon_name("document-open-symbolic");
+    browse_btn.add_css_class("flat");
+    browse_btn.set_valign(gtk::Align::Center);
+    browse_btn.set_tooltip_text(Some("选择私钥文件"));
+    {
+        let identity_clone = identity.clone();
+        let parent_clone = parent.clone();
+        browse_btn.connect_clicked(move |_| {
+            let file_dialog = gtk::FileDialog::builder()
+                .title("选择 SSH 私钥文件")
+                .modal(true)
+                .build();
+            let identity_ref = identity_clone.clone();
+            file_dialog.open(Some(&parent_clone), gtk::gio::Cancellable::NONE, move |result| {
+                if let Ok(file) = result {
+                    if let Some(path) = file.path() {
+                        identity_ref.set_text(&path.to_string_lossy());
+                    }
+                }
+            });
+        });
+    }
+    identity.add_suffix(&browse_btn);
+
+    let password_row = adw::PasswordEntryRow::builder()
+        .title("SSH 密码")
+        .text(source.password.as_deref().unwrap_or_default())
+        .build();
+
+    let update_auth_visibility = {
+        let identity = identity.clone();
+        let password_row = password_row.clone();
+        let auth_type_row = auth_type_row.clone();
+        Rc::new(move || {
+            let is_key = auth_type_row.selected() == 0;
+            identity.set_visible(is_key);
+            password_row.set_visible(!is_key);
+        })
+    };
+    update_auth_visibility();
+    {
+        let update = update_auth_visibility.clone();
+        auth_type_row.connect_selected_notify(move |_| {
+            update();
+        });
+    }
+
     group.add(&name);
     group.add(&host);
     group.add(&port);
     group.add(&username);
+    group.add(&auth_type_row);
     group.add(&identity);
+    group.add(&password_row);
     dialog.set_extra_child(Some(&group));
 
     dialog.add_response("cancel", "取消");
@@ -79,9 +138,17 @@ pub fn show_profile_dialog(
         saved.host = host_text;
         saved.port = port.text().parse::<u16>().unwrap_or(22);
         saved.username = username.text().trim().to_string();
-        let identity_text = identity.text();
-        let identity_text = identity_text.trim();
-        saved.identity_file = (!identity_text.is_empty()).then(|| PathBuf::from(identity_text));
+        let is_key = auth_type_row.selected() == 0;
+        saved.auth_type = if is_key { AuthType::Key } else { AuthType::Password };
+        if is_key {
+            let identity_text = identity.text().trim().to_string();
+            saved.identity_file = (!identity_text.is_empty()).then(|| PathBuf::from(identity_text));
+            saved.password = None;
+        } else {
+            let pwd_text = password_row.text().to_string();
+            saved.password = (!pwd_text.is_empty()).then_some(pwd_text);
+            saved.identity_file = None;
+        }
 
         let mut current = config.borrow_mut();
         if let Some(existing) = current.profiles.iter_mut().find(|item| item.id == saved.id) {
