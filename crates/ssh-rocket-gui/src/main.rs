@@ -2431,7 +2431,7 @@ fn build_ui(app: &adw::Application) {
                         *connect_start_time.borrow_mut() = Some(std::time::Instant::now());
                         if let Ok(now) = gtk::glib::DateTime::now_local() {
                             *session_started.borrow_mut() = now
-                                .format("%H:%M:%S")
+                                .format("%Y-%m-%d %H:%M:%S")
                                 .map_or_else(|_| "—".into(), |s| s.to_string());
                         }
                         *session_duration.borrow_mut() = "00:00:00".into();
@@ -2542,10 +2542,10 @@ fn build_ui(app: &adw::Application) {
 
                         {
                             let mut hist = traffic_view.speed_history.borrow_mut();
-                            if hist.len() >= 40 {
+                            if hist.len() >= 60 {
                                 hist.pop_front();
                             }
-                            hist.push_back((upload, download));
+                            hist.push_back((std::time::Instant::now(), upload, download));
                         }
                         traffic_view.speed_drawing_area.queue_draw();
                         traffic_view.speed_current_label.set_text(&format!(
