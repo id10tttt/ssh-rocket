@@ -1888,21 +1888,23 @@ fn build_ui(app: &adw::Application) {
     // 8. 流量监控逻辑
     let refresh_traffic_rule_counts_impl = {
         let config = config.clone();
-        let direct_count_label = traffic_view.direct_count_label.clone();
-        let proxy_count_label = traffic_view.proxy_count_label.clone();
-        let reject_count_label = traffic_view.reject_count_label.clone();
-        let direct_fill_box = traffic_view.direct_fill_box.clone();
-        let proxy_fill_box = traffic_view.proxy_fill_box.clone();
-        let reject_fill_box = traffic_view.reject_fill_box.clone();
+        let total_rules_label = traffic_view.total_rules_label.clone();
+        let proxy_seg = traffic_view.proxy_seg.clone();
+        let reject_seg = traffic_view.reject_seg.clone();
+        let direct_seg = traffic_view.direct_seg.clone();
+        let proxy_legend_label = traffic_view.proxy_legend_label.clone();
+        let reject_legend_label = traffic_view.reject_legend_label.clone();
+        let direct_legend_label = traffic_view.direct_legend_label.clone();
         Rc::new(move || {
             refresh_traffic_rule_counts(
                 &config,
-                &direct_count_label,
-                &proxy_count_label,
-                &reject_count_label,
-                &direct_fill_box,
-                &proxy_fill_box,
-                &reject_fill_box,
+                &total_rules_label,
+                &proxy_seg,
+                &reject_seg,
+                &direct_seg,
+                &proxy_legend_label,
+                &reject_legend_label,
+                &direct_legend_label,
             );
         })
     };
@@ -2119,10 +2121,13 @@ fn build_ui(app: &adw::Application) {
         let started_label = traffic_view.started_label.clone();
         let duration_label = traffic_view.duration_label.clone();
         let connect_start_time = connect_start_time.clone();
+        let total_hero_label = traffic_view.total_hero_label.clone();
         let total_up_label = traffic_view.total_up_label.clone();
         let total_down_label = traffic_view.total_down_label.clone();
+        let proxy_hero_label = traffic_view.proxy_hero_label.clone();
         let proxy_up_label = traffic_view.proxy_up_label.clone();
         let proxy_down_label = traffic_view.proxy_down_label.clone();
+        let direct_hero_label = traffic_view.direct_hero_label.clone();
         let direct_up_label = traffic_view.direct_up_label.clone();
         let direct_down_label = traffic_view.direct_down_label.clone();
         let session_upload = session_upload.clone();
@@ -2136,10 +2141,13 @@ fn build_ui(app: &adw::Application) {
             let session_upload = session_upload.clone();
             let session_download = session_download.clone();
             let app_traffic_data = app_traffic_data.clone();
+            let total_hero_label = total_hero_label.clone();
             let total_up_label = total_up_label.clone();
             let total_down_label = total_down_label.clone();
+            let proxy_hero_label = proxy_hero_label.clone();
             let proxy_up_label = proxy_up_label.clone();
             let proxy_down_label = proxy_down_label.clone();
+            let direct_hero_label = direct_hero_label.clone();
             let direct_up_label = direct_up_label.clone();
             let direct_down_label = direct_down_label.clone();
             Rc::new(move || {
@@ -2157,10 +2165,15 @@ fn build_ui(app: &adw::Application) {
                 let direct_up = total_up.saturating_sub(up_proxy);
                 let direct_down = total_down.saturating_sub(down_proxy);
 
+                total_hero_label.set_text(&format_bytes(total_up + total_down));
                 total_up_label.set_text(&format_bytes(total_up));
                 total_down_label.set_text(&format_bytes(total_down));
+
+                proxy_hero_label.set_text(&format_bytes(up_proxy + down_proxy));
                 proxy_up_label.set_text(&format_bytes(up_proxy));
                 proxy_down_label.set_text(&format_bytes(down_proxy));
+
+                direct_hero_label.set_text(&format_bytes(direct_up + direct_down));
                 direct_up_label.set_text(&format_bytes(direct_up));
                 direct_down_label.set_text(&format_bytes(direct_down));
             })

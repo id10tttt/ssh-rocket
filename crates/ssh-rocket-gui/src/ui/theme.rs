@@ -121,6 +121,50 @@ pub fn init_theme() {
             line-height: 1.4;
             padding: 8px;
         }
+
+        /* 横向分段比例条 */
+        .distribution-bar {
+            background-color: alpha(currentColor, 0.08);
+            border-radius: 6px;
+            min-height: 12px;
+            overflow: hidden;
+        }
+        .distribution-seg-proxy {
+            background-color: #2ec27e;
+        }
+        .distribution-seg-reject {
+            background-color: #e01b24;
+        }
+        .distribution-seg-direct {
+            background-color: #3584e4;
+        }
+
+        /* 图例圆点 */
+        .legend-dot {
+            min-width: 8px;
+            min-height: 8px;
+            border-radius: 9999px;
+        }
+
+        /* 统计卡片与指标排版 */
+        .metric-tile {
+            padding: 14px 18px;
+        }
+        .metric-tile + .metric-tile {
+            border-left: 1px solid alpha(currentColor, 0.08);
+        }
+        .metric-title {
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .metric-hero {
+            font-size: 18px;
+            font-weight: bold;
+        }
+        .process-traffic-total {
+            font-weight: 600;
+            font-size: 13px;
+        }
         ",
     );
     if let Some(display) = gtk::gdk::Display::default() {
