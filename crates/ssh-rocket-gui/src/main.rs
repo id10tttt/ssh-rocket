@@ -647,7 +647,7 @@ impl RuntimeController {
 
                     // 1. 验证 helper 可响应，并在建立 SSH 前清理遗留的特权网络状态。
                     let mut helper_guard = helper.lock().await;
-                    let helper_usable = match helper_guard.as_mut() {
+                    let helper_alive = match helper_guard.as_mut() {
                         Some(h) => {
                             if !h.is_alive() {
                                 false
@@ -658,26 +658,24 @@ impl RuntimeController {
                                         Ok(()) => true,
                                         Err(error) => {
                                             let _ = events.send(RuntimeEvent::Log(format!(
-                                                "[helper] Failed to reset active helper session: {error}"
+                                                "[helper] Failed to reset active session, reusing authorized helper: {error}"
                                             )));
-                                            false
+                                            true
                                         }
                                     },
                                     Err(error) => {
                                         let _ = events.send(RuntimeEvent::Log(format!(
-                                            "[helper] Existing helper is unresponsive: {error}"
+                                            "[helper] Health check failed, reusing authorized helper: {error}"
                                         )));
-                                        false
+                                        true
                                     }
                                 }
                             }
                         }
                         None => false,
                     };
-                    if !helper_usable {
-                        if let Some(mut stale_helper) = helper_guard.take() {
-                            stale_helper.terminate().await;
-                        }
+                    if !helper_alive {
+                        helper_guard.take();
                         let _ = events.send(RuntimeEvent::Log("[helper] Requesting privileged helper authorization...".into()));
                         let _ = events.send(RuntimeEvent::Status("Authorizing helper…".into()));
                         match PrivilegedHelperSession::ensure_started(&helper_path()).await {
@@ -739,9 +737,6 @@ impl RuntimeController {
 
                     if let Err(err) = start_res {
                         let _ = ssh.stop().await;
-                        if let Some(mut failed_helper) = helper_guard.take() {
-                            failed_helper.terminate().await;
-                        }
                         if user_cancelled.load(Ordering::SeqCst) {
                             break;
                         }
