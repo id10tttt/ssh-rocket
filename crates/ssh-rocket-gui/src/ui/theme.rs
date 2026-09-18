@@ -87,6 +87,14 @@ pub fn init_theme() {
             font-size: 11px;
             font-weight: 500;
         }
+        .badge-local {
+            background-color: alpha(#9141ac, 0.15);
+            color: #c061cb;
+            border-radius: 6px;
+            padding: 2px 6px;
+            font-size: 11px;
+            font-weight: 600;
+        }
 
         /* 流量图表组件 */
         .chart-track {

@@ -35,7 +35,10 @@ use ui::{
     logs_view::LogsView,
     rules_view::{append_rule_batch, refresh_rule_list, RulesView},
     theme::init_theme,
-    traffic_view::{refresh_app_traffic_list, refresh_traffic_rule_counts, TrafficView},
+    traffic_view::{
+        refresh_app_traffic_list, refresh_connection_list, refresh_traffic_rule_counts,
+        update_traffic_ratio_display, TrafficView,
+    },
     widgets::{create_app_icon, format_bytes, format_duration, format_speed},
     window::create_main_window,
 };
@@ -47,6 +50,43 @@ pub const DEFAULT_RULE_SOURCE: &str =
 pub const MAX_RULE_SOURCE_SIZE: usize = 16 * 1024 * 1024;
 pub const RULE_BATCH_SIZE: usize = 20;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ConnectionType {
+    #[default]
+    Proxy,
+    Direct,
+    Local,
+}
+
+impl ConnectionType {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Proxy => "代理",
+            Self::Direct => "直连",
+            Self::Local => "本地",
+        }
+    }
+
+    pub fn badge_class(&self) -> &'static str {
+        match self {
+            Self::Proxy => "badge-proxy",
+            Self::Direct => "badge-direct",
+            Self::Local => "badge-local",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ActiveConnectionStat {
+    pub proc_name: String,
+    pub icon: String,
+    pub local_addr: String,
+    pub peer_addr: String,
+    pub conn_type: ConnectionType,
+    pub upload: u64,
+    pub download: u64,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct AppTrafficStat {
     pub id: String,
@@ -54,6 +94,13 @@ pub struct AppTrafficStat {
     pub icon: String,
     pub upload: u64,
     pub download: u64,
+    pub proxy_upload: u64,
+    pub proxy_download: u64,
+    pub direct_upload: u64,
+    pub direct_download: u64,
+    pub local_upload: u64,
+    pub local_download: u64,
+    pub primary_type: ConnectionType,
 }
 
 pub enum RuntimeEvent {
@@ -63,7 +110,10 @@ pub enum RuntimeEvent {
     Error(String),
     Log(String),
     Speed { upload: u64, download: u64 },
-    AppTraffic(Vec<AppTrafficStat>),
+    AppTraffic {
+        stats: Vec<AppTrafficStat>,
+        conns: Vec<ActiveConnectionStat>,
+    },
     RuleImportFailed(String),
     RulesImported {
         result: RuleImportResult,
@@ -605,8 +655,8 @@ impl RuntimeController {
                                     previous_traffic = Some((sent, received));
                                     let _ = events.send(RuntimeEvent::Speed { upload, download });
                                 }
-                                if let Some(stats) = app_tracker.sample(&desktop_apps).await {
-                                    let _ = events.send(RuntimeEvent::AppTraffic(stats));
+                                if let Some((stats, conns)) = app_tracker.sample(&desktop_apps, ssh.socks_port).await {
+                                    let _ = events.send(RuntimeEvent::AppTraffic { stats, conns });
                                 }
                             }
                         }
@@ -682,15 +732,25 @@ fn sum_ss_counter(line: &str, key: &str) -> u64 {
 struct AppTrafficTracker {
     active_sockets: std::collections::HashMap<String, (u64, u64)>,
     app_traffic: std::collections::HashMap<String, (u64, u64)>,
+    app_proxy_traffic: std::collections::HashMap<String, (u64, u64)>,
+    app_direct_traffic: std::collections::HashMap<String, (u64, u64)>,
+    app_local_traffic: std::collections::HashMap<String, (u64, u64)>,
 }
 
 impl AppTrafficTracker {
     fn clear(&mut self) {
         self.active_sockets.clear();
         self.app_traffic.clear();
+        self.app_proxy_traffic.clear();
+        self.app_direct_traffic.clear();
+        self.app_local_traffic.clear();
     }
 
-    async fn sample(&mut self, desktop_apps: &[DesktopApp]) -> Option<Vec<AppTrafficStat>> {
+    async fn sample(
+        &mut self,
+        desktop_apps: &[DesktopApp],
+        socks_port: u16,
+    ) -> Option<(Vec<AppTrafficStat>, Vec<ActiveConnectionStat>)> {
         let output = Command::new("ss").args(["-tinp", "-H"]).output().await.ok()?;
         if !output.status.success() {
             return None;
@@ -699,6 +759,10 @@ impl AppTrafficTracker {
         let mut seen_sockets = std::collections::HashSet::new();
         let mut current_sock_key = String::new();
         let mut current_proc_name = String::new();
+        let mut current_local_addr = String::new();
+        let mut current_peer_addr = String::new();
+
+        let mut raw_conns: Vec<(String, String, String, u64, u64, ConnectionType)> = Vec::new();
 
         for line in text.lines() {
             if !line.starts_with([' ', '\t']) {
@@ -706,6 +770,8 @@ impl AppTrafficTracker {
                 if parts.len() >= 5 {
                     let local = parts[3];
                     let peer = parts[4];
+                    current_local_addr = local.to_string();
+                    current_peer_addr = peer.to_string();
                     current_sock_key = format!("{local}->{peer}");
                     seen_sockets.insert(current_sock_key.clone());
 
@@ -722,6 +788,8 @@ impl AppTrafficTracker {
                 } else {
                     current_sock_key.clear();
                     current_proc_name.clear();
+                    current_local_addr.clear();
+                    current_peer_addr.clear();
                 }
             } else if !current_sock_key.is_empty() && !current_proc_name.is_empty() {
                 let cur_sent = sum_ss_counter(line, "bytes_sent:");
@@ -739,6 +807,22 @@ impl AppTrafficTracker {
                     };
                     self.active_sockets
                         .insert(current_sock_key.clone(), (cur_sent, cur_received));
+
+                    let is_socks = current_peer_addr.ends_with(&format!(":{socks_port}"))
+                        || (current_local_addr.ends_with(&format!(":{socks_port}"))
+                            && current_proc_name == "ssh");
+                    let is_loopback = current_peer_addr.starts_with("127.")
+                        || current_peer_addr.starts_with("[::1]")
+                        || current_peer_addr.starts_with("::1");
+
+                    let conn_type = if is_socks {
+                        ConnectionType::Proxy
+                    } else if is_loopback {
+                        ConnectionType::Local
+                    } else {
+                        ConnectionType::Direct
+                    };
+
                     if delta_up > 0 || delta_down > 0 {
                         let entry = self
                             .app_traffic
@@ -746,7 +830,43 @@ impl AppTrafficTracker {
                             .or_insert((0, 0));
                         entry.0 += delta_up;
                         entry.1 += delta_down;
+
+                        match conn_type {
+                            ConnectionType::Proxy => {
+                                let p_entry = self
+                                    .app_proxy_traffic
+                                    .entry(current_proc_name.clone())
+                                    .or_insert((0, 0));
+                                p_entry.0 += delta_up;
+                                p_entry.1 += delta_down;
+                            }
+                            ConnectionType::Direct => {
+                                let d_entry = self
+                                    .app_direct_traffic
+                                    .entry(current_proc_name.clone())
+                                    .or_insert((0, 0));
+                                d_entry.0 += delta_up;
+                                d_entry.1 += delta_down;
+                            }
+                            ConnectionType::Local => {
+                                let l_entry = self
+                                    .app_local_traffic
+                                    .entry(current_proc_name.clone())
+                                    .or_insert((0, 0));
+                                l_entry.0 += delta_up;
+                                l_entry.1 += delta_down;
+                            }
+                        }
                     }
+
+                    raw_conns.push((
+                        current_proc_name.clone(),
+                        current_local_addr.clone(),
+                        current_peer_addr.clone(),
+                        cur_sent,
+                        cur_received,
+                        conn_type,
+                    ));
                 }
             }
         }
@@ -770,18 +890,73 @@ impl AppTrafficTracker {
                 } else {
                     (proc.clone(), String::new())
                 };
+                let (p_up, p_down) = self.app_proxy_traffic.get(proc).copied().unwrap_or((0, 0));
+                let (d_up, d_down) = self.app_direct_traffic.get(proc).copied().unwrap_or((0, 0));
+                let (l_up, l_down) = self.app_local_traffic.get(proc).copied().unwrap_or((0, 0));
+
+                let proxy_total = p_up + p_down;
+                let direct_total = d_up + d_down;
+                let local_total = l_up + l_down;
+
+                let primary_type = if proxy_total >= direct_total && proxy_total >= local_total && proxy_total > 0 {
+                    ConnectionType::Proxy
+                } else if direct_total >= local_total && direct_total > 0 {
+                    ConnectionType::Direct
+                } else {
+                    ConnectionType::Local
+                };
+
                 AppTrafficStat {
                     id: proc.clone(),
                     name,
                     icon,
                     upload: *up,
                     download: *down,
+                    proxy_upload: p_up,
+                    proxy_download: p_down,
+                    direct_upload: d_up,
+                    direct_download: d_down,
+                    local_upload: l_up,
+                    local_download: l_down,
+                    primary_type,
                 }
             })
             .collect();
 
         stats.sort_by(|a, b| (b.upload + b.download).cmp(&(a.upload + a.download)));
-        Some(stats)
+
+        // 整理活跃 Socket 列表 (按当前累计流量排序，最多保留 60 条)
+        raw_conns.sort_by(|a, b| (b.3 + b.4).cmp(&(a.3 + a.4)));
+        let active_conns: Vec<ActiveConnectionStat> = raw_conns
+            .into_iter()
+            .take(60)
+            .map(|(proc, local, peer, up, down, conn_type)| {
+                let matching_app = desktop_apps.iter().find(|app| {
+                    app.executable.eq_ignore_ascii_case(&proc)
+                        || app.name.eq_ignore_ascii_case(&proc)
+                        || Path::new(&app.executable)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.eq_ignore_ascii_case(&proc))
+                });
+                let (name, icon) = if let Some(app) = matching_app {
+                    (app.name.clone(), app.icon.clone())
+                } else {
+                    (proc, String::new())
+                };
+                ActiveConnectionStat {
+                    proc_name: name,
+                    icon,
+                    local_addr: local,
+                    peer_addr: peer,
+                    conn_type,
+                    upload: up,
+                    download: down,
+                }
+            })
+            .collect();
+
+        Some((stats, active_conns))
     }
 }
 
@@ -1909,12 +2084,14 @@ fn build_ui(app: &adw::Application) {
     let refresh_app_traffic = {
         let app_traffic_data = app_traffic_data.clone();
         let app_traffic_search = traffic_view.app_traffic_search.clone();
+        let traffic_scope_filter = traffic_view.traffic_scope_filter.clone();
         let app_traffic_sort = traffic_view.app_traffic_sort.clone();
         let app_traffic_list_box = traffic_view.app_traffic_list_box.clone();
         Rc::new(move || {
             refresh_app_traffic_list(
                 &app_traffic_data,
                 &app_traffic_search,
+                &traffic_scope_filter,
                 &app_traffic_sort,
                 &app_traffic_list_box,
             );
@@ -1929,8 +2106,36 @@ fn build_ui(app: &adw::Application) {
     {
         let refresh = refresh_app_traffic.clone();
         traffic_view
+            .traffic_scope_filter
+            .connect_selected_notify(move |_| refresh());
+    }
+    {
+        let refresh = refresh_app_traffic.clone();
+        traffic_view
             .app_traffic_sort
             .connect_selected_notify(move |_| refresh());
+    }
+
+    let active_conns_data = Rc::new(RefCell::new(Vec::<ActiveConnectionStat>::new()));
+    let refresh_conns = {
+        let active_conns_data = active_conns_data.clone();
+        let conn_search = traffic_view.conn_search.clone();
+        let conn_stats_label = traffic_view.conn_stats_label.clone();
+        let conn_list_box = traffic_view.conn_list_box.clone();
+        Rc::new(move || {
+            refresh_connection_list(
+                &active_conns_data,
+                &conn_search,
+                &conn_stats_label,
+                &conn_list_box,
+            );
+        })
+    };
+    {
+        let refresh = refresh_conns.clone();
+        traffic_view
+            .conn_search
+            .connect_search_changed(move |_| refresh());
     }
 
     // 9. 日志视图逻辑
@@ -2139,12 +2344,18 @@ fn build_ui(app: &adw::Application) {
         let direct_hero_label = traffic_view.direct_hero_label.clone();
         let direct_up_label = traffic_view.direct_up_label.clone();
         let direct_down_label = traffic_view.direct_down_label.clone();
+        let ratio_data = traffic_view.ratio_data.clone();
+        let ratio_area = traffic_view.ratio_area.clone();
+        let ratio_proxy_label = traffic_view.ratio_proxy_label.clone();
+        let ratio_direct_label = traffic_view.ratio_direct_label.clone();
         let session_upload = session_upload.clone();
         let session_download = session_download.clone();
         let tray_manager = tray_manager.clone();
         let controller_ref = controller.clone();
         let app_traffic_data = app_traffic_data.clone();
         let refresh_app_traffic = refresh_app_traffic.clone();
+        let refresh_conns = refresh_conns.clone();
+        let active_conns_data = active_conns_data.clone();
 
         let update_traffic_labels = {
             let session_upload = session_upload.clone();
@@ -2159,6 +2370,10 @@ fn build_ui(app: &adw::Application) {
             let direct_hero_label = direct_hero_label.clone();
             let direct_up_label = direct_up_label.clone();
             let direct_down_label = direct_down_label.clone();
+            let ratio_data = ratio_data.clone();
+            let ratio_area = ratio_area.clone();
+            let ratio_proxy_label = ratio_proxy_label.clone();
+            let ratio_direct_label = ratio_direct_label.clone();
             Rc::new(move || {
                 let up_proxy = *session_upload.borrow();
                 let down_proxy = *session_download.borrow();
@@ -2185,6 +2400,17 @@ fn build_ui(app: &adw::Application) {
                 direct_hero_label.set_text(&format_bytes(direct_up + direct_down));
                 direct_up_label.set_text(&format_bytes(direct_up));
                 direct_down_label.set_text(&format_bytes(direct_down));
+
+                update_traffic_ratio_display(
+                    up_proxy,
+                    down_proxy,
+                    direct_up,
+                    direct_down,
+                    &ratio_data,
+                    &ratio_area,
+                    &ratio_proxy_label,
+                    &ratio_direct_label,
+                );
             })
         };
 
@@ -2194,8 +2420,13 @@ fn build_ui(app: &adw::Application) {
                     RuntimeEvent::Connected => {
                         *session_upload.borrow_mut() = 0;
                         *session_download.borrow_mut() = 0;
+                        traffic_view.speed_history.borrow_mut().clear();
+                        traffic_view.speed_drawing_area.queue_draw();
+                        traffic_view.speed_current_label.set_text("↓ 0 B/s   ↑ 0 B/s");
                         app_traffic_data.borrow_mut().clear();
+                        active_conns_data.borrow_mut().clear();
                         refresh_app_traffic();
+                        refresh_conns();
                         update_traffic_labels();
                         *connect_start_time.borrow_mut() = Some(std::time::Instant::now());
                         if let Ok(now) = gtk::glib::DateTime::now_local() {
@@ -2308,6 +2539,21 @@ fn build_ui(app: &adw::Application) {
                         *session_download.borrow_mut() += download;
                         let up_total = *session_upload.borrow();
                         let down_total = *session_download.borrow();
+
+                        {
+                            let mut hist = traffic_view.speed_history.borrow_mut();
+                            if hist.len() >= 40 {
+                                hist.pop_front();
+                            }
+                            hist.push_back((upload, download));
+                        }
+                        traffic_view.speed_drawing_area.queue_draw();
+                        traffic_view.speed_current_label.set_text(&format!(
+                            "↓ {}   ↑ {}",
+                            format_speed(download),
+                            format_speed(upload)
+                        ));
+
                         update_traffic_labels();
                         speed_label.set_text(&format!(
                             "↑ {} ({})   ↓ {} ({})",
@@ -2317,9 +2563,11 @@ fn build_ui(app: &adw::Application) {
                             format_bytes(down_total)
                         ));
                     }
-                    RuntimeEvent::AppTraffic(stats) => {
+                    RuntimeEvent::AppTraffic { stats, conns } => {
                         *app_traffic_data.borrow_mut() = stats;
+                        *active_conns_data.borrow_mut() = conns;
                         refresh_app_traffic();
+                        refresh_conns();
                         update_traffic_labels();
                     }
                     RuntimeEvent::RuleImportFailed(error) => {
