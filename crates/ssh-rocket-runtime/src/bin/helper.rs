@@ -30,6 +30,8 @@ const NFT_TABLE: &str = "ssh_rocket";
 const DNS_LISTEN_PORT: u16 = 15353;
 const TUN_DNS_ADDRESS: &str = "10.0.0.33";
 const MAX_TUN_RETRIES: usize = 3;
+const TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const SYSTEM_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const CGROUPS: [&str; 3] = ["sshrocket-proxy", "sshrocket-direct", "sshrocket-block"];
 
 #[tokio::main]
@@ -85,13 +87,21 @@ struct ActiveSession {
 }
 
 impl ActiveSession {
-    async fn stop(self) {
+    async fn stop(mut self) {
         self.shutdown.cancel();
         if !self.dns_task.is_finished() {
-            let _ = self.dns_task.await;
+            if timeout(TASK_SHUTDOWN_TIMEOUT, &mut self.dns_task).await.is_err() {
+                eprintln!("[helper] DNS task did not stop in time, aborting it");
+                self.dns_task.abort();
+                let _ = self.dns_task.await;
+            }
         }
         if !self.tun_task.is_finished() {
-            let _ = self.tun_task.await;
+            if timeout(TASK_SHUTDOWN_TIMEOUT, &mut self.tun_task).await.is_err() {
+                eprintln!("[helper] TUN task did not stop in time, aborting it");
+                self.tun_task.abort();
+                let _ = self.tun_task.await;
+            }
         }
         self.system.cleanup().await;
         clean_stale_resources().await;
@@ -1262,14 +1272,16 @@ async fn wait_for_interface() -> Result<()> {
 }
 
 async fn command_output(program: &str, args: &[&str]) -> Result<String> {
-    let output = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .kill_on_drop(true);
+    let output = timeout(SYSTEM_COMMAND_TIMEOUT, command.output())
         .await
-        .with_context(|| format!("failed to execute {program}"))?;
+        .with_context(|| format!("timed out executing {program} {}", args.join(" ")))??;
     if !output.status.success() {
         bail!("{} {} failed: {}", program, args.join(" "), String::from_utf8_lossy(&output.stderr).trim());
     }
@@ -1277,14 +1289,16 @@ async fn command_output(program: &str, args: &[&str]) -> Result<String> {
 }
 
 async fn command(program: &str, args: &[&str]) -> Result<()> {
-    let output = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .kill_on_drop(true);
+    let output = timeout(SYSTEM_COMMAND_TIMEOUT, command.output())
         .await
-        .with_context(|| format!("failed to execute {program}"))?;
+        .with_context(|| format!("timed out executing {program} {}", args.join(" ")))??;
     if !output.status.success() {
         bail!("{} {} failed: {}", program, args.join(" "), String::from_utf8_lossy(&output.stderr).trim());
     }

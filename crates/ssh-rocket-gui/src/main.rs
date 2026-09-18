@@ -645,10 +645,65 @@ impl RuntimeController {
                         let _ = events.send(RuntimeEvent::Log(format!("[reconnect] Reconnecting SSH tunnel (attempt {retry_attempt})...")));
                     }
 
-                    // 1. Establish OpenSSH session
+                    // 1. 验证 helper 可响应，并在建立 SSH 前清理遗留的特权网络状态。
+                    let mut helper_guard = helper.lock().await;
+                    let helper_usable = match helper_guard.as_mut() {
+                        Some(h) => {
+                            if !h.is_alive() {
+                                false
+                            } else {
+                                match h.status().await {
+                                    Ok(false) => true,
+                                    Ok(true) => match h.stop().await {
+                                        Ok(()) => true,
+                                        Err(error) => {
+                                            let _ = events.send(RuntimeEvent::Log(format!(
+                                                "[helper] Failed to reset active helper session: {error}"
+                                            )));
+                                            false
+                                        }
+                                    },
+                                    Err(error) => {
+                                        let _ = events.send(RuntimeEvent::Log(format!(
+                                            "[helper] Existing helper is unresponsive: {error}"
+                                        )));
+                                        false
+                                    }
+                                }
+                            }
+                        }
+                        None => false,
+                    };
+                    if !helper_usable {
+                        if let Some(mut stale_helper) = helper_guard.take() {
+                            stale_helper.terminate().await;
+                        }
+                        let _ = events.send(RuntimeEvent::Log("[helper] Requesting privileged helper authorization...".into()));
+                        let _ = events.send(RuntimeEvent::Status("Authorizing helper…".into()));
+                        match PrivilegedHelperSession::ensure_started(&helper_path()).await {
+                            Ok((h, stderr)) => {
+                                if let Some(stderr) = stderr {
+                                    spawn_log_reader(stderr, "helper", events.clone());
+                                }
+                                *helper_guard = Some(h);
+                                let _ = events.send(RuntimeEvent::Log("[helper] Privileged helper authenticated and ready".into()));
+                            }
+                            Err(err) => {
+                                if user_cancelled.load(Ordering::SeqCst) {
+                                    break;
+                                }
+                                let _ = events.send(RuntimeEvent::Error(format!("Helper authorization failed: {err}")));
+                                let _ = events.send(RuntimeEvent::Log(format!("[helper] Authorization failed: {err}")));
+                                break;
+                            }
+                        }
+                    }
+
+                    // 2. Establish OpenSSH session
                     let mut ssh = match SshSession::start(&profile, SOCKS_PORT, config.settings.dns_server).await {
                         Ok(session) => session,
                         Err(error) => {
+                            drop(helper_guard);
                             if user_cancelled.load(Ordering::SeqCst) {
                                 break;
                             }
@@ -671,31 +726,6 @@ impl RuntimeController {
                         spawn_log_reader(stderr, "ssh", events.clone());
                     }
 
-                    // 2. Check and start privileged helper
-                    let mut helper_guard = helper.lock().await;
-                    if helper_guard.as_mut().map_or(true, |h| !h.is_alive()) {
-                        let _ = events.send(RuntimeEvent::Log("[helper] Requesting privileged helper authorization...".into()));
-                        let _ = events.send(RuntimeEvent::Status("Authorizing helper…".into()));
-                        match PrivilegedHelperSession::ensure_started(&helper_path()).await {
-                            Ok((h, stderr)) => {
-                                if let Some(stderr) = stderr {
-                                    spawn_log_reader(stderr, "helper", events.clone());
-                                }
-                                *helper_guard = Some(h);
-                                let _ = events.send(RuntimeEvent::Log("[helper] Privileged helper authenticated and ready".into()));
-                            }
-                            Err(err) => {
-                                let _ = ssh.stop().await;
-                                if user_cancelled.load(Ordering::SeqCst) {
-                                    break;
-                                }
-                                let _ = events.send(RuntimeEvent::Error(format!("Helper authorization failed: {err}")));
-                                let _ = events.send(RuntimeEvent::Log(format!("[helper] Authorization failed: {err}")));
-                                break;
-                            }
-                        }
-                    }
-
                     let uid = unsafe { libc::getuid() };
                     let helper_session = helper_guard.as_mut().unwrap();
                     let start_res = helper_session.start(
@@ -709,6 +739,9 @@ impl RuntimeController {
 
                     if let Err(err) = start_res {
                         let _ = ssh.stop().await;
+                        if let Some(mut failed_helper) = helper_guard.take() {
+                            failed_helper.terminate().await;
+                        }
                         if user_cancelled.load(Ordering::SeqCst) {
                             break;
                         }
@@ -782,8 +815,17 @@ impl RuntimeController {
                     }
 
                     // Stop transparent routing and ssh
-                    if let Some(h) = helper_guard.as_mut() {
-                        let _ = h.stop().await;
+                    let helper_stop_error = match helper_guard.as_mut() {
+                        Some(h) => h.stop().await.err(),
+                        None => None,
+                    };
+                    if let Some(error) = helper_stop_error {
+                        let _ = events.send(RuntimeEvent::Log(format!(
+                            "[helper] Failed to stop helper session cleanly: {error}"
+                        )));
+                        if let Some(mut failed_helper) = helper_guard.take() {
+                            failed_helper.terminate().await;
+                        }
                     }
                     drop(helper_guard);
                     let _ = ssh.stop().await;

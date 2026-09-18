@@ -66,26 +66,31 @@ impl PrivilegedHelperSession {
         self.is_active
     }
 
-    /// 查询 helper 中透明代理会话的实际运行状态。
-    pub async fn check_active(&mut self) -> Result<()> {
+    /// 查询 helper 是否可响应，并返回透明代理会话的实际状态。
+    pub async fn status(&mut self) -> Result<bool> {
         if !self.is_alive() {
             self.is_active = false;
             bail!("privileged helper process exited");
         }
         match self.send_command(&HelperCommand::Status).await? {
-            HelperEvent::Status { active: true } => {
-                self.is_active = true;
-                Ok(())
-            }
-            HelperEvent::Status { active: false } => {
-                self.is_active = false;
-                bail!("transparent proxy session is inactive")
+            HelperEvent::Status { active } => {
+                self.is_active = active;
+                Ok(active)
             }
             HelperEvent::Error { message } => {
                 self.is_active = false;
                 bail!("{message}")
             }
             other => bail!("unexpected response from helper: {other:?}"),
+        }
+    }
+
+    /// 查询 helper 中透明代理会话的实际运行状态。
+    pub async fn check_active(&mut self) -> Result<()> {
+        if self.status().await? {
+            Ok(())
+        } else {
+            bail!("transparent proxy session is inactive")
         }
     }
 
@@ -137,7 +142,7 @@ impl PrivilegedHelperSession {
     }
 
     pub async fn stop(&mut self) -> Result<()> {
-        if !self.is_active || !self.is_alive() {
+        if !self.is_alive() {
             self.is_active = false;
             return Ok(());
         }
@@ -151,6 +156,14 @@ impl PrivilegedHelperSession {
         }
     }
 
+    /// 立即终止不可响应的 helper，避免后续连接继续复用坏会话。
+    pub async fn terminate(&mut self) {
+        self.is_active = false;
+        if self.is_alive() {
+            let _ = self.child.kill().await;
+        }
+    }
+
     pub async fn sync_rules(&mut self) -> Result<()> {
         if !self.is_active || !self.is_alive() {
             return Ok(());
@@ -161,8 +174,6 @@ impl PrivilegedHelperSession {
 
     pub async fn shutdown(&mut self) {
         let _ = self.send_command(&HelperCommand::Quit).await;
-        if self.is_alive() {
-            let _ = self.child.kill().await;
-        }
+        self.terminate().await;
     }
 }
