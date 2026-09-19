@@ -63,9 +63,9 @@ pub enum ConnectionType {
 impl ConnectionType {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Proxy => "代理",
-            Self::Direct => "直连",
-            Self::Local => "本地",
+            Self::Proxy => crate::i18n::tr("action.proxy"),
+            Self::Direct => crate::i18n::tr("action.direct"),
+            Self::Local => crate::i18n::tr("action.local"),
         }
     }
 
@@ -1121,6 +1121,8 @@ fn build_ui(app: &adw::Application) {
     win.view_stack.add_named(&logs_view.container, Some("logs"));
     win.view_stack.add_named(&settings_view.container, Some("settings"));
 
+    let refresh_active_traffic_tab: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+
     {
         let win_connect_lbl = win.connect_nav_label.clone();
         let win_rules_lbl = win.rules_nav_label.clone();
@@ -1133,7 +1135,14 @@ fn build_ui(app: &adw::Application) {
         let win_navigation = win.navigation.clone();
         let win_bottom_status = win.bottom_status.clone();
         let is_connected_clone = is_connected.clone();
+        let connect_view_clone = connect_view.clone();
+        let rules_view_clone = rules_view.clone();
+        let traffic_view_clone = traffic_view.clone();
+        let logs_view_clone = logs_view.clone();
         let settings_view_clone = settings_view.clone();
+        let refresh_conn_ref = refresh_connections.clone();
+        let tray_manager_clone = tray_manager.clone();
+        let refresh_traffic_tab_clone = refresh_active_traffic_tab.clone();
 
         *refresh_ui_for_language.borrow_mut() = Some(Rc::new(move || {
             win_connect_lbl.set_text(crate::i18n::tr("nav.connect"));
@@ -1143,7 +1152,9 @@ fn build_ui(app: &adw::Application) {
             win_settings_lbl.set_text(crate::i18n::tr("nav.settings"));
             win_back_btn.set_tooltip_text(Some(crate::i18n::tr("btn.back")));
             win_add_conn.set_tooltip_text(Some(crate::i18n::tr("btn.add_connection")));
-            if !*is_connected_clone.borrow() {
+            if *is_connected_clone.borrow() {
+                win_bottom_status.set_text(crate::i18n::tr("status.connected"));
+            } else {
                 win_bottom_status.set_text(crate::i18n::tr("status.disconnected"));
             }
 
@@ -1158,12 +1169,25 @@ fn build_ui(app: &adw::Application) {
                 win_page_title.set_text(title);
             }
 
+            connect_view_clone.refresh_labels();
+            rules_view_clone.refresh_labels();
+            traffic_view_clone.refresh_labels();
+            logs_view_clone.refresh_labels();
             settings_view_clone.refresh_labels();
+
+            if let Some(refresh) = refresh_conn_ref.borrow().as_ref() {
+                refresh();
+            }
+            if let Some(refresh) = refresh_traffic_tab_clone.borrow().as_ref() {
+                refresh();
+            }
+            if let Some(tray) = tray_manager_clone.borrow().as_ref() {
+                tray.refresh_menu();
+            }
         }));
     }
 
     // 3. 侧边栏导航切换
-    let refresh_active_traffic_tab: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
     {
         let view_stack = win.view_stack.clone();
         let page_title = win.page_title.clone();
@@ -1262,7 +1286,11 @@ fn build_ui(app: &adw::Application) {
         let row = adw::ComboRow::builder()
             .title(&app_info.name)
             .subtitle(&app_info.executable)
-            .model(&gtk::StringList::new(&["直连 (Direct)", "代理 (Proxy)", "拦截 (Block)"]))
+            .model(&gtk::StringList::new(&[
+                crate::i18n::tr("action.direct"),
+                crate::i18n::tr("action.proxy"),
+                crate::i18n::tr("action.block"),
+            ]))
             .selected(match action {
                 RuleAction::Direct => 0,
                 RuleAction::Proxy => 1,
@@ -1282,6 +1310,9 @@ fn build_ui(app: &adw::Application) {
                 2 => RuleAction::Block,
                 _ => RuleAction::Direct,
             };
+            if current_app_action(&config_ref.borrow(), &executable) == action {
+                return;
+            }
             set_app_action(&config_ref, &executable, action);
             controller_ref.borrow().sync_rules();
             if let Some(refresh) = refresh_blocked_ref.borrow().as_ref() {
@@ -2085,7 +2116,6 @@ fn build_ui(app: &adw::Application) {
             for proc_name in procs {
                 let row = adw::ActionRow::builder()
                     .title(&proc_name)
-                    .subtitle("已禁止外部网络连接")
                     .build();
                 let icon = gtk::Image::from_icon_name("network-offline-symbolic");
                 icon.set_valign(gtk::Align::Center);
@@ -2127,7 +2157,7 @@ fn build_ui(app: &adw::Application) {
             for rule in blocked_domains {
                 let row = adw::ActionRow::builder()
                     .title(&rule.pattern)
-                    .subtitle(&format!("{} · 拦截", domain_kind_label(rule.kind)))
+                    .subtitle(domain_kind_label(rule.kind))
                     .build();
                 let icon = gtk::Image::from_icon_name("network-server-symbolic");
                 icon.set_valign(gtk::Align::Center);
@@ -2171,7 +2201,7 @@ fn build_ui(app: &adw::Application) {
             for rule in blocked_ips {
                 let row = adw::ActionRow::builder()
                     .title(&rule.network.to_string())
-                    .subtitle("IP-CIDR · 拦截")
+                    .subtitle("IP-CIDR")
                     .build();
                 let icon = gtk::Image::from_icon_name("network-server-symbolic");
                 icon.set_valign(gtk::Align::Center);
@@ -2616,7 +2646,7 @@ fn build_ui(app: &adw::Application) {
                         bottom_status_dot.remove_css_class("status-dot-disconnected");
                         bottom_status_dot.remove_css_class("status-dot-connecting");
                         bottom_status_dot.add_css_class("status-dot-connected");
-                        bottom_status.set_text("已连接");
+                        bottom_status.set_text(crate::i18n::tr("status.connected"));
 
                         if let Some(tray) = tray_manager.borrow().as_ref() {
                             tray.set_state(TrayConnectionState::Connected);
@@ -2635,7 +2665,7 @@ fn build_ui(app: &adw::Application) {
                         bottom_status_dot.remove_css_class("status-dot-connected");
                         bottom_status_dot.remove_css_class("status-dot-connecting");
                         bottom_status_dot.add_css_class("status-dot-disconnected");
-                        bottom_status.set_text("未连接");
+                        bottom_status.set_text(crate::i18n::tr("status.disconnected"));
 
                         if let Some(tray) = tray_manager.borrow().as_ref() {
                             tray.set_state(TrayConnectionState::Disconnected);

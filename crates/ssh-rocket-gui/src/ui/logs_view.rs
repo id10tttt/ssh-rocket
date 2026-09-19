@@ -1,14 +1,20 @@
 use gtk4::{self as gtk, prelude::*};
+use crate::i18n::tr;
 
+#[derive(Clone)]
 pub struct LogsView {
     pub container: gtk::Box,
     pub log_stack: gtk::Stack,
+    pub all_log_scroller: gtk::ScrolledWindow,
     pub all_log_buffer: gtk::TextBuffer,
     pub all_log_view: gtk::TextView,
+    pub system_log_scroller: gtk::ScrolledWindow,
     pub system_log_buffer: gtk::TextBuffer,
     pub system_log_view: gtk::TextView,
+    pub proxy_log_scroller: gtk::ScrolledWindow,
     pub proxy_log_buffer: gtk::TextBuffer,
     pub proxy_log_view: gtk::TextView,
+    pub direct_log_scroller: gtk::ScrolledWindow,
     pub direct_log_buffer: gtk::TextBuffer,
     pub direct_log_view: gtk::TextView,
     pub copy_logs_btn: gtk::Button,
@@ -40,12 +46,12 @@ impl LogsView {
 
         let copy_logs = gtk::Button::from_icon_name("edit-copy-symbolic");
         copy_logs.add_css_class("flat");
-        copy_logs.set_tooltip_text(Some("复制日志"));
+        copy_logs.set_tooltip_text(Some(tr("logs.btn.copy")));
         log_header.append(&copy_logs);
 
         let clear_logs = gtk::Button::from_icon_name("edit-clear-all-symbolic");
         clear_logs.add_css_class("flat");
-        clear_logs.set_tooltip_text(Some("清空日志"));
+        clear_logs.set_tooltip_text(Some(tr("logs.btn.clear")));
         log_header.append(&clear_logs);
 
         log_page.append(&log_header);
@@ -65,7 +71,7 @@ impl LogsView {
             .hexpand(true)
             .vexpand(true)
             .build();
-        log_stack.add_titled(&all_log_scroller, Some("all"), "全部");
+        log_stack.add_titled(&all_log_scroller, Some("all"), tr("logs.tab.all"));
 
         // 系统日志
         let system_log_view = gtk::TextView::builder()
@@ -82,7 +88,7 @@ impl LogsView {
             .hexpand(true)
             .vexpand(true)
             .build();
-        log_stack.add_titled(&system_log_scroller, Some("system"), "系统");
+        log_stack.add_titled(&system_log_scroller, Some("system"), tr("logs.tab.system"));
 
         // 代理日志
         let proxy_log_view = gtk::TextView::builder()
@@ -99,7 +105,7 @@ impl LogsView {
             .hexpand(true)
             .vexpand(true)
             .build();
-        log_stack.add_titled(&proxy_log_scroller, Some("proxy"), "代理");
+        log_stack.add_titled(&proxy_log_scroller, Some("proxy"), tr("logs.tab.proxy"));
 
         // 直连日志
         let direct_log_view = gtk::TextView::builder()
@@ -116,23 +122,36 @@ impl LogsView {
             .hexpand(true)
             .vexpand(true)
             .build();
-        log_stack.add_titled(&direct_log_scroller, Some("direct"), "直连");
+        log_stack.add_titled(&direct_log_scroller, Some("direct"), tr("logs.tab.direct"));
 
         log_page.append(&log_stack);
 
         Self {
             container: log_page,
             log_stack,
+            all_log_scroller,
             all_log_buffer,
             all_log_view,
+            system_log_scroller,
             system_log_buffer,
             system_log_view,
+            proxy_log_scroller,
             proxy_log_buffer,
             proxy_log_view,
+            direct_log_scroller,
             direct_log_buffer,
             direct_log_view,
             copy_logs_btn: copy_logs,
             clear_logs_btn: clear_logs,
         }
+    }
+
+    pub fn refresh_labels(&self) {
+        self.log_stack.page(&self.all_log_scroller).set_title(tr("logs.tab.all"));
+        self.log_stack.page(&self.system_log_scroller).set_title(tr("logs.tab.system"));
+        self.log_stack.page(&self.proxy_log_scroller).set_title(tr("logs.tab.proxy"));
+        self.log_stack.page(&self.direct_log_scroller).set_title(tr("logs.tab.direct"));
+        self.copy_logs_btn.set_tooltip_text(Some(tr("logs.btn.copy")));
+        self.clear_logs_btn.set_tooltip_text(Some(tr("logs.btn.clear")));
     }
 }

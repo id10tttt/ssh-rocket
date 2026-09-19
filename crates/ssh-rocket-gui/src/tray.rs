@@ -250,15 +250,15 @@ fn menu_layout(shared: &TrayShared) -> glib::Variant {
     }
 
     let (toggle_label, enabled) = match shared.state.get() {
-        TrayConnectionState::Connected => ("Disconnect", true),
-        TrayConnectionState::Connecting => ("Connecting…", false),
-        TrayConnectionState::Disconnecting => ("Disconnecting…", false),
-        TrayConnectionState::Disconnected => ("Connect", !profiles.is_empty()),
+        TrayConnectionState::Connected => (crate::i18n::tr("tray.disconnect"), true),
+        TrayConnectionState::Connecting => (crate::i18n::tr("tray.connecting"), false),
+        TrayConnectionState::Disconnecting => (crate::i18n::tr("tray.disconnecting"), false),
+        TrayConnectionState::Disconnected => (crate::i18n::tr("tray.connect"), !profiles.is_empty()),
     };
     children.push(menu_item(201, toggle_label, enabled));
     children.push(menu_separator(202));
-    children.push(menu_item(203, "Show SSH Rocket", true));
-    children.push(menu_item(204, "Quit", true));
+    children.push(menu_item(203, crate::i18n::tr("tray.show_window"), true));
+    children.push(menu_item(204, crate::i18n::tr("tray.quit"), true));
 
     let mut root_properties = HashMap::new();
     root_properties.insert("children-display".to_string(), "submenu".to_variant());

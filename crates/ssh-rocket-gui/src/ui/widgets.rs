@@ -77,9 +77,9 @@ pub fn create_app_icon(icon_name: &str) -> gtk::Image {
 /// 创建分流动作胶囊徽标 (PROXY / DIRECT / REJECT)
 pub fn create_action_badge(action: RuleAction) -> gtk::Label {
     let (label_text, css_class) = match action {
-        RuleAction::Proxy => ("代理", "badge-proxy"),
-        RuleAction::Direct => ("直连", "badge-direct"),
-        RuleAction::Block => ("拦截", "badge-reject"),
+        RuleAction::Proxy => (crate::i18n::tr("action.proxy"), "badge-proxy"),
+        RuleAction::Direct => (crate::i18n::tr("action.direct"), "badge-direct"),
+        RuleAction::Block => (crate::i18n::tr("action.block"), "badge-reject"),
     };
     let label = gtk::Label::new(Some(label_text));
     label.add_css_class(css_class);

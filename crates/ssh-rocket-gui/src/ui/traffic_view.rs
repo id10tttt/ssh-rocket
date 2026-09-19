@@ -18,33 +18,45 @@ pub struct TrafficView {
     pub stack_switcher: gtk::StackSwitcher,
 
     // --- Tab 1: 监控总览 ---
+    pub overview_scroller: gtk::ScrolledWindow,
     pub overview_group: adw::PreferencesGroup,
+    pub total_title_label: gtk::Label,
     pub total_hero_label: gtk::Label,
     pub total_up_label: gtk::Label,
     pub total_down_label: gtk::Label,
+    pub proxy_title_label: gtk::Label,
     pub proxy_hero_label: gtk::Label,
     pub proxy_up_label: gtk::Label,
     pub proxy_down_label: gtk::Label,
+    pub direct_title_label: gtk::Label,
     pub direct_hero_label: gtk::Label,
     pub direct_up_label: gtk::Label,
     pub direct_down_label: gtk::Label,
 
     // Speed
+    pub speed_group: adw::PreferencesGroup,
     pub speed_history: Rc<RefCell<VecDeque<(Instant, u64, u64)>>>,
     pub speed_drawing_area: gtk::DrawingArea,
     pub speed_current_label: gtk::Label,
+    pub speed_legend_down: gtk::Label,
+    pub speed_legend_up: gtk::Label,
 
     // --- Tab 2: 应用统计 ---
+    pub apps_scroller: gtk::ScrolledWindow,
+    pub app_usage_group: adw::PreferencesGroup,
     pub app_traffic_search: gtk::SearchEntry,
     pub traffic_scope_filter: gtk::DropDown,
     pub app_traffic_sort: gtk::DropDown,
     pub app_traffic_list_box: gtk::Box,
 
     // --- Tab 3: 实时连接 & 规则分布 ---
+    pub conn_scroller: gtk::ScrolledWindow,
+    pub conn_group: adw::PreferencesGroup,
     pub conn_search: gtk::SearchEntry,
     pub conn_stats_label: gtk::Label,
     pub conn_list_box: gtk::Box,
 
+    pub distribution_group: adw::PreferencesGroup,
     pub total_rules_label: gtk::Label,
     pub distribution_data: Rc<RefCell<(f64, f64, f64)>>,
     pub distribution_area: gtk::DrawingArea,
@@ -105,15 +117,15 @@ impl TrafficView {
         overview_card.add_css_class("card");
         overview_card.set_homogeneous(true);
 
-        let (tile_total, total_hero_label, total_up_label, total_down_label) =
+        let (tile_total, total_title_label, total_hero_label, total_up_label, total_down_label) =
             create_kpi_tile(tr("traffic.overview.total"), "0 B");
         overview_card.append(&tile_total);
 
-        let (tile_proxy, proxy_hero_label, proxy_up_label, proxy_down_label) =
+        let (tile_proxy, proxy_title_label, proxy_hero_label, proxy_up_label, proxy_down_label) =
             create_kpi_tile(tr("traffic.overview.proxy"), "0 B");
         overview_card.append(&tile_proxy);
 
-        let (tile_direct, direct_hero_label, direct_up_label, direct_down_label) =
+        let (tile_direct, direct_title_label, direct_hero_label, direct_up_label, direct_down_label) =
             create_kpi_tile(tr("traffic.overview.direct"), "0 B");
         overview_card.append(&tile_direct);
 
@@ -391,10 +403,10 @@ impl TrafficView {
         speed_legend_box.set_margin_bottom(12);
         speed_legend_box.set_halign(gtk::Align::End);
 
-        let (legend_down_item, _) = create_legend_item("distribution-seg-proxy", tr("traffic.speed.download"));
+        let (legend_down_item, speed_legend_down) = create_legend_item("distribution-seg-proxy", tr("traffic.speed.download"));
         speed_legend_box.append(&legend_down_item);
 
-        let (legend_up_item, _) = create_legend_item("distribution-seg-reject", tr("traffic.speed.upload"));
+        let (legend_up_item, speed_legend_up) = create_legend_item("distribution-seg-reject", tr("traffic.speed.upload"));
         speed_legend_box.append(&legend_up_item);
 
         speed_card.append(&speed_legend_box);
@@ -595,26 +607,38 @@ impl TrafficView {
             page,
             stack,
             stack_switcher,
+            overview_scroller,
             overview_group,
+            total_title_label,
             total_hero_label,
             total_up_label,
             total_down_label,
+            proxy_title_label,
             proxy_hero_label,
             proxy_up_label,
             proxy_down_label,
+            direct_title_label,
             direct_hero_label,
             direct_up_label,
             direct_down_label,
+            speed_group,
             speed_history,
             speed_drawing_area,
             speed_current_label,
+            speed_legend_down,
+            speed_legend_up,
+            apps_scroller,
+            app_usage_group,
             app_traffic_search,
             traffic_scope_filter,
             app_traffic_sort,
             app_traffic_list_box,
+            conn_scroller,
+            conn_group,
             conn_search,
             conn_stats_label,
             conn_list_box,
+            distribution_group,
             total_rules_label,
             distribution_data,
             distribution_area,
@@ -623,13 +647,49 @@ impl TrafficView {
             direct_legend_label,
         }
     }
+
+    pub fn refresh_labels(&self) {
+        self.stack.page(&self.overview_scroller).set_title(tr("traffic.tab.overview"));
+        self.stack.page(&self.apps_scroller).set_title(tr("traffic.tab.apps"));
+        self.stack.page(&self.conn_scroller).set_title(tr("traffic.tab.connections"));
+
+        self.overview_group.set_title(tr("traffic.overview.title"));
+        self.total_title_label.set_text(tr("traffic.overview.total"));
+        self.proxy_title_label.set_text(tr("traffic.overview.proxy"));
+        self.direct_title_label.set_text(tr("traffic.overview.direct"));
+
+        self.speed_group.set_title(tr("traffic.speed.title"));
+        self.speed_legend_down.set_text(tr("traffic.speed.download"));
+        self.speed_legend_up.set_text(tr("traffic.speed.upload"));
+
+        self.app_usage_group.set_title(tr("traffic.apps.title"));
+        self.app_traffic_search.set_placeholder_text(Some(tr("traffic.apps.search")));
+        let scope_sel = self.traffic_scope_filter.selected();
+        self.traffic_scope_filter.set_model(Some(&gtk::StringList::new(&[
+            tr("traffic.apps.filter.all"),
+            tr("traffic.apps.filter.proxy"),
+            tr("traffic.apps.filter.direct"),
+        ])));
+        self.traffic_scope_filter.set_selected(scope_sel);
+
+        let sort_sel = self.app_traffic_sort.selected();
+        self.app_traffic_sort.set_model(Some(&gtk::StringList::new(&[
+            tr("traffic.apps.sort.traffic"),
+            tr("traffic.apps.sort.name"),
+        ])));
+        self.app_traffic_sort.set_selected(sort_sel);
+
+        self.conn_group.set_title(tr("traffic.conn.title"));
+        self.conn_search.set_placeholder_text(Some(tr("traffic.conn.search")));
+        self.distribution_group.set_title(tr("traffic.conn.rules_dist"));
+    }
 }
 
 /// 辅助创建单一 KPI 指标卡片单元
 fn create_kpi_tile(
     title: &str,
     initial_hero: &str,
-) -> (gtk::Box, gtk::Label, gtk::Label, gtk::Label) {
+) -> (gtk::Box, gtk::Label, gtk::Label, gtk::Label, gtk::Label) {
     let tile = gtk::Box::new(gtk::Orientation::Vertical, 6);
     tile.add_css_class("metric-tile");
     tile.set_hexpand(true);
@@ -680,7 +740,7 @@ fn create_kpi_tile(
 
     tile.append(&sub_box);
 
-    (tile, hero_lbl, up_lbl, down_lbl)
+    (tile, title_lbl, hero_lbl, up_lbl, down_lbl)
 }
 
 /// 辅助创建图例项
@@ -751,14 +811,23 @@ pub fn refresh_traffic_rule_counts(
     reject_count += app_block;
 
     let total = direct_count + proxy_count + reject_count;
-    total_rules_label.set_text(&format!("共 {total} 条策略"));
+    let is_en = crate::i18n::current_language() == ssh_rocket_core::Language::English;
+    total_rules_label.set_text(&if is_en {
+        format!("{total} rules total")
+    } else {
+        format!("共 {total} 条策略")
+    });
+
+    let proxy_name = tr("action.proxy");
+    let reject_name = tr("action.block");
+    let direct_name = tr("action.direct");
 
     if total == 0 {
         *distribution_data.borrow_mut() = (0.0, 0.0, 0.0);
         distribution_area.queue_draw();
-        proxy_legend_label.set_text("代理: 0 (0.0%)");
-        reject_legend_label.set_text("拦截: 0 (0.0%)");
-        direct_legend_label.set_text("直连: 0 (0.0%)");
+        proxy_legend_label.set_text(&format!("{proxy_name}: 0 (0.0%)"));
+        reject_legend_label.set_text(&format!("{reject_name}: 0 (0.0%)"));
+        direct_legend_label.set_text(&format!("{direct_name}: 0 (0.0%)"));
         return;
     }
 
@@ -770,15 +839,15 @@ pub fn refresh_traffic_rule_counts(
     distribution_area.queue_draw();
 
     proxy_legend_label.set_text(&format!(
-        "代理: {proxy_count} ({:.1}%)",
+        "{proxy_name}: {proxy_count} ({:.1}%)",
         proxy_ratio * 100.0
     ));
     reject_legend_label.set_text(&format!(
-        "拦截: {reject_count} ({:.1}%)",
+        "{reject_name}: {reject_count} ({:.1}%)",
         reject_ratio * 100.0
     ));
     direct_legend_label.set_text(&format!(
-        "直连: {direct_count} ({:.1}%)",
+        "{direct_name}: {direct_count} ({:.1}%)",
         direct_ratio * 100.0
     ));
 }
@@ -842,9 +911,9 @@ pub fn refresh_app_traffic_list(
     }
 
     if items.is_empty() {
+        let is_en = crate::i18n::current_language() == ssh_rocket_core::Language::English;
         let empty_row = adw::ActionRow::builder()
-            .title("暂无符合条件的进程流量记录")
-            .subtitle("网络通信产生后将在此处实时归类呈现")
+            .title(if is_en { "No matching process traffic" } else { "暂无符合条件的进程流量记录" })
             .build();
         app_traffic_list_box.append(&empty_row);
         return;
@@ -916,7 +985,12 @@ pub fn refresh_connection_list(
         .cloned()
         .collect();
 
-    conn_stats_label.set_text(&format!("共 {} 个活跃连接", items.len()));
+    let is_en = crate::i18n::current_language() == ssh_rocket_core::Language::English;
+    conn_stats_label.set_text(&if is_en {
+        format!("{} active connections", items.len())
+    } else {
+        format!("共 {} 个活跃连接", items.len())
+    });
     items.truncate(100);
 
     while let Some(child) = conn_list_box.first_child() {
@@ -925,8 +999,7 @@ pub fn refresh_connection_list(
 
     if items.is_empty() {
         let empty_row = adw::ActionRow::builder()
-            .title("暂无活跃连接")
-            .subtitle("系统当前未检测到活跃的 TCP 套接字传输")
+            .title(if is_en { "No Active Connections" } else { "暂无活跃连接" })
             .build();
         conn_list_box.append(&empty_row);
         return;

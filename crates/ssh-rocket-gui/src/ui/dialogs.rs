@@ -4,7 +4,7 @@ use libadwaita as adw;
 use ssh_rocket_core::{parse_rule_set, AppConfig, AuthType, Profile, RuleAction};
 use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
-use crate::ListedRule;
+use crate::{i18n::tr, ListedRule};
 
 pub type RefreshConnections = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
 pub type RefreshRules = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
@@ -19,30 +19,30 @@ pub fn show_profile_dialog(
     let editing = profile.is_some();
     let source = profile.unwrap_or_default();
     let dialog = adw::AlertDialog::new(
-        Some(if editing { "编辑连接" } else { "新建连接" }),
+        Some(if editing { tr("dialog.profile.title_edit") } else { tr("dialog.profile.title_new") }),
         None,
     );
     let group = adw::PreferencesGroup::new();
     let name = adw::EntryRow::builder()
-        .title("名称")
+        .title(tr("dialog.profile.name"))
         .text(&source.name)
         .build();
     let host = adw::EntryRow::builder()
-        .title("服务器地址")
+        .title(tr("dialog.profile.host"))
         .text(&source.host)
         .build();
     let port = adw::EntryRow::builder()
-        .title("端口")
+        .title(tr("dialog.profile.port"))
         .text(source.port.to_string())
         .build();
     let username = adw::EntryRow::builder()
-        .title("用户名")
+        .title(tr("dialog.profile.username"))
         .text(&source.username)
         .build();
 
     let auth_type_row = adw::ComboRow::builder()
-        .title("认证方式")
-        .model(&gtk::StringList::new(&["私钥认证", "密码认证"]))
+        .title(tr("dialog.profile.auth_type"))
+        .model(&gtk::StringList::new(&[tr("dialog.profile.auth_key"), tr("dialog.profile.auth_password")]))
         .selected(match source.auth_type {
             AuthType::Key => 0,
             AuthType::Password => 1,
@@ -50,7 +50,7 @@ pub fn show_profile_dialog(
         .build();
 
     let identity = adw::EntryRow::builder()
-        .title("私钥文件")
+        .title(tr("dialog.profile.identity"))
         .text(
             source
                 .identity_file
@@ -63,13 +63,13 @@ pub fn show_profile_dialog(
     let browse_btn = gtk::Button::from_icon_name("document-open-symbolic");
     browse_btn.add_css_class("flat");
     browse_btn.set_valign(gtk::Align::Center);
-    browse_btn.set_tooltip_text(Some("选择私钥文件"));
+    browse_btn.set_tooltip_text(Some(tr("dialog.profile.identity_btn")));
     {
         let identity_clone = identity.clone();
         let parent_clone = parent.clone();
         browse_btn.connect_clicked(move |_| {
             let file_dialog = gtk::FileDialog::builder()
-                .title("选择 SSH 私钥文件")
+                .title(tr("dialog.profile.identity_dialog"))
                 .modal(true)
                 .build();
             let identity_ref = identity_clone.clone();
@@ -85,7 +85,7 @@ pub fn show_profile_dialog(
     identity.add_suffix(&browse_btn);
 
     let password_row = adw::PasswordEntryRow::builder()
-        .title("SSH 密码")
+        .title(tr("dialog.profile.password"))
         .text(source.password.as_deref().unwrap_or_default())
         .build();
 
@@ -116,8 +116,8 @@ pub fn show_profile_dialog(
     group.add(&password_row);
     dialog.set_extra_child(Some(&group));
 
-    dialog.add_response("cancel", "取消");
-    dialog.add_response("save", "保存");
+    dialog.add_response("cancel", tr("dialog.cancel"));
+    dialog.add_response("save", tr("dialog.save"));
     dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
 
     dialog.connect_response(None, move |dialog, response| {
@@ -126,12 +126,12 @@ pub fn show_profile_dialog(
         }
         let host_text = host.text().trim().to_string();
         if host_text.is_empty() {
-            dialog.set_body("服务器地址不能为空");
+            dialog.set_body(tr("dialog.profile.empty_host"));
             return;
         }
         let mut saved = source.clone();
         saved.name = if name.text().trim().is_empty() {
-            "未命名".into()
+            tr("dialog.profile.default_name").into()
         } else {
             name.text().trim().to_string()
         };
@@ -177,16 +177,16 @@ pub fn show_rule_dialog(
     refresh_rules: RefreshRules,
 ) {
     let dialog = adw::AlertDialog::new(
-        Some(if existing.is_some() { "编辑规则" } else { "添加规则" }),
+        Some(if existing.is_some() { tr("dialog.rule.title_edit") } else { tr("dialog.rule.title_new") }),
         None,
     );
     let group = adw::PreferencesGroup::new();
     let pattern = adw::EntryRow::builder()
-        .title("域名、IP 或 CIDR")
+        .title(tr("dialog.rule.pattern"))
         .text(existing.as_ref().map(ListedRule::value).unwrap_or_default())
         .build();
     let rule_type = adw::ComboRow::builder()
-        .title("规则类型")
+        .title(tr("dialog.rule.kind"))
         .model(&gtk::StringList::new(&[
             "DOMAIN-SUFFIX",
             "DOMAIN",
@@ -201,8 +201,8 @@ pub fn show_rule_dialog(
         })
         .build();
     let action = adw::ComboRow::builder()
-        .title("动作")
-        .model(&gtk::StringList::new(&["直连 (DIRECT)", "代理 (PROXY)", "拦截 (REJECT)"]))
+        .title(tr("dialog.rule.action"))
+        .model(&gtk::StringList::new(&[tr("action.direct"), tr("action.proxy"), tr("action.block")]))
         .selected(match existing.as_ref().map(ListedRule::action) {
             Some(RuleAction::Direct) => 0,
             Some(RuleAction::Block) => 2,
@@ -215,8 +215,8 @@ pub fn show_rule_dialog(
     group.add(&action);
     dialog.set_extra_child(Some(&group));
 
-    dialog.add_response("cancel", "取消");
-    dialog.add_response("save", "保存");
+    dialog.add_response("cancel", tr("dialog.cancel"));
+    dialog.add_response("save", tr("dialog.save"));
     dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
 
     dialog.connect_response(None, move |dialog, response| {
@@ -225,7 +225,7 @@ pub fn show_rule_dialog(
         }
         let value = pattern.text().trim().to_string();
         if value.is_empty() {
-            dialog.set_body("请输入域名、IP 或 CIDR");
+            dialog.set_body(tr("dialog.rule.empty_pattern"));
             return;
         }
         let rule_type_text = match rule_type.selected() {

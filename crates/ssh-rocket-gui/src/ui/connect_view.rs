@@ -5,13 +5,16 @@ use ssh_rocket_core::{AppConfig, AuthType};
 use std::{cell::RefCell, rc::Rc, sync::mpsc};
 
 use crate::{
+    i18n::tr,
     tray::{TrayConnectionState, TrayManager},
     ui::dialogs::{show_profile_dialog, RefreshConnections},
     RuntimeController, RuntimeEvent,
 };
 
+#[derive(Clone)]
 pub struct ConnectView {
     pub container: gtk::Stack,
+    pub empty_connections: adw::StatusPage,
     pub empty_add_button: gtk::Button,
     pub connection_flow: gtk::FlowBox,
 }
@@ -24,10 +27,10 @@ impl ConnectView {
         // 空状态页
         let empty_connections = adw::StatusPage::builder()
             .icon_name("network-server-symbolic")
-            .title("暂无节点配置")
-            .description("添加 SSH 节点服务器以开启透明代理")
+            .title(tr("connect.empty.title"))
+            .description(tr("connect.empty.desc"))
             .build();
-        let empty_add = gtk::Button::with_label("添加连接");
+        let empty_add = gtk::Button::with_label(tr("connect.btn.add"));
         empty_add.add_css_class("suggested-action");
         empty_add.add_css_class("pill");
         empty_add.set_halign(gtk::Align::Center);
@@ -56,9 +59,16 @@ impl ConnectView {
 
         Self {
             container: connect_stack,
+            empty_connections,
             empty_add_button: empty_add,
             connection_flow,
         }
+    }
+
+    pub fn refresh_labels(&self) {
+        self.empty_connections.set_title(tr("connect.empty.title"));
+        self.empty_connections.set_description(Some(tr("connect.empty.desc")));
+        self.empty_add_button.set_label(tr("connect.btn.add"));
     }
 }
 
@@ -143,7 +153,7 @@ pub fn render_connection_cards(
         header_row.append(&title);
 
         if is_active && connected {
-            let active_tag = gtk::Label::new(Some("已连接"));
+            let active_tag = gtk::Label::new(Some(tr("status.connected")));
             active_tag.add_css_class("status-badge");
             active_tag.add_css_class("status-badge-connected");
             active_tag.set_valign(gtk::Align::Center);
@@ -152,12 +162,12 @@ pub fn render_connection_cards(
 
         let edit = gtk::Button::from_icon_name("document-edit-symbolic");
         edit.add_css_class("flat");
-        edit.set_tooltip_text(Some("编辑节点"));
+        edit.set_tooltip_text(Some(tr("connect.menu.edit")));
         header_row.append(&edit);
 
         let remove = gtk::Button::from_icon_name("user-trash-symbolic");
         remove.add_css_class("flat");
-        remove.set_tooltip_text(Some("删除节点"));
+        remove.set_tooltip_text(Some(tr("connect.menu.delete")));
         header_row.append(&remove);
         card.append(&header_row);
 
@@ -166,10 +176,10 @@ pub fn render_connection_cards(
         info.set_margin_start(14);
         info.set_margin_end(14);
         for (key, value) in [
-            ("服务器", profile.host.clone()),
-            ("端口", profile.port.to_string()),
+            (tr("connect.card.server"), profile.host.clone()),
+            (tr("connect.card.port"), profile.port.to_string()),
             (
-                "用户名",
+                tr("connect.card.user"),
                 if profile.username.is_empty() {
                     "—".into()
                 } else {
@@ -193,13 +203,13 @@ pub fn render_connection_cards(
         // 认证信息（私钥或密码）及脱敏切换
         let (auth_key, auth_val) = match profile.auth_type {
             AuthType::Key => (
-                "私钥",
+                tr("connect.card.key"),
                 profile
                     .identity_file
                     .as_ref()
                     .map(|path| path.to_string_lossy().to_string()),
             ),
-            AuthType::Password => ("密码", profile.password.clone()),
+            AuthType::Password => (tr("connect.card.password"), profile.password.clone()),
         };
 
         let auth_line = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -218,7 +228,7 @@ pub fn render_connection_cards(
             let eye_btn = gtk::Button::from_icon_name("view-reveal-symbolic");
             eye_btn.add_css_class("flat");
             eye_btn.set_valign(gtk::Align::Center);
-            eye_btn.set_tooltip_text(Some("查看明文"));
+            eye_btn.set_tooltip_text(Some(tr("connect.card.show")));
 
             let is_revealed = Rc::new(RefCell::new(false));
             {
@@ -231,11 +241,11 @@ pub fn render_connection_cards(
                     if *rev {
                         value_label.set_text(&real_text);
                         btn.set_icon_name("view-conceal-symbolic");
-                        btn.set_tooltip_text(Some("隐藏明文"));
+                        btn.set_tooltip_text(Some(tr("connect.card.hide")));
                     } else {
                         value_label.set_text("••••••••");
                         btn.set_icon_name("view-reveal-symbolic");
-                        btn.set_tooltip_text(Some("查看明文"));
+                        btn.set_tooltip_text(Some(tr("connect.card.show")));
                     }
                 });
             }
@@ -257,9 +267,9 @@ pub fn render_connection_cards(
         actions.set_margin_bottom(10);
 
         let connect_button = gtk::Button::with_label(if is_active && connected {
-            "断开连接"
+            tr("connect.btn.disconnect")
         } else {
-            "连接"
+            tr("connect.btn.connect")
         });
         if is_active && connected {
             connect_button.add_css_class("destructive-action");
@@ -333,7 +343,7 @@ pub fn render_connection_cards(
             connect_button.connect_clicked(move |_| {
                 let is_active = config.borrow().active_profile == Some(profile.id);
                 if (*is_connected.borrow() || controller.borrow().is_running()) && is_active {
-                    bottom_status.set_text("正在断开…");
+                    bottom_status.set_text(tr("status.disconnecting"));
                     connect_button_ref.set_sensitive(false);
                     if let Some(tray) = tray_manager.borrow().as_ref() {
                         tray.set_state(TrayConnectionState::Disconnecting);
@@ -353,12 +363,12 @@ pub fn render_connection_cards(
                     bottom_status.set_text("无法解析配置文件路径");
                     return;
                 };
-                bottom_status.set_text("正在连接…");
+                bottom_status.set_text(tr("status.connecting"));
                 for (_, button) in connection_buttons.borrow().iter() {
                     button.set_sensitive(false);
-                    button.set_label("连接");
+                    button.set_label(tr("connect.btn.connect"));
                 }
-                connect_button_ref.set_label("连接中…");
+                connect_button_ref.set_label(tr("status.connecting"));
                 if let Some(tray) = tray_manager.borrow().as_ref() {
                     tray.set_state(TrayConnectionState::Connecting);
                 }

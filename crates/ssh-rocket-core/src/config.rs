@@ -103,6 +103,7 @@ pub enum ThemeMode {
 #[serde(rename_all = "snake_case")]
 pub enum Language {
     #[default]
+    Auto,
     Chinese,
     English,
 }
@@ -253,11 +254,11 @@ mod tests {
 
     #[test]
     fn test_settings_theme_and_language() {
-        // 旧配置缺失字段时，默认应为 Auto 和 Chinese
+        // 旧配置缺失字段时，默认应为 Auto 和 Auto
         let old_json = r#"{}"#;
         let settings: GlobalSettings = serde_json::from_str(old_json).expect("deserialize empty");
         assert_eq!(settings.theme_mode, ThemeMode::Auto);
-        assert_eq!(settings.language, Language::Chinese);
+        assert_eq!(settings.language, Language::Auto);
 
         // 正常往返序列化
         let mut s = GlobalSettings::default();
