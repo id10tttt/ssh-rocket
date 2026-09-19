@@ -1,5 +1,5 @@
 use adw::prelude::*;
-use gtk4 as gtk;
+use gtk4::{self as gtk, glib};
 use libadwaita as adw;
 use ssh_rocket_core::{AppConfig, RuleAction};
 use std::{cell::RefCell, collections::VecDeque, rc::Rc, time::Instant};
@@ -935,7 +935,7 @@ pub fn refresh_app_traffic_list(
         };
 
         let row = adw::ActionRow::builder()
-            .title(&item.name)
+            .title(glib::markup_escape_text(&item.name))
             .subtitle(&format!(
                 "↑ {}   ↓ {}",
                 format_bytes(up_bytes),

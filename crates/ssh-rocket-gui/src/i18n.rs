@@ -180,7 +180,7 @@ pub fn tr(key: &'static str) -> &'static str {
         "traffic.tab.connections" => if is_en { "Active Connections" } else { "实时连接" },
 
         // Traffic View - Overview
-        "traffic.overview.title" => if is_en { "Session & Traffic Overview" } else { "会话与传输总览" },
+        "traffic.overview.title" => if is_en { "Session &amp; Traffic Overview" } else { "会话与传输总览" },
         "traffic.overview.total" => if is_en { "Total Traffic" } else { "总传输量" },
         "traffic.overview.proxy" => if is_en { "Proxy Traffic" } else { "代理流量" },
         "traffic.overview.direct" => if is_en { "Direct Traffic" } else { "直连流量" },
@@ -219,7 +219,7 @@ pub fn tr(key: &'static str) -> &'static str {
 
         // Settings View
         "settings.title" => if is_en { "Settings" } else { "应用设置" },
-        "settings.appearance.group" => if is_en { "Appearance & Theme" } else { "外观与主题" },
+        "settings.appearance.group" => if is_en { "Appearance &amp; Theme" } else { "外观与主题" },
         "settings.appearance.desc" => if is_en { "Personalize application appearance" } else { "个性化客户端外观配色" },
         "settings.theme.title" => if is_en { "Theme Mode" } else { "主题模式" },
         "settings.theme.subtitle" => if is_en { "Follow system appearance or force light/dark" } else { "跟随系统或强制指定浅色/深色" },
@@ -227,7 +227,7 @@ pub fn tr(key: &'static str) -> &'static str {
         "settings.theme.light" => if is_en { "Light" } else { "浅色模式" },
         "settings.theme.dark" => if is_en { "Dark" } else { "深色模式" },
 
-        "settings.language.group" => if is_en { "Language & Region" } else { "语言与区域" },
+        "settings.language.group" => if is_en { "Language &amp; Region" } else { "语言与区域" },
         "settings.language.desc" => if is_en { "Configure interface display language" } else { "配置界面显示语言" },
         "settings.language.title" => if is_en { "Language" } else { "界面语言" },
         "settings.language.subtitle" => if is_en { "Switch between Chinese and English" } else { "在中英文之间无缝切换" },
@@ -263,6 +263,9 @@ mod tests {
         assert_eq!(tr("action.block"), "Block");
         assert_eq!(tr("settings.theme.auto"), "Follow System");
         assert_eq!(tr("settings.language.auto"), "Follow System");
+        assert_eq!(tr("settings.appearance.group"), "Appearance &amp; Theme");
+        assert_eq!(tr("settings.language.group"), "Language &amp; Region");
+        assert_eq!(tr("traffic.overview.title"), "Session &amp; Traffic Overview");
 
         // English mode must not contain Chinese characters
         assert!(!tr("action.direct").chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)));

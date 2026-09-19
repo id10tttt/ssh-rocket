@@ -3,7 +3,7 @@ mod tray;
 pub mod ui;
 
 use adw::prelude::*;
-use gtk4::{self as gtk, gio};
+use gtk4::{self as gtk, gio, glib};
 use libadwaita as adw;
 use ssh_rocket_core::{
     parse_omega_rules, parse_rule_set, parse_shadowrocket_rules, AppConfig, AppRule, DomainRule,
@@ -1098,9 +1098,12 @@ fn build_ui(app: &adw::Application) {
         let refresh_ui = refresh_ui_for_language.clone();
         Rc::new(move |lang: Language| {
             crate::i18n::set_language(lang);
-            if let Some(refresh) = refresh_ui.borrow().as_ref() {
-                refresh();
-            }
+            let refresh_ui = refresh_ui.clone();
+            glib::idle_add_local_once(move || {
+                if let Some(refresh) = refresh_ui.borrow().as_ref() {
+                    refresh();
+                }
+            });
         })
     };
     let on_theme_changed = Rc::new(move |mode| {
@@ -2000,8 +2003,8 @@ fn build_ui(app: &adw::Application) {
 
     for app in &scan_desktop_apps() {
         let row = adw::ActionRow::builder()
-            .title(&app.name)
-            .subtitle(&app.executable)
+            .title(glib::markup_escape_text(&app.name))
+            .subtitle(glib::markup_escape_text(&app.executable))
             .build();
         row.add_prefix(&create_app_icon(&app.icon));
 
