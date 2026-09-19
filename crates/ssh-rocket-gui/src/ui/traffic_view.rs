@@ -5,6 +5,7 @@ use ssh_rocket_core::{AppConfig, RuleAction};
 use std::{cell::RefCell, collections::VecDeque, rc::Rc, time::Instant};
 
 use crate::{
+    i18n::tr,
     scan_desktop_apps,
     ui::widgets::{create_app_icon, format_bytes, format_speed},
     ActiveConnectionStat, AppTrafficStat,
@@ -33,12 +34,6 @@ pub struct TrafficView {
     pub speed_drawing_area: gtk::DrawingArea,
     pub speed_current_label: gtk::Label,
 
-    // 流量构成占比条
-    pub ratio_data: Rc<RefCell<(f64, f64)>>,
-    pub ratio_area: gtk::DrawingArea,
-    pub ratio_proxy_label: gtk::Label,
-    pub ratio_direct_label: gtk::Label,
-
     // --- Tab 2: 应用统计 ---
     pub app_traffic_search: gtk::SearchEntry,
     pub traffic_scope_filter: gtk::DropDown,
@@ -61,10 +56,12 @@ pub struct TrafficView {
 impl TrafficView {
     pub fn update_session_subtitle(&self, duration: &str, started: &str) {
         if started == "—" || started.is_empty() {
-            self.overview_group.set_description(Some("未连接"));
+            self.overview_group.set_description(Some(tr("status.disconnected")));
         } else {
             self.overview_group.set_description(Some(&format!(
-                "连接时长: {duration} · 始于 {started}"
+                "{}: {duration} · {} {started}",
+                tr("traffic.session.duration"),
+                tr("traffic.session.started"),
             )));
         }
     }
@@ -100,8 +97,8 @@ impl TrafficView {
 
         // 1.1 会话与传输总览卡片 (3 列 KPI)
         let overview_group = adw::PreferencesGroup::builder()
-            .title("会话与传输总览")
-            .description("未连接")
+            .title(tr("traffic.overview.title"))
+            .description(tr("status.disconnected"))
             .build();
 
         let overview_card = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -109,15 +106,15 @@ impl TrafficView {
         overview_card.set_homogeneous(true);
 
         let (tile_total, total_hero_label, total_up_label, total_down_label) =
-            create_kpi_tile("总传输量", "0 B");
+            create_kpi_tile(tr("traffic.overview.total"), "0 B");
         overview_card.append(&tile_total);
 
         let (tile_proxy, proxy_hero_label, proxy_up_label, proxy_down_label) =
-            create_kpi_tile("代理流量", "0 B");
+            create_kpi_tile(tr("traffic.overview.proxy"), "0 B");
         overview_card.append(&tile_proxy);
 
         let (tile_direct, direct_hero_label, direct_up_label, direct_down_label) =
-            create_kpi_tile("直连流量", "0 B");
+            create_kpi_tile(tr("traffic.overview.direct"), "0 B");
         overview_card.append(&tile_direct);
 
         overview_group.add(&overview_card);
@@ -125,7 +122,7 @@ impl TrafficView {
 
         // 1.2 Speed
         let speed_group = adw::PreferencesGroup::builder()
-            .title("Speed")
+            .title(tr("traffic.speed.title"))
             .build();
 
         let speed_current_label = gtk::Label::builder()
@@ -145,7 +142,7 @@ impl TrafficView {
         let display_peak = Rc::new(RefCell::new(1024.0_f64));
 
         let speed_drawing_area = gtk::DrawingArea::builder()
-            .content_height(145)
+            .content_height(185)
             .hexpand(true)
             .build();
 
@@ -168,8 +165,12 @@ impl TrafficView {
                 return;
             }
 
-            // 卡片背景微底色
-            cr.set_source_rgba(1.0, 1.0, 1.0, 0.015);
+            let is_dark = adw::StyleManager::default().is_dark();
+
+            // 卡片背景微底色自适应
+            let bg_c = if is_dark { 1.0 } else { 0.0 };
+            let bg_alpha = if is_dark { 0.015 } else { 0.02 };
+            cr.set_source_rgba(bg_c, bg_c, bg_c, bg_alpha);
             let _ = cr.paint();
 
             // 坐标与内边距定义：右侧预留 66px 显示速率 Y 轴，底部预留 22px 显示时间 X 轴
@@ -221,6 +222,13 @@ impl TrafficView {
 
             cr.set_font_size(9.5);
 
+            // 主题自适应颜色
+            let line_c = if is_dark { 1.0 } else { 0.0 };
+            let grid_alpha = if is_dark { 0.06 } else { 0.08 };
+            let text_alpha = if is_dark { 0.40 } else { 0.60 };
+            let border_alpha = if is_dark { 0.09 } else { 0.12 };
+            let xtick_alpha = if is_dark { 0.04 } else { 0.06 };
+
             // 2. 绘制水平网格线与 Y 轴刻度 (100%、50%、0%)
             let y_steps = [
                 (0.0, peak_f),
@@ -230,21 +238,22 @@ impl TrafficView {
             for (ratio, val) in y_steps {
                 let y = chart_y0 + chart_h * ratio;
 
-                cr.set_source_rgba(1.0, 1.0, 1.0, 0.06);
+                cr.set_source_rgba(line_c, line_c, line_c, grid_alpha);
                 cr.set_line_width(1.0);
                 cr.move_to(chart_x0, y);
                 cr.line_to(chart_x1, y);
                 let _ = cr.stroke();
 
                 let label = format_speed(val.round() as u64);
-                cr.set_source_rgba(1.0, 1.0, 1.0, 0.40);
+                cr.set_source_rgba(line_c, line_c, line_c, text_alpha);
                 cr.move_to(chart_x1 + 6.0, y + 3.5);
                 let _ = cr.show_text(&label);
             }
 
             // 3. 绘制垂直网格线与 X 轴时间刻度 (0s, -10s, -20s, -30s, -40s)
+            let now_label = tr("traffic.speed.now");
             let x_ticks = [
-                (0.0, "现在"),
+                (0.0, now_label),
                 (10.0, "-10s"),
                 (20.0, "-20s"),
                 (30.0, "-30s"),
@@ -253,13 +262,13 @@ impl TrafficView {
             for (t_sec, label) in x_ticks {
                 let x = chart_x1 - (t_sec / window_sec) * chart_w;
 
-                cr.set_source_rgba(1.0, 1.0, 1.0, 0.04);
+                cr.set_source_rgba(line_c, line_c, line_c, xtick_alpha);
                 cr.set_line_width(1.0);
                 cr.move_to(x, chart_y0);
                 cr.line_to(x, chart_y1);
                 let _ = cr.stroke();
 
-                cr.set_source_rgba(1.0, 1.0, 1.0, 0.40);
+                cr.set_source_rgba(line_c, line_c, line_c, text_alpha);
                 let text_w = cr.text_extents(label).map(|e| e.width()).unwrap_or(20.0);
                 let tx = (x - text_w / 2.0).clamp(0.0, w - text_w - 2.0);
                 cr.move_to(tx, chart_y1 + 15.0);
@@ -267,7 +276,7 @@ impl TrafficView {
             }
 
             // 边框
-            cr.set_source_rgba(1.0, 1.0, 1.0, 0.09);
+            cr.set_source_rgba(line_c, line_c, line_c, border_alpha);
             cr.set_line_width(1.0);
             cr.rectangle(chart_x0, chart_y0, chart_w, chart_h);
             let _ = cr.stroke();
@@ -382,125 +391,52 @@ impl TrafficView {
         speed_legend_box.set_margin_bottom(12);
         speed_legend_box.set_halign(gtk::Align::End);
 
-        let (legend_down_item, _) = create_legend_item("distribution-seg-proxy", "下载速率 (↓)");
+        let (legend_down_item, _) = create_legend_item("distribution-seg-proxy", tr("traffic.speed.download"));
         speed_legend_box.append(&legend_down_item);
 
-        let (legend_up_item, _) = create_legend_item("distribution-seg-reject", "上传速率 (↑)");
+        let (legend_up_item, _) = create_legend_item("distribution-seg-reject", tr("traffic.speed.upload"));
         speed_legend_box.append(&legend_up_item);
 
         speed_card.append(&speed_legend_box);
         speed_group.add(&speed_card);
         overview_content.add(&speed_group);
 
-        // 1.3 流量构成比例条 (代理 vs 直连)
-        let ratio_group = adw::PreferencesGroup::builder()
-            .title("流量构成分布")
-            .build();
-
-        let ratio_card = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        ratio_card.add_css_class("card");
-        ratio_card.set_margin_top(4);
-        ratio_card.set_margin_bottom(4);
-        ratio_card.set_margin_start(4);
-        ratio_card.set_margin_end(4);
-
-        let ratio_content = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        ratio_content.set_margin_start(16);
-        ratio_content.set_margin_end(16);
-        ratio_content.set_margin_top(16);
-        ratio_content.set_margin_bottom(16);
-
-        let ratio_data = Rc::new(RefCell::new((0.0f64, 0.0f64)));
-        let ratio_area = gtk::DrawingArea::builder()
-            .content_height(12)
-            .hexpand(true)
-            .build();
-
-        let draw_ratio = ratio_data.clone();
-        ratio_area.set_draw_func(move |_area, cr, width, height| {
-            let (proxy_ratio, direct_ratio) = *draw_ratio.borrow();
-            let total = proxy_ratio + direct_ratio;
-            let w = width as f64;
-            let h = height as f64;
-            if w <= 0.0 || h <= 0.0 {
-                return;
-            }
-
-            let r = 6.0f64.min(h / 2.0).min(w / 2.0);
-            cr.new_sub_path();
-            cr.arc(w - r, r, r, -std::f64::consts::FRAC_PI_2, 0.0);
-            cr.arc(w - r, h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
-            cr.arc(r, h - r, r, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
-            cr.arc(r, r, r, std::f64::consts::PI, 3.0 * std::f64::consts::FRAC_PI_2);
-            cr.close_path();
-            let _ = cr.clip();
-
-            cr.set_source_rgba(1.0, 1.0, 1.0, 0.08);
-            let _ = cr.paint();
-
-            if total <= 0.0 {
-                return;
-            }
-
-            let proxy_w = (w * proxy_ratio).round();
-            let direct_w = (w - proxy_w).max(0.0);
-
-            if proxy_w > 0.0 {
-                cr.set_source_rgb(0.18, 0.76, 0.49);
-                cr.rectangle(0.0, 0.0, proxy_w, h);
-                let _ = cr.fill();
-            }
-            if direct_w > 0.0 {
-                cr.set_source_rgb(0.21, 0.52, 0.89);
-                cr.rectangle(proxy_w, 0.0, direct_w, h);
-                let _ = cr.fill();
-            }
-        });
-
-        ratio_content.append(&ratio_area);
-
-        let ratio_legend_box = gtk::Box::new(gtk::Orientation::Horizontal, 24);
-        let (proxy_ratio_item, ratio_proxy_label) =
-            create_legend_item("distribution-seg-proxy", "代理流量: 0 B (0%)");
-        let (direct_ratio_item, ratio_direct_label) =
-            create_legend_item("distribution-seg-direct", "直连流量: 0 B (0%)");
-        ratio_legend_box.append(&proxy_ratio_item);
-        ratio_legend_box.append(&direct_ratio_item);
-        ratio_content.append(&ratio_legend_box);
-
-        ratio_card.append(&ratio_content);
-        ratio_group.add(&ratio_card);
-        overview_content.add(&ratio_group);
-
         let overview_scroller = gtk::ScrolledWindow::builder()
             .child(&overview_content)
             .vexpand(true)
             .hscrollbar_policy(gtk::PolicyType::Never)
             .build();
-        stack.add_titled(&overview_scroller, Some("overview"), "监控总览");
+        stack.add_titled(&overview_scroller, Some("overview"), tr("traffic.tab.overview"));
 
         // ==========================================
         // Tab 2: 应用统计 (App Traffic)
         // ==========================================
         let apps_content = adw::PreferencesPage::new();
         let app_usage_group = adw::PreferencesGroup::builder()
-            .title("进程流量统计")
+            .title(tr("traffic.apps.title"))
             .build();
 
         let app_traffic_toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         app_traffic_toolbar.set_margin_bottom(8);
 
         let app_traffic_search = gtk::SearchEntry::builder()
-            .placeholder_text("搜索应用或进程")
+            .placeholder_text(tr("traffic.apps.search"))
             .hexpand(true)
             .build();
         app_traffic_toolbar.append(&app_traffic_search);
 
         let traffic_scope_filter =
-            gtk::DropDown::from_strings(&["全部流量", "仅代理", "本地与直连"]);
+            gtk::DropDown::from_strings(&[
+                tr("traffic.apps.filter.all"),
+                tr("traffic.apps.filter.proxy"),
+                tr("traffic.apps.filter.direct"),
+            ]);
         app_traffic_toolbar.append(&traffic_scope_filter);
 
-        let app_traffic_sort = gtk::DropDown::from_strings(&["按流量", "按名称"]);
+        let app_traffic_sort = gtk::DropDown::from_strings(&[
+            tr("traffic.apps.sort.traffic"),
+            tr("traffic.apps.sort.name"),
+        ]);
         app_traffic_toolbar.append(&app_traffic_sort);
 
         app_usage_group.add(&app_traffic_toolbar);
@@ -514,7 +450,7 @@ impl TrafficView {
             .vexpand(true)
             .hscrollbar_policy(gtk::PolicyType::Never)
             .build();
-        stack.add_titled(&apps_scroller, Some("apps"), "应用统计");
+        stack.add_titled(&apps_scroller, Some("apps"), tr("traffic.tab.apps"));
 
         // ==========================================
         // Tab 3: 实时连接 (Active Connections) & 规则分布
@@ -522,11 +458,11 @@ impl TrafficView {
         let conn_content = adw::PreferencesPage::new();
 
         let conn_group = adw::PreferencesGroup::builder()
-            .title("活跃连接监控")
+            .title(tr("traffic.conn.title"))
             .build();
 
         let conn_stats_label = gtk::Label::builder()
-            .label("共 0 个活跃连接")
+            .label("0")
             .css_classes(["dim-label", "numeric"])
             .build();
         conn_group.set_header_suffix(Some(&conn_stats_label));
@@ -535,7 +471,7 @@ impl TrafficView {
         conn_toolbar.set_margin_bottom(8);
 
         let conn_search = gtk::SearchEntry::builder()
-            .placeholder_text("搜索目标 IP、端口或进程")
+            .placeholder_text(tr("traffic.conn.search"))
             .hexpand(true)
             .build();
         conn_toolbar.append(&conn_search);
@@ -546,7 +482,7 @@ impl TrafficView {
         conn_content.add(&conn_group);
 
         let distribution_group = adw::PreferencesGroup::builder()
-            .title("规则策略分布")
+            .title(tr("traffic.conn.rules_dist"))
             .build();
 
         let total_rules_label = gtk::Label::builder()
@@ -630,15 +566,15 @@ impl TrafficView {
         legend_box.set_halign(gtk::Align::Start);
 
         let (proxy_legend_item, proxy_legend_label) =
-            create_legend_item("distribution-seg-proxy", "代理: 0 (0%)");
+            create_legend_item("distribution-seg-proxy", &format!("{}: 0 (0%)", tr("traffic.conn.proxy")));
         legend_box.append(&proxy_legend_item);
 
         let (reject_legend_item, reject_legend_label) =
-            create_legend_item("distribution-seg-reject", "拦截: 0 (0%)");
+            create_legend_item("distribution-seg-reject", &format!("{}: 0 (0%)", tr("traffic.conn.reject")));
         legend_box.append(&reject_legend_item);
 
         let (direct_legend_item, direct_legend_label) =
-            create_legend_item("distribution-seg-direct", "直连: 0 (0%)");
+            create_legend_item("distribution-seg-direct", &format!("{}: 0 (0%)", tr("traffic.conn.direct")));
         legend_box.append(&direct_legend_item);
 
         dist_content.append(&legend_box);
@@ -651,7 +587,7 @@ impl TrafficView {
             .vexpand(true)
             .hscrollbar_policy(gtk::PolicyType::Never)
             .build();
-        stack.add_titled(&conn_scroller, Some("connections"), "实时连接");
+        stack.add_titled(&conn_scroller, Some("connections"), tr("traffic.tab.connections"));
 
         page.append(&stack);
 
@@ -672,10 +608,6 @@ impl TrafficView {
             speed_history,
             speed_drawing_area,
             speed_current_label,
-            ratio_data,
-            ratio_area,
-            ratio_proxy_label,
-            ratio_direct_label,
             app_traffic_search,
             traffic_scope_filter,
             app_traffic_sort,
@@ -1030,43 +962,15 @@ pub fn refresh_connection_list(
     }
 }
 
-/// 更新流量构成比 (代理 vs 直连)
+/// (已废弃) 流量构成比已从监控总览页移除以消除冗余并提升视觉聚焦度
+#[allow(unused_variables)]
 pub fn update_traffic_ratio_display(
-    up_proxy: u64,
-    down_proxy: u64,
-    direct_up: u64,
-    direct_down: u64,
-    ratio_data: &Rc<RefCell<(f64, f64)>>,
-    ratio_area: &gtk::DrawingArea,
-    ratio_proxy_label: &gtk::Label,
-    ratio_direct_label: &gtk::Label,
-) {
-    let proxy_total = up_proxy + down_proxy;
-    let direct_total = direct_up + direct_down;
-    let grand_total = proxy_total + direct_total;
-
-    if grand_total == 0 {
-        *ratio_data.borrow_mut() = (0.0, 0.0);
-        ratio_area.queue_draw();
-        ratio_proxy_label.set_text("代理流量: 0 B (0%)");
-        ratio_direct_label.set_text("直连流量: 0 B (0%)");
-        return;
-    }
-
-    let proxy_ratio = proxy_total as f64 / grand_total as f64;
-    let direct_ratio = direct_total as f64 / grand_total as f64;
-
-    *ratio_data.borrow_mut() = (proxy_ratio, direct_ratio);
-    ratio_area.queue_draw();
-
-    ratio_proxy_label.set_text(&format!(
-        "代理流量: {} ({:.1}%)",
-        format_bytes(proxy_total),
-        proxy_ratio * 100.0
-    ));
-    ratio_direct_label.set_text(&format!(
-        "直连流量: {} ({:.1}%)",
-        format_bytes(direct_total),
-        direct_ratio * 100.0
-    ));
-}
+    _up_proxy: u64,
+    _down_proxy: u64,
+    _direct_up: u64,
+    _direct_down: u64,
+    _ratio_data: &Rc<RefCell<(f64, f64)>>,
+    _ratio_area: &gtk::DrawingArea,
+    _ratio_proxy_label: &gtk::Label,
+    _ratio_direct_label: &gtk::Label,
+) {}

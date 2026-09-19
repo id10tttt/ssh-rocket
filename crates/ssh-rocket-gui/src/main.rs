@@ -1,3 +1,4 @@
+pub mod i18n;
 mod tray;
 pub mod ui;
 
@@ -6,7 +7,7 @@ use gtk4::{self as gtk, gio};
 use libadwaita as adw;
 use ssh_rocket_core::{
     parse_omega_rules, parse_rule_set, parse_shadowrocket_rules, AppConfig, AppRule, DomainRule,
-    DomainRuleKind, IpRule, Profile, RuleAction, RuleImportResult,
+    DomainRuleKind, IpRule, Language, Profile, RuleAction, RuleImportResult, ThemeMode,
 };
 use ssh_rocket_runtime::{PrivilegedHelperSession, SshSession};
 use std::{
@@ -34,10 +35,11 @@ use ui::{
     dialogs::{show_profile_dialog, show_rule_dialog, RefreshConnections, RefreshRules},
     logs_view::LogsView,
     rules_view::{append_rule_batch, refresh_rule_list, RulesView},
+    settings_view::SettingsView,
     theme::init_theme,
     traffic_view::{
         refresh_app_traffic_list, refresh_connection_list, refresh_traffic_rule_counts,
-        update_traffic_ratio_display, TrafficView,
+        TrafficView,
     },
     widgets::{create_app_icon, format_bytes, format_duration, format_speed},
     window::create_main_window,
@@ -1061,10 +1063,24 @@ fn helper_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("ssh-rocket-helper"))
 }
 
+fn apply_theme_mode(mode: ThemeMode) {
+    let style_manager = adw::StyleManager::default();
+    match mode {
+        ThemeMode::Auto => style_manager.set_color_scheme(adw::ColorScheme::Default),
+        ThemeMode::Light => style_manager.set_color_scheme(adw::ColorScheme::ForceLight),
+        ThemeMode::Dark => style_manager.set_color_scheme(adw::ColorScheme::ForceDark),
+    }
+}
+
 fn build_ui(app: &adw::Application) {
+    let config = Rc::new(RefCell::new(AppConfig::load().unwrap_or_default()));
+    let initial_theme = config.borrow().settings.theme_mode;
+    let initial_lang = config.borrow().settings.language;
+    crate::i18n::set_language(initial_lang);
+    apply_theme_mode(initial_theme);
+
     init_theme();
 
-    let config = Rc::new(RefCell::new(AppConfig::load().unwrap_or_default()));
     let controller = Rc::new(RefCell::new(RuntimeController::default()));
     let (event_tx, event_rx) = mpsc::channel::<RuntimeEvent>();
     let is_connected = Rc::new(RefCell::new(false));
@@ -1077,17 +1093,74 @@ fn build_ui(app: &adw::Application) {
     // 1. 构建主窗口与导航
     let win = create_main_window(app);
 
+    let refresh_ui_for_language: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let on_lang_changed = {
+        let refresh_ui = refresh_ui_for_language.clone();
+        Rc::new(move |lang: Language| {
+            crate::i18n::set_language(lang);
+            if let Some(refresh) = refresh_ui.borrow().as_ref() {
+                refresh();
+            }
+        })
+    };
+    let on_theme_changed = Rc::new(move |mode| {
+        apply_theme_mode(mode);
+    });
+
     // 2. 构建各功能视图
     let connect_view = ConnectView::new();
     let rules_view = RulesView::new(&config);
     let traffic_view = TrafficView::new();
     let logs_view = LogsView::new();
+    let settings_view = Rc::new(SettingsView::new(&config, on_theme_changed, on_lang_changed));
 
     win.view_stack
         .add_named(&connect_view.container, Some("connect"));
     win.view_stack.add_named(&rules_view.container, Some("rules"));
     win.view_stack.add_named(&traffic_view.page, Some("traffic"));
     win.view_stack.add_named(&logs_view.container, Some("logs"));
+    win.view_stack.add_named(&settings_view.container, Some("settings"));
+
+    {
+        let win_connect_lbl = win.connect_nav_label.clone();
+        let win_rules_lbl = win.rules_nav_label.clone();
+        let win_traffic_lbl = win.traffic_nav_label.clone();
+        let win_logs_lbl = win.logs_nav_label.clone();
+        let win_settings_lbl = win.settings_nav_label.clone();
+        let win_back_btn = win.back_button.clone();
+        let win_add_conn = win.add_connection.clone();
+        let win_page_title = win.page_title.clone();
+        let win_navigation = win.navigation.clone();
+        let win_bottom_status = win.bottom_status.clone();
+        let is_connected_clone = is_connected.clone();
+        let settings_view_clone = settings_view.clone();
+
+        *refresh_ui_for_language.borrow_mut() = Some(Rc::new(move || {
+            win_connect_lbl.set_text(crate::i18n::tr("nav.connect"));
+            win_rules_lbl.set_text(crate::i18n::tr("nav.rules"));
+            win_traffic_lbl.set_text(crate::i18n::tr("nav.traffic"));
+            win_logs_lbl.set_text(crate::i18n::tr("nav.logs"));
+            win_settings_lbl.set_text(crate::i18n::tr("nav.settings"));
+            win_back_btn.set_tooltip_text(Some(crate::i18n::tr("btn.back")));
+            win_add_conn.set_tooltip_text(Some(crate::i18n::tr("btn.add_connection")));
+            if !*is_connected_clone.borrow() {
+                win_bottom_status.set_text(crate::i18n::tr("status.disconnected"));
+            }
+
+            if let Some(selected_row) = win_navigation.selected_row() {
+                let title = match selected_row.index() {
+                    1 => crate::i18n::tr("nav.rules"),
+                    2 => crate::i18n::tr("nav.traffic"),
+                    3 => crate::i18n::tr("nav.logs"),
+                    4 => crate::i18n::tr("nav.settings"),
+                    _ => crate::i18n::tr("nav.connect"),
+                };
+                win_page_title.set_text(title);
+            }
+
+            settings_view_clone.refresh_labels();
+        }));
+    }
 
     // 3. 侧边栏导航切换
     let refresh_active_traffic_tab: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
@@ -1103,10 +1176,11 @@ fn build_ui(app: &adw::Application) {
         win.navigation.connect_row_selected(move |_, row| {
             let Some(row) = row else { return; };
             let (name, title) = match row.index() {
-                1 => ("rules", "分流规则"),
-                2 => ("traffic", "流量监控"),
-                3 => ("logs", "运行日志"),
-                _ => ("connect", "节点连接"),
+                1 => ("rules", crate::i18n::tr("nav.rules")),
+                2 => ("traffic", crate::i18n::tr("nav.traffic")),
+                3 => ("logs", crate::i18n::tr("nav.logs")),
+                4 => ("settings", crate::i18n::tr("nav.settings")),
+                _ => ("connect", crate::i18n::tr("nav.connect")),
             };
             view_stack.set_visible_child_name(name);
             add_connection.set_visible(name == "connect");
@@ -2459,10 +2533,6 @@ fn build_ui(app: &adw::Application) {
         let direct_hero_label = traffic_view.direct_hero_label.clone();
         let direct_up_label = traffic_view.direct_up_label.clone();
         let direct_down_label = traffic_view.direct_down_label.clone();
-        let ratio_data = traffic_view.ratio_data.clone();
-        let ratio_area = traffic_view.ratio_area.clone();
-        let ratio_proxy_label = traffic_view.ratio_proxy_label.clone();
-        let ratio_direct_label = traffic_view.ratio_direct_label.clone();
         let session_upload = session_upload.clone();
         let session_download = session_download.clone();
         let tray_manager = tray_manager.clone();
@@ -2485,10 +2555,6 @@ fn build_ui(app: &adw::Application) {
             let direct_hero_label = direct_hero_label.clone();
             let direct_up_label = direct_up_label.clone();
             let direct_down_label = direct_down_label.clone();
-            let ratio_data = ratio_data.clone();
-            let ratio_area = ratio_area.clone();
-            let ratio_proxy_label = ratio_proxy_label.clone();
-            let ratio_direct_label = ratio_direct_label.clone();
             Rc::new(move || {
                 let up_proxy = *session_upload.borrow();
                 let down_proxy = *session_download.borrow();
@@ -2515,17 +2581,6 @@ fn build_ui(app: &adw::Application) {
                 direct_hero_label.set_text(&format_bytes(direct_up + direct_down));
                 direct_up_label.set_text(&format_bytes(direct_up));
                 direct_down_label.set_text(&format_bytes(direct_down));
-
-                update_traffic_ratio_display(
-                    up_proxy,
-                    down_proxy,
-                    direct_up,
-                    direct_down,
-                    &ratio_data,
-                    &ratio_area,
-                    &ratio_proxy_label,
-                    &ratio_direct_label,
-                );
             })
         };
 

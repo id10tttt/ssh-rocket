@@ -2,14 +2,22 @@ use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
 
+use crate::i18n::tr;
+
 pub struct MainWindowWidgets {
     pub window: adw::ApplicationWindow,
     pub sidebar: gtk::Box,
     pub navigation: gtk::ListBox,
     pub connect_nav: gtk::ListBoxRow,
+    pub connect_nav_label: gtk::Label,
     pub rules_nav: gtk::ListBoxRow,
+    pub rules_nav_label: gtk::Label,
     pub traffic_nav: gtk::ListBoxRow,
+    pub traffic_nav_label: gtk::Label,
     pub logs_nav: gtk::ListBoxRow,
+    pub logs_nav_label: gtk::Label,
+    pub settings_nav: gtk::ListBoxRow,
+    pub settings_nav_label: gtk::Label,
     pub header: adw::HeaderBar,
     pub back_button: gtk::Button,
     pub page_title: gtk::Label,
@@ -56,15 +64,17 @@ pub fn create_main_window(app: &adw::Application) -> MainWindowWidgets {
     navigation.set_activate_on_single_click(true);
     navigation.set_vexpand(true);
 
-    let connect_nav = create_navigation_row("ssh-rocket-connect-symbolic", "节点连接");
-    let rules_nav = create_navigation_row("ssh-rocket-rules-symbolic", "分流规则");
-    let traffic_nav = create_navigation_row("ssh-rocket-traffic-symbolic", "流量监控");
-    let logs_nav = create_navigation_row("ssh-rocket-logs-symbolic", "运行日志");
+    let (connect_nav, connect_nav_label) = create_navigation_row("ssh-rocket-connect-symbolic", tr("nav.connect"));
+    let (rules_nav, rules_nav_label) = create_navigation_row("ssh-rocket-rules-symbolic", tr("nav.rules"));
+    let (traffic_nav, traffic_nav_label) = create_navigation_row("ssh-rocket-traffic-symbolic", tr("nav.traffic"));
+    let (logs_nav, logs_nav_label) = create_navigation_row("ssh-rocket-logs-symbolic", tr("nav.logs"));
+    let (settings_nav, settings_nav_label) = create_navigation_row("preferences-system-symbolic", tr("nav.settings"));
 
     navigation.append(&connect_nav);
     navigation.append(&rules_nav);
     navigation.append(&traffic_nav);
     navigation.append(&logs_nav);
+    navigation.append(&settings_nav);
     sidebar.append(&navigation);
     root.append(&sidebar);
     root.append(&gtk::Separator::new(gtk::Orientation::Vertical));
@@ -76,17 +86,17 @@ pub fn create_main_window(app: &adw::Application) -> MainWindowWidgets {
     let header = adw::HeaderBar::new();
     let back_button = gtk::Button::from_icon_name("go-previous-symbolic");
     back_button.add_css_class("flat");
-    back_button.set_tooltip_text(Some("返回"));
+    back_button.set_tooltip_text(Some(tr("btn.back")));
     back_button.set_visible(false);
     header.pack_start(&back_button);
 
-    let page_title = gtk::Label::new(Some("节点连接"));
+    let page_title = gtk::Label::new(Some(tr("nav.connect")));
     page_title.add_css_class("title-3");
     header.set_title_widget(Some(&page_title));
 
     let add_connection = gtk::Button::from_icon_name("list-add-symbolic");
     add_connection.add_css_class("flat");
-    add_connection.set_tooltip_text(Some("添加连接"));
+    add_connection.set_tooltip_text(Some(tr("btn.add_connection")));
     header.pack_end(&add_connection);
     toolbar.add_top_bar(&header);
 
@@ -107,7 +117,7 @@ pub fn create_main_window(app: &adw::Application) -> MainWindowWidgets {
     bottom_status_dot.set_valign(gtk::Align::Center);
     bottom_bar.append(&bottom_status_dot);
 
-    let bottom_status = gtk::Label::new(Some("未连接"));
+    let bottom_status = gtk::Label::new(Some(tr("status.disconnected")));
     bottom_status.add_css_class("dim-label");
     bottom_status.set_halign(gtk::Align::Start);
     bottom_status.set_hexpand(true);
@@ -130,9 +140,15 @@ pub fn create_main_window(app: &adw::Application) -> MainWindowWidgets {
         sidebar,
         navigation,
         connect_nav,
+        connect_nav_label,
         rules_nav,
+        rules_nav_label,
         traffic_nav,
+        traffic_nav_label,
         logs_nav,
+        logs_nav_label,
+        settings_nav,
+        settings_nav_label,
         header,
         back_button,
         page_title,
@@ -144,7 +160,7 @@ pub fn create_main_window(app: &adw::Application) -> MainWindowWidgets {
     }
 }
 
-fn create_navigation_row(icon_name: &str, title: &str) -> gtk::ListBoxRow {
+fn create_navigation_row(icon_name: &str, title: &str) -> (gtk::ListBoxRow, gtk::Label) {
     let row = gtk::ListBoxRow::new();
     row.set_height_request(44);
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -160,5 +176,5 @@ fn create_navigation_row(icon_name: &str, title: &str) -> gtk::ListBoxRow {
     label.set_hexpand(true);
     content.append(&label);
     row.set_child(Some(&content));
-    row
+    (row, label)
 }

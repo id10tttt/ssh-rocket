@@ -90,6 +90,23 @@ pub enum DomainRuleKind {
     DomainKeyword,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeMode {
+    #[default]
+    Auto,
+    Light,
+    Dark,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Language {
+    #[default]
+    Chinese,
+    English,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlobalSettings {
     #[serde(default)]
@@ -116,6 +133,10 @@ pub struct GlobalSettings {
     pub dns_server: IpAddr,
     #[serde(default)]
     pub ipv6: bool,
+    #[serde(default)]
+    pub theme_mode: ThemeMode,
+    #[serde(default)]
+    pub language: Language,
 }
 
 fn default_dns() -> IpAddr {
@@ -137,6 +158,8 @@ impl Default for GlobalSettings {
             rule_source_updated_at: 0,
             dns_server: default_dns(),
             ipv6: false,
+            theme_mode: ThemeMode::Auto,
+            language: Language::Chinese,
         }
     }
 }
@@ -227,5 +250,22 @@ mod tests {
         assert_eq!(decoded.password.as_deref(), Some("mypassword123"));
         assert_eq!(decoded.identity_file, None);
     }
-}
 
+    #[test]
+    fn test_settings_theme_and_language() {
+        // 旧配置缺失字段时，默认应为 Auto 和 Chinese
+        let old_json = r#"{}"#;
+        let settings: GlobalSettings = serde_json::from_str(old_json).expect("deserialize empty");
+        assert_eq!(settings.theme_mode, ThemeMode::Auto);
+        assert_eq!(settings.language, Language::Chinese);
+
+        // 正常往返序列化
+        let mut s = GlobalSettings::default();
+        s.theme_mode = ThemeMode::Dark;
+        s.language = Language::English;
+        let json = serde_json::to_string(&s).expect("serialize");
+        let decoded: GlobalSettings = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.theme_mode, ThemeMode::Dark);
+        assert_eq!(decoded.language, Language::English);
+    }
+}
