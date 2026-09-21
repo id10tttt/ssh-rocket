@@ -16,6 +16,7 @@ use crate::{
 #[derive(Clone)]
 pub struct RulesView {
     pub container: gtk::Box,
+    pub switcher_box: gtk::Box,
     pub rules_stack: gtk::Stack,
     pub rules_switcher: gtk::StackSwitcher,
 
@@ -92,9 +93,18 @@ impl RulesView {
         let rules_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let rules_stack = gtk::Stack::new();
         rules_stack.set_vexpand(true);
+        rules_stack.set_hexpand(true);
+
+        let switcher_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        switcher_box.set_margin_top(12);
+        switcher_box.set_margin_bottom(8);
         let rules_switcher = gtk::StackSwitcher::new();
         rules_switcher.set_stack(Some(&rules_stack));
         rules_switcher.set_halign(gtk::Align::Center);
+        rules_switcher.set_hexpand(true);
+        switcher_box.append(&rules_switcher);
+
+        rules_page.append(&switcher_box);
         rules_page.append(&rules_stack);
 
         // --- 1. 应用分流 (Applications) ---
@@ -384,6 +394,7 @@ impl RulesView {
 
         Self {
             container: rules_page,
+            switcher_box,
             rules_stack,
             rules_switcher,
             applications_page,

@@ -126,7 +126,7 @@ pub fn tr(key: &'static str) -> &'static str {
         "tray.disconnect" => if is_en { "Disconnect" } else { "断开连接" },
         "tray.connecting" => if is_en { "Connecting…" } else { "正在连接…" },
         "tray.disconnecting" => if is_en { "Disconnecting…" } else { "正在断开…" },
-        "tray.show_window" => if is_en { "Show SSH Rocket" } else { "显示主窗口" },
+        "tray.show_window" => if is_en { "Show" } else { "显示" },
         "tray.quit" => if is_en { "Quit" } else { "退出" },
 
         // Rules View - Tabs

@@ -1197,7 +1197,7 @@ fn build_ui(app: &adw::Application) {
         let add_connection = win.add_connection.clone();
         let header = win.header.clone();
         let back_button = win.back_button.clone();
-        let rules_switcher = rules_view.rules_switcher.clone();
+        let rules_switcher_box = rules_view.switcher_box.clone();
         let rules_domain_stack = rules_view.domain_stack.clone();
         let refresh_traffic_tab = refresh_active_traffic_tab.clone();
         win.navigation.connect_row_selected(move |_, row| {
@@ -1211,14 +1211,12 @@ fn build_ui(app: &adw::Application) {
             };
             view_stack.set_visible_child_name(name);
             add_connection.set_visible(name == "connect");
+            back_button.set_visible(false);
+            header.set_title_widget(Some(&page_title));
+            page_title.set_text(title);
             if name == "rules" {
                 rules_domain_stack.set_visible_child_name("overview");
-                back_button.set_visible(false);
-                header.set_title_widget(Some(&rules_switcher));
-            } else {
-                back_button.set_visible(false);
-                header.set_title_widget(Some(&page_title));
-                page_title.set_text(title);
+                rules_switcher_box.set_visible(true);
             }
             if name == "traffic" {
                 if let Some(refresh) = refresh_traffic_tab.borrow().as_ref() {
@@ -1553,10 +1551,12 @@ fn build_ui(app: &adw::Application) {
         let page_title = win.page_title.clone();
         let back_btn = win.back_button.clone();
         let source_title = rules_view.detail_title_lbl.clone();
+        let rules_switcher_box = rules_view.switcher_box.clone();
         rules_view
             .rule_status_row
             .connect_activated(move |_| {
                 stack.set_visible_child_name("detail");
+                rules_switcher_box.set_visible(false);
                 back_btn.set_visible(true);
                 let title = source_title.text();
                 page_title.set_text(if title.is_empty() { "订阅配置" } else { title.as_str() });
@@ -1568,10 +1568,12 @@ fn build_ui(app: &adw::Application) {
         let header = win.header.clone();
         let page_title = win.page_title.clone();
         let back_btn = win.back_button.clone();
+        let rules_switcher_box = rules_view.switcher_box.clone();
         rules_view
             .custom_summary_row
             .connect_activated(move |_| {
                 stack.set_visible_child_name("custom");
+                rules_switcher_box.set_visible(false);
                 back_btn.set_visible(true);
                 page_title.set_text("自定义分流规则");
                 header.set_title_widget(Some(&page_title));
@@ -1582,10 +1584,12 @@ fn build_ui(app: &adw::Application) {
         let header = win.header.clone();
         let page_title = win.page_title.clone();
         let back_btn = win.back_button.clone();
+        let rules_switcher_box = rules_view.switcher_box.clone();
         rules_view
             .imported_summary_row
             .connect_activated(move |_| {
                 stack.set_visible_child_name("imported");
+                rules_switcher_box.set_visible(false);
                 back_btn.set_visible(true);
                 page_title.set_text("订阅规则条目");
                 header.set_title_widget(Some(&page_title));
@@ -1596,7 +1600,7 @@ fn build_ui(app: &adw::Application) {
         let header = win.header.clone();
         let page_title = win.page_title.clone();
         let back_btn = win.back_button.clone();
-        let rules_switcher = rules_view.rules_switcher.clone();
+        let rules_switcher_box = rules_view.switcher_box.clone();
         let source_title = rules_view.detail_title_lbl.clone();
         win.back_button.connect_clicked(move |_| {
             match stack.visible_child_name().as_deref() {
@@ -1606,11 +1610,14 @@ fn build_ui(app: &adw::Application) {
                     page_title.set_text(if title.is_empty() { "订阅配置" } else { title.as_str() });
                     header.set_title_widget(Some(&page_title));
                     back_btn.set_visible(true);
+                    rules_switcher_box.set_visible(false);
                 }
                 _ => {
                     stack.set_visible_child_name("overview");
                     back_btn.set_visible(false);
-                    header.set_title_widget(Some(&rules_switcher));
+                    page_title.set_text(crate::i18n::tr("nav.rules"));
+                    header.set_title_widget(Some(&page_title));
+                    rules_switcher_box.set_visible(true);
                 }
             }
         });
@@ -1684,7 +1691,8 @@ fn build_ui(app: &adw::Application) {
         let refresh = refresh_rule_views.clone();
         let back_btn = win.back_button.clone();
         let header = win.header.clone();
-        let rules_switcher = rules_view.rules_switcher.clone();
+        let page_title = win.page_title.clone();
+        let rules_switcher_box = rules_view.switcher_box.clone();
         rules_view.remove_source_btn.connect_clicked(move |_| {
             let dialog = adw::AlertDialog::new(Some("确认删除该订阅配置？"), None);
             dialog.add_response("cancel", "取消");
@@ -1695,7 +1703,8 @@ fn build_ui(app: &adw::Application) {
             let refresh = refresh.clone();
             let back_btn = back_btn.clone();
             let header = header.clone();
-            let rules_switcher = rules_switcher.clone();
+            let page_title = page_title.clone();
+            let rules_switcher_box = rules_switcher_box.clone();
             dialog.connect_response(None, move |_, response| {
                 if response == "remove" {
                     let mut current = config.borrow_mut();
@@ -1708,7 +1717,9 @@ fn build_ui(app: &adw::Application) {
                         drop(current);
                         stack.set_visible_child_name("overview");
                         back_btn.set_visible(false);
-                        header.set_title_widget(Some(&rules_switcher));
+                        page_title.set_text(crate::i18n::tr("nav.rules"));
+                        header.set_title_widget(Some(&page_title));
+                        rules_switcher_box.set_visible(true);
                         if let Some(refresh) = refresh.borrow().as_ref() {
                             refresh();
                         }
