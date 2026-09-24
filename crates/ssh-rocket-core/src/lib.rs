@@ -2,6 +2,6 @@ mod config;
 mod rule_importer;
 mod routing;
 
-pub use config::{AppConfig, AppRule, AuthType, DomainRule, DomainRuleKind, GlobalSettings, IpRule, Language, Profile, RuleAction, ThemeMode};
+pub use config::{AppConfig, AppRule, AuthType, DomainRule, DomainRuleKind, FloatingWidgetConfig, GlobalSettings, IpRule, Language, Profile, RuleAction, ThemeMode};
 pub use rule_importer::{RuleImportResult, RuleSetReference, parse_omega_rules, parse_shadowrocket_rules, parse_rule_set};
 pub use routing::{FlowContext, MatchSource, RouteDecision, RoutingEngine};

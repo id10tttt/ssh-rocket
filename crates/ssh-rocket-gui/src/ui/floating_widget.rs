@@ -1,0 +1,366 @@
+use adw::prelude::*;
+use gtk4::{self as gtk, gdk, gio, glib};
+use libadwaita as adw;
+use ssh_rocket_core::FloatingWidgetConfig;
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    time::Duration,
+};
+
+use crate::{
+    i18n::tr,
+    sys_monitor::SystemMetrics,
+    ui::widgets::format_speed,
+};
+
+#[derive(Clone)]
+pub struct FloatingWidget {
+    pub window: gtk::Window,
+    pub root_box: gtk::Box,
+    // 代理
+    pub proxy_badge: gtk::Label,
+    pub proxy_up_label: gtk::Label,
+    pub proxy_down_label: gtk::Label,
+    // 直连
+    pub direct_badge: gtk::Label,
+    pub direct_up_label: gtk::Label,
+    pub direct_down_label: gtk::Label,
+    // 硬件
+    pub cpu_label: gtk::Label,
+    pub gpu_label: gtk::Label,
+    pub ram_label: gtk::Label,
+    // 状态与定时器
+    pub idle_opacity: Rc<Cell<f64>>,
+    pub fade_delay_secs: Rc<Cell<u32>>,
+    fade_source_id: Rc<RefCell<Option<glib::SourceId>>>,
+}
+
+impl FloatingWidget {
+    pub fn new(
+        app: &adw::Application,
+        config: &FloatingWidgetConfig,
+        on_show_main_window: Rc<dyn Fn()>,
+        on_toggle_proxy: Rc<dyn Fn()>,
+        on_open_settings: Rc<dyn Fn()>,
+    ) -> Self {
+        let window = gtk::Window::builder()
+            .application(app)
+            .title("SSH Rocket Floating HUD")
+            .decorated(false)
+            .resizable(false)
+            .deletable(false)
+            .css_classes(["floating-hud-window"])
+            .build();
+
+        let root_box = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        root_box.add_css_class("floating-hud-box");
+
+        // --- 左侧：网络流量区 (代理 / 直连) ---
+        let net_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+
+        // 代理行
+        let proxy_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let proxy_badge = gtk::Label::builder()
+            .label(tr("action.proxy"))
+            .css_classes(["badge-proxy", "floating-badge"])
+            .build();
+        proxy_row.append(&proxy_badge);
+
+        let proxy_up_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        let proxy_up_arrow = gtk::Label::builder().label("↑").css_classes(["stat-arrow-up"]).build();
+        let proxy_up_label = gtk::Label::builder().label("0 B/s").css_classes(["numeric", "floating-stat-num"]).build();
+        proxy_up_box.append(&proxy_up_arrow);
+        proxy_up_box.append(&proxy_up_label);
+        proxy_row.append(&proxy_up_box);
+
+        let proxy_down_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        let proxy_down_arrow = gtk::Label::builder().label("↓").css_classes(["stat-arrow-down"]).build();
+        let proxy_down_label = gtk::Label::builder().label("0 B/s").css_classes(["numeric", "floating-stat-num"]).build();
+        proxy_down_box.append(&proxy_down_arrow);
+        proxy_down_box.append(&proxy_down_label);
+        proxy_row.append(&proxy_down_box);
+        net_box.append(&proxy_row);
+
+        // 直连行
+        let direct_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let direct_badge = gtk::Label::builder()
+            .label(tr("action.direct"))
+            .css_classes(["badge-direct", "floating-badge"])
+            .build();
+        direct_row.append(&direct_badge);
+
+        let direct_up_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        let direct_up_arrow = gtk::Label::builder().label("↑").css_classes(["stat-arrow-up"]).build();
+        let direct_up_label = gtk::Label::builder().label("0 B/s").css_classes(["numeric", "floating-stat-num"]).build();
+        direct_up_box.append(&direct_up_arrow);
+        direct_up_box.append(&direct_up_label);
+        direct_row.append(&direct_up_box);
+
+        let direct_down_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        let direct_down_arrow = gtk::Label::builder().label("↓").css_classes(["stat-arrow-down"]).build();
+        let direct_down_label = gtk::Label::builder().label("0 B/s").css_classes(["numeric", "floating-stat-num"]).build();
+        direct_down_box.append(&direct_down_arrow);
+        direct_down_box.append(&direct_down_label);
+        direct_row.append(&direct_down_box);
+        net_box.append(&direct_row);
+
+        root_box.append(&net_box);
+
+        // 分隔线
+        let sep = gtk::Separator::new(gtk::Orientation::Vertical);
+        sep.add_css_class("floating-separator");
+        root_box.append(&sep);
+
+        // --- 右侧：系统硬件资源监控 (CPU / GPU / RAM) ---
+        let sys_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+
+        let hw_top_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let cpu_box = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+        let cpu_title = gtk::Label::builder().label("CPU").css_classes(["dim-label", "floating-hw-label"]).build();
+        let cpu_label = gtk::Label::builder().label("0%").css_classes(["numeric", "floating-hw-val"]).build();
+        cpu_box.append(&cpu_title);
+        cpu_box.append(&cpu_label);
+        hw_top_row.append(&cpu_box);
+
+        let gpu_box = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+        let gpu_title = gtk::Label::builder().label("GPU").css_classes(["dim-label", "floating-hw-label"]).build();
+        let gpu_label = gtk::Label::builder().label("0%").css_classes(["numeric", "floating-hw-val"]).build();
+        gpu_box.append(&gpu_title);
+        gpu_box.append(&gpu_label);
+        hw_top_row.append(&gpu_box);
+        sys_box.append(&hw_top_row);
+
+        let hw_bottom_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let ram_box = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+        let ram_title = gtk::Label::builder().label("RAM").css_classes(["dim-label", "floating-hw-label"]).build();
+        let ram_label = gtk::Label::builder().label("0%").css_classes(["numeric", "floating-hw-val"]).build();
+        ram_box.append(&ram_title);
+        ram_box.append(&ram_label);
+        hw_bottom_row.append(&ram_box);
+        sys_box.append(&hw_bottom_row);
+
+        root_box.append(&sys_box);
+        window.set_child(Some(&root_box));
+
+        // --- 交互 1: 原生 Wayland 拖拽移动 (GestureDrag) ---
+        let drag = gtk::GestureDrag::new();
+        let win_weak = window.downgrade();
+        drag.connect_drag_begin(move |gesture, start_x, start_y| {
+            if gesture.current_button() != gdk::BUTTON_PRIMARY {
+                return;
+            }
+            if let Some(win) = win_weak.upgrade() {
+                if let Some(surface) = win.surface() {
+                    if let Some(toplevel) = surface.downcast_ref::<gdk::Toplevel>() {
+                        if let Some(device) = gesture.device() {
+                            toplevel.begin_move(
+                                &device,
+                                gdk::BUTTON_PRIMARY as i32,
+                                start_x,
+                                start_y,
+                                gdk::CURRENT_TIME,
+                            );
+                        }
+                    }
+                }
+            }
+        });
+        root_box.add_controller(drag);
+
+        // --- 交互 2: 鼠标悬停高亮与离开 5 秒虚化 ---
+        let idle_opacity = Rc::new(Cell::new(config.idle_opacity.clamp(0.1, 1.0)));
+        let fade_delay_secs = Rc::new(Cell::new(config.fade_delay_secs.max(1)));
+        let fade_source_id = Rc::new(RefCell::new(None::<glib::SourceId>));
+
+        let motion = gtk::EventControllerMotion::new();
+        {
+            let win_weak = window.downgrade();
+            let box_weak = root_box.downgrade();
+            let fade_source_id = fade_source_id.clone();
+            motion.connect_enter(move |_ctrl, _x, _y| {
+                if let Some(source) = fade_source_id.borrow_mut().take() {
+                    source.remove();
+                }
+                if let Some(win) = win_weak.upgrade() {
+                    win.set_opacity(1.0);
+                }
+                if let Some(bx) = box_weak.upgrade() {
+                    bx.add_css_class("floating-hud-hover");
+                }
+            });
+        }
+        {
+            let win_weak = window.downgrade();
+            let box_weak = root_box.downgrade();
+            let fade_source_id = fade_source_id.clone();
+            let idle_opacity = idle_opacity.clone();
+            let fade_delay_secs = fade_delay_secs.clone();
+            motion.connect_leave(move |_ctrl| {
+                if let Some(bx) = box_weak.upgrade() {
+                    bx.remove_css_class("floating-hud-hover");
+                }
+                if let Some(source) = fade_source_id.borrow_mut().take() {
+                    source.remove();
+                }
+
+                let win_weak = win_weak.clone();
+                let fade_source_id_clone = fade_source_id.clone();
+                let target_opacity = idle_opacity.get();
+                let delay = Duration::from_secs(fade_delay_secs.get() as u64);
+
+                let id = glib::timeout_add_local_once(delay, move || {
+                    fade_source_id_clone.borrow_mut().take();
+                    if let Some(win) = win_weak.upgrade() {
+                        win.set_opacity(target_opacity);
+                    }
+                });
+                *fade_source_id.borrow_mut() = Some(id);
+            });
+        }
+        root_box.add_controller(motion);
+
+        // --- 交互 3: 右键菜单 (PopoverMenu) ---
+        let menu_model = gio::Menu::new();
+        menu_model.append(Some(tr("tray.show_window")), Some("hud.show_main"));
+        menu_model.append(Some(tr("connect.btn.connect")), Some("hud.toggle_proxy"));
+        menu_model.append(Some(tr("nav.settings")), Some("hud.open_settings"));
+        menu_model.append(Some(tr("floating.menu.hide")), Some("hud.hide_hud"));
+
+        let popover = gtk::PopoverMenu::from_model(Some(&menu_model));
+        popover.set_parent(&root_box);
+        popover.set_has_arrow(false);
+
+        // Actions
+        let action_group = gio::SimpleActionGroup::new();
+        {
+            let on_show = on_show_main_window.clone();
+            let action = gio::SimpleAction::new("show_main", None);
+            action.connect_activate(move |_, _| on_show());
+            action_group.add_action(&action);
+        }
+        {
+            let on_toggle = on_toggle_proxy.clone();
+            let action = gio::SimpleAction::new("toggle_proxy", None);
+            action.connect_activate(move |_, _| on_toggle());
+            action_group.add_action(&action);
+        }
+        {
+            let on_settings = on_open_settings.clone();
+            let action = gio::SimpleAction::new("open_settings", None);
+            action.connect_activate(move |_, _| on_settings());
+            action_group.add_action(&action);
+        }
+        {
+            let win_weak = window.downgrade();
+            let action = gio::SimpleAction::new("hide_hud", None);
+            action.connect_activate(move |_, _| {
+                if let Some(win) = win_weak.upgrade() {
+                    win.set_visible(false);
+                }
+            });
+            action_group.add_action(&action);
+        }
+        root_box.insert_action_group("hud", Some(&action_group));
+
+        let click = gtk::GestureClick::new();
+        click.set_button(gdk::BUTTON_SECONDARY);
+        let popover_clone = popover.clone();
+        click.connect_pressed(move |_, _, x, y| {
+            let rect = gdk::Rectangle::new(x as i32, y as i32, 1, 1);
+            popover_clone.set_pointing_to(Some(&rect));
+            popover_clone.popup();
+        });
+        root_box.add_controller(click);
+
+        // 双击悬浮球打开主窗口
+        let double_click = gtk::GestureClick::new();
+        double_click.set_button(gdk::BUTTON_PRIMARY);
+        let on_show_main = on_show_main_window.clone();
+        double_click.connect_pressed(move |gesture, n_press, _, _| {
+            if n_press == 2 {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                on_show_main();
+            }
+        });
+        root_box.add_controller(double_click);
+
+        // 默认初始化透明度
+        window.set_opacity(idle_opacity.get());
+
+        Self {
+            window,
+            root_box,
+            proxy_badge,
+            proxy_up_label,
+            proxy_down_label,
+            direct_badge,
+            direct_up_label,
+            direct_down_label,
+            cpu_label,
+            gpu_label,
+            ram_label,
+            idle_opacity,
+            fade_delay_secs,
+            fade_source_id,
+        }
+    }
+
+    /// 呈现或隐藏悬浮窗
+    pub fn set_shown(&self, shown: bool) {
+        if let Some(source) = self.fade_source_id.borrow_mut().take() {
+            source.remove();
+        }
+        self.window.set_visible(shown);
+        if shown {
+            self.window.present();
+            self.window.set_opacity(self.idle_opacity.get());
+        }
+    }
+
+    /// 更新透明度配置
+    pub fn update_config(&self, opacity: f64, fade_delay_secs: u32) {
+        if let Some(source) = self.fade_source_id.borrow_mut().take() {
+            source.remove();
+        }
+        self.idle_opacity.set(opacity.clamp(0.1, 1.0));
+        self.fade_delay_secs.set(fade_delay_secs.max(1));
+        self.window.set_opacity(self.idle_opacity.get());
+    }
+
+    /// 刷新所有数据
+    pub fn update_stats(
+        &self,
+        is_proxy_connected: bool,
+        proxy_up: u64,
+        proxy_down: u64,
+        direct_up: u64,
+        direct_down: u64,
+        metrics: &SystemMetrics,
+    ) {
+        if is_proxy_connected {
+            self.proxy_badge.remove_css_class("badge-proxy-off");
+            self.proxy_badge.add_css_class("badge-proxy");
+            self.proxy_up_label.set_text(&format_speed(proxy_up));
+            self.proxy_down_label.set_text(&format_speed(proxy_down));
+        } else {
+            self.proxy_badge.remove_css_class("badge-proxy");
+            self.proxy_badge.add_css_class("badge-proxy-off");
+            self.proxy_up_label.set_text("0 B/s");
+            self.proxy_down_label.set_text("0 B/s");
+        }
+
+        self.direct_up_label.set_text(&format_speed(direct_up));
+        self.direct_down_label.set_text(&format_speed(direct_down));
+
+        self.cpu_label.set_text(&format!("{:.0}%", metrics.cpu_percent));
+        self.gpu_label.set_text(&format!("{:.0}%", metrics.gpu_percent));
+        self.ram_label.set_text(&format!("{:.0}%", metrics.ram_percent));
+    }
+
+    /// 刷新国际化文本
+    pub fn refresh_labels(&self) {
+        self.proxy_badge.set_text(tr("action.proxy"));
+        self.direct_badge.set_text(tr("action.direct"));
+    }
+}

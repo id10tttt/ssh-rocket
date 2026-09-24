@@ -235,6 +235,15 @@ pub fn tr(key: &'static str) -> &'static str {
         "settings.language.zh" => if is_en { "简体中文" } else { "简体中文" },
         "settings.language.en" => if is_en { "English" } else { "English" },
 
+        // Tools & Floating HUD
+        "floating.menu.hide" => if is_en { "Hide Floating HUD" } else { "关闭悬浮球" },
+        "settings.tools.group" => if is_en { "Tools &amp; Plugins" } else { "小工具插件" },
+        "settings.tools.desc" => if is_en { "Manage desktop widgets and extensions" } else { "管理桌面小工具与辅助插件" },
+        "settings.floating.title" => if is_en { "Desktop Floating HUD" } else { "桌面悬浮监控球" },
+        "settings.floating.subtitle" => if is_en { "Show realtime traffic and hardware monitor on desktop" } else { "在桌面展示实时网络与系统硬件监控" },
+        "settings.floating.opacity" => if is_en { "Idle Opacity" } else { "移开后虚化透明度" },
+        "settings.floating.delay" => if is_en { "Fade Delay (seconds)" } else { "虚化等待时间 (秒)" },
+
         _ => key,
     }
 }

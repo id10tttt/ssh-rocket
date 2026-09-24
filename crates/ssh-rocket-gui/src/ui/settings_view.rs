@@ -15,6 +15,10 @@ pub struct SettingsView {
     pub theme_combo: adw::ComboRow,
     pub language_group: adw::PreferencesGroup,
     pub lang_combo: adw::ComboRow,
+    pub tools_group: adw::PreferencesGroup,
+    pub floating_switch: adw::SwitchRow,
+    pub opacity_spin: adw::SpinRow,
+    pub delay_spin: adw::SpinRow,
     pub config: Rc<RefCell<AppConfig>>,
     pub is_updating: Rc<Cell<bool>>,
 }
@@ -24,16 +28,19 @@ impl SettingsView {
         config: &Rc<RefCell<AppConfig>>,
         on_theme_changed: Rc<dyn Fn(ThemeMode)>,
         on_lang_changed: Rc<dyn Fn(Language)>,
+        on_floating_changed: Rc<dyn Fn()>,
     ) -> Self {
         let is_updating = Rc::new(Cell::new(false));
 
-        // 左右布局容器
+        let main_box = gtk::Box::new(gtk::Orientation::Vertical, 18);
+        main_box.set_margin_start(24);
+        main_box.set_margin_end(24);
+        main_box.set_margin_top(24);
+        main_box.set_margin_bottom(24);
+
+        // 左右布局容器 (外观 / 语言)
         let columns_box = gtk::Box::new(gtk::Orientation::Horizontal, 18);
         columns_box.set_homogeneous(true);
-        columns_box.set_margin_start(24);
-        columns_box.set_margin_end(24);
-        columns_box.set_margin_top(24);
-        columns_box.set_margin_bottom(24);
 
         // 1. 外观与主题 (左侧)
         let appearance_group = adw::PreferencesGroup::builder()
@@ -140,9 +147,82 @@ impl SettingsView {
 
         language_group.add(&lang_combo);
         columns_box.append(&language_group);
+        main_box.append(&columns_box);
+
+        // 3. 小工具插件 (Tools & Plugins)
+        let tools_group = adw::PreferencesGroup::builder()
+            .title(tr("settings.tools.group"))
+            .description(tr("settings.tools.desc"))
+            .build();
+
+        let floating_cfg = config.borrow().settings.floating_widget.clone();
+
+        let floating_icon = gtk::Image::from_icon_name("utilities-system-monitor-symbolic");
+        floating_icon.set_pixel_size(18);
+
+        let floating_switch = adw::SwitchRow::builder()
+            .title(tr("settings.floating.title"))
+            .subtitle(tr("settings.floating.subtitle"))
+            .active(floating_cfg.enabled)
+            .build();
+        floating_switch.add_prefix(&floating_icon);
+
+        {
+            let config = config.clone();
+            let on_floating_changed = on_floating_changed.clone();
+            let is_updating = is_updating.clone();
+            floating_switch.connect_active_notify(move |row| {
+                if is_updating.get() {
+                    return;
+                }
+                config.borrow_mut().settings.floating_widget.enabled = row.is_active();
+                let _ = config.borrow().save();
+                on_floating_changed();
+            });
+        }
+        tools_group.add(&floating_switch);
+
+        let opacity_spin = adw::SpinRow::with_range(10.0, 90.0, 5.0);
+        opacity_spin.set_title(tr("settings.floating.opacity"));
+        opacity_spin.set_subtitle("10% ~ 90%");
+        opacity_spin.set_value(floating_cfg.idle_opacity * 100.0);
+        {
+            let config = config.clone();
+            let on_floating_changed = on_floating_changed.clone();
+            let is_updating = is_updating.clone();
+            opacity_spin.connect_value_notify(move |row| {
+                if is_updating.get() {
+                    return;
+                }
+                config.borrow_mut().settings.floating_widget.idle_opacity = row.value() / 100.0;
+                let _ = config.borrow().save();
+                on_floating_changed();
+            });
+        }
+        tools_group.add(&opacity_spin);
+
+        let delay_spin = adw::SpinRow::with_range(1.0, 30.0, 1.0);
+        delay_spin.set_title(tr("settings.floating.delay"));
+        delay_spin.set_value(floating_cfg.fade_delay_secs as f64);
+        {
+            let config = config.clone();
+            let on_floating_changed = on_floating_changed.clone();
+            let is_updating = is_updating.clone();
+            delay_spin.connect_value_notify(move |row| {
+                if is_updating.get() {
+                    return;
+                }
+                config.borrow_mut().settings.floating_widget.fade_delay_secs = row.value() as u32;
+                let _ = config.borrow().save();
+                on_floating_changed();
+            });
+        }
+        tools_group.add(&delay_spin);
+
+        main_box.append(&tools_group);
 
         let container = gtk::ScrolledWindow::builder()
-            .child(&columns_box)
+            .child(&main_box)
             .vexpand(true)
             .hexpand(true)
             .hscrollbar_policy(gtk::PolicyType::Never)
@@ -154,6 +234,10 @@ impl SettingsView {
             theme_combo,
             language_group,
             lang_combo,
+            tools_group,
+            floating_switch,
+            opacity_spin,
+            delay_spin,
             config: config.clone(),
             is_updating,
         }
@@ -193,6 +277,13 @@ impl SettingsView {
         };
         self.lang_combo.set_model(Some(&lang_model));
         self.lang_combo.set_selected(selected_lang_idx);
+
+        self.tools_group.set_title(tr("settings.tools.group"));
+        self.tools_group.set_description(Some(tr("settings.tools.desc")));
+        self.floating_switch.set_title(tr("settings.floating.title"));
+        self.floating_switch.set_subtitle(tr("settings.floating.subtitle"));
+        self.opacity_spin.set_title(tr("settings.floating.opacity"));
+        self.delay_spin.set_title(tr("settings.floating.delay"));
 
         self.is_updating.set(false);
     }

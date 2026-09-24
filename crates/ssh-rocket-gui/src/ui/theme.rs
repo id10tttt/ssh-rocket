@@ -173,6 +173,55 @@ pub fn init_theme() {
             font-weight: 600;
             font-size: 13px;
         }
+
+        /* 桌面悬浮监控球 (HUD) */
+        .floating-hud-window {
+            background-color: transparent;
+        }
+        .floating-hud-box {
+            background-color: alpha(@window_bg_color, 0.88);
+            border: 1px solid alpha(currentColor, 0.14);
+            border-radius: 12px;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
+            padding: 8px 12px;
+            transition: border-color 200ms ease, box-shadow 200ms ease;
+        }
+        .floating-hud-hover {
+            border-color: alpha(#3584e4, 0.65);
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.38);
+        }
+        .floating-badge {
+            font-size: 10px;
+            padding: 1px 5px;
+            border-radius: 4px;
+        }
+        .badge-proxy-off {
+            background-color: alpha(#77767b, 0.15);
+            color: #77767b;
+            border-radius: 4px;
+            padding: 1px 5px;
+            font-size: 10px;
+            font-weight: 600;
+        }
+        .floating-stat-num {
+            font-size: 11px;
+            font-family: monospace;
+            min-width: 60px;
+        }
+        .floating-separator {
+            margin: 0 4px;
+            opacity: 0.18;
+        }
+        .floating-hw-label {
+            font-size: 10px;
+            font-weight: 600;
+        }
+        .floating-hw-val {
+            font-size: 11px;
+            font-family: monospace;
+            min-width: 28px;
+            font-weight: bold;
+        }
         ",
     );
     if let Some(display) = gtk::gdk::Display::default() {

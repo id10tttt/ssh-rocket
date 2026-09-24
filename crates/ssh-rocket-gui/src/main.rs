@@ -1,4 +1,5 @@
 pub mod i18n;
+mod sys_monitor;
 mod tray;
 pub mod ui;
 
@@ -12,7 +13,7 @@ use ssh_rocket_core::{
 };
 use ssh_rocket_runtime::{check_socks_health, PrivilegedHelperSession, SshSession};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
@@ -30,10 +31,12 @@ use tokio::{
     process::Command,
     sync::{oneshot, Mutex},
 };
+use sys_monitor::SystemMonitor;
 use tray::{TrayConnectionState, TrayManager};
 use ui::{
     connect_view::{render_connection_cards, ConnectView},
     dialogs::{show_profile_dialog, show_rule_dialog, RefreshConnections, RefreshRules},
+    floating_widget::FloatingWidget,
     logs_view::LogsView,
     rules_view::{append_rule_batch, refresh_rule_list, RulesView},
     settings_view::SettingsView,
@@ -1123,6 +1126,22 @@ fn build_ui(app: &adw::Application) {
     let tray_manager = Rc::new(RefCell::new(None::<Rc<TrayManager>>));
     let quitting = Rc::new(RefCell::new(false));
 
+    let floating_widget: Rc<RefCell<Option<FloatingWidget>>> = Rc::new(RefCell::new(None));
+    let sys_monitor = Rc::new(RefCell::new(SystemMonitor::new()));
+    let latest_proxy_speed = Rc::new(Cell::new((0u64, 0u64)));
+
+    let on_floating_changed = {
+        let config = config.clone();
+        let floating_widget = floating_widget.clone();
+        Rc::new(move || {
+            let cfg = config.borrow().settings.floating_widget.clone();
+            if let Some(hud) = floating_widget.borrow().as_ref() {
+                hud.set_shown(cfg.enabled);
+                hud.update_config(cfg.idle_opacity, cfg.fade_delay_secs);
+            }
+        })
+    };
+
     // 1. 构建主窗口与导航
     let win = create_main_window(app);
 
@@ -1148,7 +1167,12 @@ fn build_ui(app: &adw::Application) {
     let rules_view = RulesView::new(&config);
     let traffic_view = TrafficView::new();
     let logs_view = LogsView::new();
-    let settings_view = Rc::new(SettingsView::new(&config, on_theme_changed, on_lang_changed));
+    let settings_view = Rc::new(SettingsView::new(
+        &config,
+        on_theme_changed,
+        on_lang_changed,
+        on_floating_changed,
+    ));
 
     win.view_stack
         .add_named(&connect_view.container, Some("connect"));
@@ -1179,6 +1203,7 @@ fn build_ui(app: &adw::Application) {
         let refresh_conn_ref = refresh_connections.clone();
         let tray_manager_clone = tray_manager.clone();
         let refresh_traffic_tab_clone = refresh_active_traffic_tab.clone();
+        let floating_widget_clone = floating_widget.clone();
 
         *refresh_ui_for_language.borrow_mut() = Some(Rc::new(move || {
             win_connect_lbl.set_text(crate::i18n::tr("nav.connect"));
@@ -1210,6 +1235,10 @@ fn build_ui(app: &adw::Application) {
             traffic_view_clone.refresh_labels();
             logs_view_clone.refresh_labels();
             settings_view_clone.refresh_labels();
+
+            if let Some(hud) = floating_widget_clone.borrow().as_ref() {
+                hud.refresh_labels();
+            }
 
             if let Some(refresh) = refresh_conn_ref.borrow().as_ref() {
                 refresh();
@@ -2521,14 +2550,66 @@ fn build_ui(app: &adw::Application) {
         }
     }
 
+    // 10.5 桌面通用悬浮监控球 (Floating HUD)
+    {
+        let on_show_main = {
+            let win_window = win.window.clone();
+            Rc::new(move || {
+                win_window.set_visible(true);
+                win_window.present();
+            })
+        };
+        let on_toggle_proxy = {
+            let toggle_config = config.clone();
+            let toggle_buttons = connection_buttons.clone();
+            Rc::new(move || {
+                let active_id = toggle_config.borrow().active_profile.map(|id| id.to_string());
+                let Some(active_id) = active_id else {
+                    return;
+                };
+                if let Some((_, button)) = toggle_buttons
+                    .borrow()
+                    .iter()
+                    .find(|(profile_id, _)| profile_id == &active_id)
+                {
+                    button.emit_clicked();
+                }
+            })
+        };
+        let on_open_settings = {
+            let win_window = win.window.clone();
+            let view_stack = win.view_stack.clone();
+            Rc::new(move || {
+                view_stack.set_visible_child_name("settings");
+                win_window.set_visible(true);
+                win_window.present();
+            })
+        };
+
+        let floating_cfg = config.borrow().settings.floating_widget.clone();
+        let hud = FloatingWidget::new(
+            app,
+            &floating_cfg,
+            on_show_main,
+            on_toggle_proxy,
+            on_open_settings,
+        );
+        hud.set_shown(floating_cfg.enabled);
+        *floating_widget.borrow_mut() = Some(hud);
+    }
+
     {
         let tray_manager = tray_manager.clone();
+        let floating_widget = floating_widget.clone();
         let quitting = quitting.clone();
         win.window.connect_close_request(move |window| {
             if !*quitting.borrow() && tray_manager.borrow().is_some() {
                 window.set_visible(false);
                 gtk::glib::Propagation::Stop
             } else {
+                if let Some(hud) = floating_widget.borrow().as_ref() {
+                    hud.window.destroy();
+                }
                 gtk::glib::Propagation::Proceed
             }
         });
@@ -2669,10 +2750,16 @@ fn build_ui(app: &adw::Application) {
             })
         };
 
+        let sys_monitor = sys_monitor.clone();
+        let latest_proxy_speed = latest_proxy_speed.clone();
+        let floating_widget = floating_widget.clone();
+        let mut sys_sample_counter = 0u32;
+
         gtk::glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
             while let Ok(event) = event_rx.try_recv() {
                 match event {
                     RuntimeEvent::Connected => {
+                        latest_proxy_speed.set((0, 0));
                         *session_upload.borrow_mut() = 0;
                         *session_download.borrow_mut() = 0;
                         traffic_view.speed_history.borrow_mut().clear();
@@ -2711,6 +2798,7 @@ fn build_ui(app: &adw::Application) {
                         }
                     }
                     RuntimeEvent::Disconnected => {
+                        latest_proxy_speed.set((0, 0));
                         *is_connected.borrow_mut() = false;
                         *connect_start_time.borrow_mut() = None;
                         *session_started.borrow_mut() = "—".into();
@@ -2744,6 +2832,7 @@ fn build_ui(app: &adw::Application) {
                         }
                     }
                     RuntimeEvent::Error(error) => {
+                        latest_proxy_speed.set((0, 0));
                         *is_connected.borrow_mut() = false;
                         *connect_start_time.borrow_mut() = None;
                         *session_started.borrow_mut() = "—".into();
@@ -2795,6 +2884,7 @@ fn build_ui(app: &adw::Application) {
                         }
                     }
                     RuntimeEvent::Speed { upload, download } => {
+                        latest_proxy_speed.set((upload, download));
                         *session_upload.borrow_mut() += upload;
                         *session_download.borrow_mut() += download;
                         let up_total = *session_upload.borrow();
@@ -2894,6 +2984,22 @@ fn build_ui(app: &adw::Application) {
                 *session_duration.borrow_mut() = format_duration(elapsed);
                 update_session_status();
             }
+
+            sys_sample_counter += 1;
+            if sys_sample_counter >= 5 {
+                sys_sample_counter = 0;
+                let metrics = sys_monitor.borrow_mut().sample();
+                let (p_up, p_down) = latest_proxy_speed.get();
+                let is_conn = *is_connected.borrow();
+                let actual_p_up = if is_conn { p_up } else { 0 };
+                let actual_p_down = if is_conn { p_down } else { 0 };
+                let d_up = metrics.sys_upload_speed.saturating_sub(actual_p_up);
+                let d_down = metrics.sys_download_speed.saturating_sub(actual_p_down);
+                if let Some(hud) = floating_widget.borrow().as_ref() {
+                    hud.update_stats(is_conn, actual_p_up, actual_p_down, d_up, d_down, &metrics);
+                }
+            }
+
             gtk::glib::ControlFlow::Continue
         });
     }

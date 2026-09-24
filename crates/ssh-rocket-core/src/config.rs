@@ -138,6 +138,40 @@ pub struct GlobalSettings {
     pub theme_mode: ThemeMode,
     #[serde(default)]
     pub language: Language,
+    #[serde(default)]
+    pub floating_widget: FloatingWidgetConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FloatingWidgetConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_idle_opacity")]
+    pub idle_opacity: f64,
+    #[serde(default = "default_fade_delay_secs")]
+    pub fade_delay_secs: u32,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_idle_opacity() -> f64 {
+    0.5
+}
+
+fn default_fade_delay_secs() -> u32 {
+    5
+}
+
+impl Default for FloatingWidgetConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            idle_opacity: default_idle_opacity(),
+            fade_delay_secs: default_fade_delay_secs(),
+        }
+    }
 }
 
 fn default_dns() -> IpAddr {
@@ -161,6 +195,7 @@ impl Default for GlobalSettings {
             ipv6: false,
             theme_mode: ThemeMode::Auto,
             language: Language::Chinese,
+            floating_widget: FloatingWidgetConfig::default(),
         }
     }
 }
@@ -268,5 +303,26 @@ mod tests {
         let decoded: GlobalSettings = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded.theme_mode, ThemeMode::Dark);
         assert_eq!(decoded.language, Language::English);
+    }
+
+    #[test]
+    fn test_floating_widget_config() {
+        // 旧配置缺失 floating_widget 时应能正常解析且为默认值
+        let old_json = r#"{}"#;
+        let settings: GlobalSettings = serde_json::from_str(old_json).expect("deserialize empty");
+        assert!(settings.floating_widget.enabled);
+        assert!((settings.floating_widget.idle_opacity - 0.5).abs() < 1e-4);
+        assert_eq!(settings.floating_widget.fade_delay_secs, 5);
+
+        // 往返序列化
+        let mut s = GlobalSettings::default();
+        s.floating_widget.enabled = false;
+        s.floating_widget.idle_opacity = 0.35;
+        s.floating_widget.fade_delay_secs = 10;
+        let json = serde_json::to_string(&s).expect("serialize");
+        let decoded: GlobalSettings = serde_json::from_str(&json).expect("deserialize");
+        assert!(!decoded.floating_widget.enabled);
+        assert!((decoded.floating_widget.idle_opacity - 0.35).abs() < 1e-4);
+        assert_eq!(decoded.floating_widget.fade_delay_secs, 10);
     }
 }
