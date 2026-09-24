@@ -1137,7 +1137,7 @@ fn build_ui(app: &adw::Application) {
             let cfg = config.borrow().settings.floating_widget.clone();
             if let Some(hud) = floating_widget.borrow().as_ref() {
                 hud.set_shown(cfg.enabled);
-                hud.update_config(cfg.idle_opacity, cfg.fade_delay_secs);
+                hud.update_config(cfg.idle_opacity, cfg.fade_delay_secs, cfg.speed_decimals);
             }
         })
     };

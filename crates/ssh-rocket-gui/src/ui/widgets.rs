@@ -29,6 +29,22 @@ pub fn format_speed(bytes_per_second: u64) -> String {
     }
 }
 
+/// 格式化定长传输速率（支持指定小数位数，避免长度跳变）
+pub fn format_speed_fixed(bytes_per_second: u64, decimals: usize) -> String {
+    let value = bytes_per_second as f64;
+    let d = decimals.min(3);
+    if value < 1024.0 * 1024.0 {
+        let kb = value / 1024.0;
+        format!("{kb:.d$} KB/s")
+    } else if value < 1024.0 * 1024.0 * 1024.0 {
+        let mb = value / (1024.0 * 1024.0);
+        format!("{mb:.d$} MB/s")
+    } else {
+        let gb = value / (1024.0 * 1024.0 * 1024.0);
+        format!("{gb:.d$} GB/s")
+    }
+}
+
 /// 格式化秒数为 HH:MM:SS
 pub fn format_duration(seconds: u64) -> String {
     let hours = seconds / 3600;
@@ -92,4 +108,20 @@ pub fn create_kind_badge(kind_label: &str) -> gtk::Label {
     label.add_css_class("badge-kind");
     label.add_css_class("dim-label");
     label
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_speed_fixed() {
+        assert_eq!(format_speed_fixed(0, 1), "0.0 KB/s");
+        assert_eq!(format_speed_fixed(0, 0), "0 KB/s");
+        assert_eq!(format_speed_fixed(0, 2), "0.00 KB/s");
+        assert_eq!(format_speed_fixed(1024, 1), "1.0 KB/s");
+        assert_eq!(format_speed_fixed(1536, 1), "1.5 KB/s");
+        assert_eq!(format_speed_fixed(1024 * 1024, 1), "1.0 MB/s");
+        assert_eq!(format_speed_fixed(1024 * 1024 * 1024, 2), "1.00 GB/s");
+    }
 }

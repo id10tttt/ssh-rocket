@@ -19,6 +19,7 @@ pub struct SettingsView {
     pub floating_switch: adw::SwitchRow,
     pub opacity_spin: adw::SpinRow,
     pub delay_spin: adw::SpinRow,
+    pub decimals_spin: adw::SpinRow,
     pub config: Rc<RefCell<AppConfig>>,
     pub is_updating: Rc<Cell<bool>>,
 }
@@ -219,6 +220,25 @@ impl SettingsView {
         }
         tools_group.add(&delay_spin);
 
+        let decimals_spin = adw::SpinRow::with_range(0.0, 3.0, 1.0);
+        decimals_spin.set_title(tr("settings.floating.decimals"));
+        decimals_spin.set_subtitle(tr("settings.floating.decimals.sub"));
+        decimals_spin.set_value(floating_cfg.speed_decimals as f64);
+        {
+            let config = config.clone();
+            let on_floating_changed = on_floating_changed.clone();
+            let is_updating = is_updating.clone();
+            decimals_spin.connect_value_notify(move |row| {
+                if is_updating.get() {
+                    return;
+                }
+                config.borrow_mut().settings.floating_widget.speed_decimals = row.value() as u32;
+                let _ = config.borrow().save();
+                on_floating_changed();
+            });
+        }
+        tools_group.add(&decimals_spin);
+
         main_box.append(&tools_group);
 
         let container = gtk::ScrolledWindow::builder()
@@ -238,6 +258,7 @@ impl SettingsView {
             floating_switch,
             opacity_spin,
             delay_spin,
+            decimals_spin,
             config: config.clone(),
             is_updating,
         }
@@ -284,6 +305,8 @@ impl SettingsView {
         self.floating_switch.set_subtitle(tr("settings.floating.subtitle"));
         self.opacity_spin.set_title(tr("settings.floating.opacity"));
         self.delay_spin.set_title(tr("settings.floating.delay"));
+        self.decimals_spin.set_title(tr("settings.floating.decimals"));
+        self.decimals_spin.set_subtitle(tr("settings.floating.decimals.sub"));
 
         self.is_updating.set(false);
     }

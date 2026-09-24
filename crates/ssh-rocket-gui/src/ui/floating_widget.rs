@@ -11,7 +11,7 @@ use std::{
 use crate::{
     i18n::tr,
     sys_monitor::SystemMetrics,
-    ui::widgets::format_speed,
+    ui::widgets::format_speed_fixed,
 };
 
 #[derive(Clone)]
@@ -33,6 +33,7 @@ pub struct FloatingWidget {
     // 状态与定时器
     pub idle_opacity: Rc<Cell<f64>>,
     pub fade_delay_secs: Rc<Cell<u32>>,
+    pub speed_decimals: Rc<Cell<u32>>,
     fade_source_id: Rc<RefCell<Option<glib::SourceId>>>,
 }
 
@@ -56,94 +57,137 @@ impl FloatingWidget {
         let root_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         root_box.add_css_class("floating-hud-box");
 
-        // --- 左侧：网络流量区 (代理 / 直连) ---
-        let net_box = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        net_box.set_valign(gtk::Align::Center);
+        let speed_decimals = Rc::new(Cell::new(config.speed_decimals.clamp(0, 3)));
+        let decimals = speed_decimals.get();
+        let width_chars = (8 + if decimals > 0 { 1 + decimals } else { 0 }) as i32;
+        let init_speed = format_speed_fixed(0, decimals as usize);
+
+        // --- 左侧：网络流量区 (代理 / 直连，使用网格布局保证列对齐) ---
+        let net_grid = gtk::Grid::builder()
+            .column_spacing(8)
+            .row_spacing(4)
+            .valign(gtk::Align::Center)
+            .build();
 
         // 代理行 (图标 + 上传 + 下载)
-        let proxy_row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
-        proxy_row.set_valign(gtk::Align::Center);
         let proxy_icon = gtk::Image::from_icon_name("ssh-rocket-symbolic");
         proxy_icon.set_pixel_size(14);
         proxy_icon.add_css_class("floating-icon-off");
         proxy_icon.set_tooltip_text(Some(tr("action.proxy")));
-        proxy_row.append(&proxy_icon);
 
         let proxy_up_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
         let proxy_up_arrow = gtk::Label::builder().label("↑").css_classes(["stat-arrow-up"]).build();
-        let proxy_up_label = gtk::Label::builder().label("0 B/s").css_classes(["numeric", "floating-stat-num"]).build();
+        let proxy_up_label = gtk::Label::builder()
+            .label(&init_speed)
+            .css_classes(["numeric", "floating-stat-num"])
+            .halign(gtk::Align::Start)
+            .xalign(0.0)
+            .width_chars(width_chars)
+            .build();
         proxy_up_box.append(&proxy_up_arrow);
         proxy_up_box.append(&proxy_up_label);
-        proxy_row.append(&proxy_up_box);
 
         let proxy_down_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
         let proxy_down_arrow = gtk::Label::builder().label("↓").css_classes(["stat-arrow-down"]).build();
-        let proxy_down_label = gtk::Label::builder().label("0 B/s").css_classes(["numeric", "floating-stat-num"]).build();
+        let proxy_down_label = gtk::Label::builder()
+            .label(&init_speed)
+            .css_classes(["numeric", "floating-stat-num"])
+            .halign(gtk::Align::Start)
+            .xalign(0.0)
+            .width_chars(width_chars)
+            .build();
         proxy_down_box.append(&proxy_down_arrow);
         proxy_down_box.append(&proxy_down_label);
-        proxy_row.append(&proxy_down_box);
-        net_box.append(&proxy_row);
+
+        net_grid.attach(&proxy_icon, 0, 0, 1, 1);
+        net_grid.attach(&proxy_up_box, 1, 0, 1, 1);
+        net_grid.attach(&proxy_down_box, 2, 0, 1, 1);
 
         // 直连行 (图标 + 上传 + 下载)
-        let direct_row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
-        direct_row.set_valign(gtk::Align::Center);
         let direct_icon = gtk::Image::from_icon_name("applications-internet-symbolic");
         direct_icon.set_pixel_size(14);
         direct_icon.add_css_class("floating-icon-direct");
         direct_icon.set_tooltip_text(Some(tr("action.direct")));
-        direct_row.append(&direct_icon);
 
         let direct_up_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
         let direct_up_arrow = gtk::Label::builder().label("↑").css_classes(["stat-arrow-up"]).build();
-        let direct_up_label = gtk::Label::builder().label("0 B/s").css_classes(["numeric", "floating-stat-num"]).build();
+        let direct_up_label = gtk::Label::builder()
+            .label(&init_speed)
+            .css_classes(["numeric", "floating-stat-num"])
+            .halign(gtk::Align::Start)
+            .xalign(0.0)
+            .width_chars(width_chars)
+            .build();
         direct_up_box.append(&direct_up_arrow);
         direct_up_box.append(&direct_up_label);
-        direct_row.append(&direct_up_box);
 
         let direct_down_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
         let direct_down_arrow = gtk::Label::builder().label("↓").css_classes(["stat-arrow-down"]).build();
-        let direct_down_label = gtk::Label::builder().label("0 B/s").css_classes(["numeric", "floating-stat-num"]).build();
+        let direct_down_label = gtk::Label::builder()
+            .label(&init_speed)
+            .css_classes(["numeric", "floating-stat-num"])
+            .halign(gtk::Align::Start)
+            .xalign(0.0)
+            .width_chars(width_chars)
+            .build();
         direct_down_box.append(&direct_down_arrow);
         direct_down_box.append(&direct_down_label);
-        direct_row.append(&direct_down_box);
-        net_box.append(&direct_row);
 
-        root_box.append(&net_box);
+        net_grid.attach(&direct_icon, 0, 1, 1, 1);
+        net_grid.attach(&direct_up_box, 1, 1, 1, 1);
+        net_grid.attach(&direct_down_box, 2, 1, 1, 1);
+
+        root_box.append(&net_grid);
 
         // 分隔线
         let sep = gtk::Separator::new(gtk::Orientation::Vertical);
         sep.add_css_class("floating-separator");
         root_box.append(&sep);
 
-        // --- 右侧：系统硬件资源监控 (单列 3 行: CPU / RAM / GPU) ---
-        let sys_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        sys_box.set_valign(gtk::Align::Center);
+        // --- 右侧：系统硬件资源监控 (网格布局保证硬件名和数值左对齐) ---
+        let sys_grid = gtk::Grid::builder()
+            .column_spacing(4)
+            .row_spacing(2)
+            .valign(gtk::Align::Center)
+            .build();
 
         // 1. CPU
-        let cpu_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         let cpu_title = gtk::Label::builder().label("CPU").css_classes(["dim-label", "floating-hw-label"]).build();
-        let cpu_label = gtk::Label::builder().label("0%").css_classes(["numeric", "floating-hw-val"]).build();
-        cpu_row.append(&cpu_title);
-        cpu_row.append(&cpu_label);
-        sys_box.append(&cpu_row);
+        let cpu_label = gtk::Label::builder()
+            .label("0%")
+            .css_classes(["numeric", "floating-hw-val"])
+            .halign(gtk::Align::Start)
+            .xalign(0.0)
+            .width_chars(4)
+            .build();
+        sys_grid.attach(&cpu_title, 0, 0, 1, 1);
+        sys_grid.attach(&cpu_label, 1, 0, 1, 1);
 
         // 2. RAM
-        let ram_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         let ram_title = gtk::Label::builder().label("RAM").css_classes(["dim-label", "floating-hw-label"]).build();
-        let ram_label = gtk::Label::builder().label("0%").css_classes(["numeric", "floating-hw-val"]).build();
-        ram_row.append(&ram_title);
-        ram_row.append(&ram_label);
-        sys_box.append(&ram_row);
+        let ram_label = gtk::Label::builder()
+            .label("0%")
+            .css_classes(["numeric", "floating-hw-val"])
+            .halign(gtk::Align::Start)
+            .xalign(0.0)
+            .width_chars(4)
+            .build();
+        sys_grid.attach(&ram_title, 0, 1, 1, 1);
+        sys_grid.attach(&ram_label, 1, 1, 1, 1);
 
         // 3. GPU
-        let gpu_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         let gpu_title = gtk::Label::builder().label("GPU").css_classes(["dim-label", "floating-hw-label"]).build();
-        let gpu_label = gtk::Label::builder().label("0%").css_classes(["numeric", "floating-hw-val"]).build();
-        gpu_row.append(&gpu_title);
-        gpu_row.append(&gpu_label);
-        sys_box.append(&gpu_row);
+        let gpu_label = gtk::Label::builder()
+            .label("0%")
+            .css_classes(["numeric", "floating-hw-val"])
+            .halign(gtk::Align::Start)
+            .xalign(0.0)
+            .width_chars(4)
+            .build();
+        sys_grid.attach(&gpu_title, 0, 2, 1, 1);
+        sys_grid.attach(&gpu_label, 1, 2, 1, 1);
 
-        root_box.append(&sys_box);
+        root_box.append(&sys_grid);
         window.set_child(Some(&root_box));
 
         // --- 交互 1: 原生 Wayland 拖拽移动 (GestureDrag) ---
@@ -305,6 +349,7 @@ impl FloatingWidget {
             gpu_label,
             idle_opacity,
             fade_delay_secs,
+            speed_decimals,
             fade_source_id,
         }
     }
@@ -321,13 +366,20 @@ impl FloatingWidget {
         }
     }
 
-    /// 更新透明度配置
-    pub fn update_config(&self, opacity: f64, fade_delay_secs: u32) {
+    /// 更新透明度及网速小数位配置
+    pub fn update_config(&self, opacity: f64, fade_delay_secs: u32, speed_decimals: u32) {
         if let Some(source) = self.fade_source_id.borrow_mut().take() {
             source.remove();
         }
         self.idle_opacity.set(opacity.clamp(0.1, 1.0));
         self.fade_delay_secs.set(fade_delay_secs.max(1));
+        let dec = speed_decimals.clamp(0, 3);
+        self.speed_decimals.set(dec);
+        let width_chars = (8 + if dec > 0 { 1 + dec } else { 0 }) as i32;
+        self.proxy_up_label.set_width_chars(width_chars);
+        self.proxy_down_label.set_width_chars(width_chars);
+        self.direct_up_label.set_width_chars(width_chars);
+        self.direct_down_label.set_width_chars(width_chars);
         self.window.set_opacity(self.idle_opacity.get());
     }
 
@@ -341,20 +393,22 @@ impl FloatingWidget {
         direct_down: u64,
         metrics: &SystemMetrics,
     ) {
+        let dec = self.speed_decimals.get() as usize;
         if is_proxy_connected {
             self.proxy_icon.remove_css_class("floating-icon-off");
             self.proxy_icon.add_css_class("floating-icon-proxy");
-            self.proxy_up_label.set_text(&format_speed(proxy_up));
-            self.proxy_down_label.set_text(&format_speed(proxy_down));
+            self.proxy_up_label.set_text(&format_speed_fixed(proxy_up, dec));
+            self.proxy_down_label.set_text(&format_speed_fixed(proxy_down, dec));
         } else {
             self.proxy_icon.remove_css_class("floating-icon-proxy");
             self.proxy_icon.add_css_class("floating-icon-off");
-            self.proxy_up_label.set_text("0 B/s");
-            self.proxy_down_label.set_text("0 B/s");
+            let zero = format_speed_fixed(0, dec);
+            self.proxy_up_label.set_text(&zero);
+            self.proxy_down_label.set_text(&zero);
         }
 
-        self.direct_up_label.set_text(&format_speed(direct_up));
-        self.direct_down_label.set_text(&format_speed(direct_down));
+        self.direct_up_label.set_text(&format_speed_fixed(direct_up, dec));
+        self.direct_down_label.set_text(&format_speed_fixed(direct_down, dec));
 
         self.cpu_label.set_text(&format!("{:.0}%", metrics.cpu_percent));
         self.ram_label.set_text(&format!("{:.0}%", metrics.ram_percent));

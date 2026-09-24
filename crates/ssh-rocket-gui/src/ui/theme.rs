@@ -203,7 +203,6 @@ pub fn init_theme() {
         .floating-stat-num {
             font-size: 11px;
             font-family: monospace;
-            min-width: 52px;
         }
         .floating-separator {
             margin: 0 2px;
@@ -212,14 +211,13 @@ pub fn init_theme() {
         .floating-hw-label {
             font-size: 10px;
             font-weight: 600;
-            min-width: 22px;
         }
         .floating-hw-val {
             font-size: 11px;
             font-family: monospace;
             min-width: 26px;
             font-weight: bold;
-            text-align: right;
+            text-align: left;
         }
         ",
     );

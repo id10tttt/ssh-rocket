@@ -150,6 +150,8 @@ pub struct FloatingWidgetConfig {
     pub idle_opacity: f64,
     #[serde(default = "default_fade_delay_secs")]
     pub fade_delay_secs: u32,
+    #[serde(default = "default_speed_decimals")]
+    pub speed_decimals: u32,
 }
 
 fn default_true() -> bool {
@@ -164,12 +166,17 @@ fn default_fade_delay_secs() -> u32 {
     5
 }
 
+fn default_speed_decimals() -> u32 {
+    1
+}
+
 impl Default for FloatingWidgetConfig {
     fn default() -> Self {
         Self {
             enabled: true,
             idle_opacity: default_idle_opacity(),
             fade_delay_secs: default_fade_delay_secs(),
+            speed_decimals: default_speed_decimals(),
         }
     }
 }
@@ -313,16 +320,19 @@ mod tests {
         assert!(settings.floating_widget.enabled);
         assert!((settings.floating_widget.idle_opacity - 0.5).abs() < 1e-4);
         assert_eq!(settings.floating_widget.fade_delay_secs, 5);
+        assert_eq!(settings.floating_widget.speed_decimals, 1);
 
         // 往返序列化
         let mut s = GlobalSettings::default();
         s.floating_widget.enabled = false;
         s.floating_widget.idle_opacity = 0.35;
         s.floating_widget.fade_delay_secs = 10;
+        s.floating_widget.speed_decimals = 2;
         let json = serde_json::to_string(&s).expect("serialize");
         let decoded: GlobalSettings = serde_json::from_str(&json).expect("deserialize");
         assert!(!decoded.floating_widget.enabled);
         assert!((decoded.floating_widget.idle_opacity - 0.35).abs() < 1e-4);
         assert_eq!(decoded.floating_widget.fade_delay_secs, 10);
+        assert_eq!(decoded.floating_widget.speed_decimals, 2);
     }
 }

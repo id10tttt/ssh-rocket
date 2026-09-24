@@ -243,6 +243,8 @@ pub fn tr(key: &'static str) -> &'static str {
         "settings.floating.subtitle" => if is_en { "Show realtime traffic and hardware monitor on desktop" } else { "在桌面展示实时网络与系统硬件监控" },
         "settings.floating.opacity" => if is_en { "Idle Opacity" } else { "移开后虚化透明度" },
         "settings.floating.delay" => if is_en { "Fade Delay (seconds)" } else { "虚化等待时间 (秒)" },
+        "settings.floating.decimals" => if is_en { "Speed Decimals" } else { "网速小数位数" },
+        "settings.floating.decimals.sub" => if is_en { "Decimal places for traffic speed in HUD (0 ~ 3)" } else { "悬浮球网速显示的小数位数 (0 ~ 3)" },
 
         _ => key,
     }
