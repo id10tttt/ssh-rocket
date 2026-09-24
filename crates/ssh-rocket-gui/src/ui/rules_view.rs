@@ -109,31 +109,36 @@ impl RulesView {
 
         // --- 1. 应用分流 (Applications) ---
         let applications_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        let app_toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        app_toolbar.set_margin_start(18);
-        app_toolbar.set_margin_end(18);
-        app_toolbar.set_margin_top(12);
-        app_toolbar.set_margin_bottom(12);
         let app_search = gtk::SearchEntry::builder()
             .placeholder_text(tr("rules.apps.search"))
-            .hexpand(true)
             .build();
-        app_toolbar.append(&app_search);
+        app_search.set_margin_start(18);
+        app_search.set_margin_end(18);
+        app_search.set_margin_top(12);
+        app_search.set_margin_bottom(12);
+        applications_page.append(&app_search);
+
+        let sort_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        sort_box.set_valign(gtk::Align::Center);
         let sort_label = gtk::Label::new(Some(tr("rules.apps.sort")));
         sort_label.add_css_class("dim-label");
-        app_toolbar.append(&sort_label);
+        sort_box.append(&sort_label);
         let app_sort = gtk::DropDown::from_strings(&[tr("rules.apps.sort_name"), tr("rules.apps.sort_rule")]);
-        app_toolbar.append(&app_sort);
-        applications_page.append(&app_toolbar);
-        applications_page.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        sort_box.append(&app_sort);
 
-        let applications_preferences = adw::PreferencesPage::new();
         let applications_group = adw::PreferencesGroup::builder().title(tr("rules.apps.group")).build();
+        applications_group.set_header_suffix(Some(&sort_box));
+
+        let app_body = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        app_body.set_margin_start(18);
+        app_body.set_margin_end(18);
+        app_body.set_margin_bottom(18);
+        app_body.append(&applications_group);
+
         let app_rows = Rc::new(RefCell::new(Vec::<(String, String, adw::ComboRow)>::new()));
-        applications_preferences.add(&applications_group);
 
         let app_scroller = gtk::ScrolledWindow::builder()
-            .child(&applications_preferences)
+            .child(&app_body)
             .vexpand(true)
             .build();
         applications_page.append(&app_scroller);
