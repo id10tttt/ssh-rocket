@@ -9,7 +9,7 @@ use ssh_rocket_core::{
     parse_omega_rules, parse_rule_set, parse_shadowrocket_rules, AppConfig, AppRule, DomainRule,
     DomainRuleKind, IpRule, Language, Profile, RuleAction, RuleImportResult, ThemeMode,
 };
-use ssh_rocket_runtime::{PrivilegedHelperSession, SshSession};
+use ssh_rocket_runtime::{check_socks_health, PrivilegedHelperSession, SshSession};
 use std::{
     cell::RefCell,
     collections::HashSet,
@@ -627,6 +627,11 @@ impl RuntimeController {
                     let mut previous_traffic = None;
                     let mut disconnect_reason = String::new();
 
+                    let mut health_interval = tokio::time::interval(Duration::from_secs(15));
+                    health_interval.tick().await; // 消耗初始即时触发，连接建立 15 秒后再执行首次存活检测
+                    let mut health_failures = 0u32;
+                    const MAX_HEALTH_FAILURES: u32 = 3;
+
                     loop {
                         tokio::select! {
                             _ = &mut stop_rx => {
@@ -640,6 +645,33 @@ impl RuntimeController {
                                 };
                                 let _ = events.send(RuntimeEvent::Log(format!("[reconnect] {disconnect_reason}")));
                                 break;
+                            }
+                            _ = health_interval.tick() => {
+                                match check_socks_health(ssh.socks_port, Duration::from_secs(5)).await {
+                                    Ok(()) => {
+                                        if health_failures > 0 {
+                                            let _ = events.send(RuntimeEvent::Log(
+                                                "[health] 存活检测已恢复正常".into(),
+                                            ));
+                                            health_failures = 0;
+                                        }
+                                    }
+                                    Err(error) => {
+                                        health_failures += 1;
+                                        let _ = events.send(RuntimeEvent::Log(format!(
+                                            "[health] 存活检测未通过 ({health_failures}/{MAX_HEALTH_FAILURES}): {error}"
+                                        )));
+                                        if health_failures >= MAX_HEALTH_FAILURES {
+                                            disconnect_reason = format!(
+                                                "连续 {MAX_HEALTH_FAILURES} 次存活检测失败: {error}"
+                                            );
+                                            let _ = events.send(RuntimeEvent::Log(format!(
+                                                "[health] {disconnect_reason}，准备自动重连..."
+                                            )));
+                                            break;
+                                        }
+                                    }
+                                }
                             }
                             _ = tokio::time::sleep(Duration::from_millis(500)) => {
                                 let helper_health = match helper_guard.as_mut() {

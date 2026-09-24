@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use ssh_rocket_core::Profile;
 use std::{collections::HashSet, net::IpAddr, process::Stdio, time::Duration};
 use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{lookup_host, TcpStream},
     process::{Child, ChildStderr, Command},
     time::{sleep, timeout},
@@ -186,4 +187,127 @@ async fn clean_stale_ssh(socks_port: u16, dns_port: u16) {
         }
     }
     sleep(Duration::from_millis(50)).await;
+}
+
+/// 对本地 SOCKS 端口及通过 SOCKS 代理的出站连通性进行存活健康检测。
+///
+/// 检查流程：
+/// 1. 本地 TCP 连接到 SOCKS 端口（验证本地端口监听正常）
+/// 2. SOCKS5 握手认证协商（验证协议交互正常）
+/// 3. 通过 SOCKS 发起实际轻量出站 HTTP 探测（验证 SSH 隧道端到端连通性与远端出站能力）
+///
+/// 支持主备探测节点（Cloudflare / Google 204）自动容灾，避免单点网络波动误判。
+pub async fn check_socks_health(socks_port: u16, deadline: Duration) -> Result<()> {
+    timeout(deadline, async move {
+        match probe_endpoint(socks_port, "cp.cloudflare.com", "/generate_204").await {
+            Ok(()) => Ok(()),
+            Err(primary_err) => {
+                probe_endpoint(socks_port, "connectivitycheck.gstatic.com", "/generate_204")
+                    .await
+                    .with_context(|| format!("主探测失败 ({primary_err:#})，备用探测亦失败"))
+            }
+        }
+    })
+    .await
+    .context("存活检测超时")?
+}
+
+async fn probe_endpoint(socks_port: u16, host: &str, path: &str) -> Result<()> {
+    let mut stream = TcpStream::connect(("127.0.0.1", socks_port))
+        .await
+        .context("无法连接到本地 SOCKS 端口")?;
+
+    // 1. SOCKS5 握手协商: VER=5, NMETHODS=1, METHOD=0(NO_AUTH)
+    stream
+        .write_all(&[0x05, 0x01, 0x00])
+        .await
+        .context("发送 SOCKS5 认证协商失败")?;
+
+    let mut auth_resp = [0u8; 2];
+    stream
+        .read_exact(&mut auth_resp)
+        .await
+        .context("读取 SOCKS5 认证协商响应失败")?;
+    if auth_resp[0] != 0x05 || auth_resp[1] != 0x00 {
+        bail!("SOCKS5 认证协商未通过，响应: {:?}", auth_resp);
+    }
+
+    // 2. 发起 CONNECT 请求
+    let mut req = Vec::with_capacity(7 + host.len());
+    req.push(0x05); // VER
+    req.push(0x01); // CMD: CONNECT
+    req.push(0x00); // RSV
+    req.push(0x03); // ATYP: DOMAIN
+    req.push(host.len() as u8);
+    req.extend_from_slice(host.as_bytes());
+    req.extend_from_slice(&80u16.to_be_bytes());
+
+    stream
+        .write_all(&req)
+        .await
+        .context("发送 SOCKS5 CONNECT 请求失败")?;
+
+    let mut resp = [0u8; 4];
+    stream
+        .read_exact(&mut resp)
+        .await
+        .context("读取 SOCKS5 CONNECT 响应头失败")?;
+    if resp[0] != 0x05 {
+        bail!("非 SOCKS5 协议响应: 版本 {}", resp[0]);
+    }
+    if resp[1] != 0x00 {
+        bail!("SOCKS5 代理连接目标失败，REP 状态码: {}", resp[1]);
+    }
+
+    // 消耗 BND.ADDR 与 BND.PORT
+    match resp[3] {
+        0x01 => {
+            let mut buf = [0u8; 6];
+            stream
+                .read_exact(&mut buf)
+                .await
+                .context("读取 SOCKS5 IPv4 绑定地址失败")?;
+        }
+        0x03 => {
+            let mut len = [0u8; 1];
+            stream
+                .read_exact(&mut len)
+                .await
+                .context("读取 SOCKS5 域名绑定长度失败")?;
+            let mut buf = vec![0u8; len[0] as usize + 2];
+            stream
+                .read_exact(&mut buf)
+                .await
+                .context("读取 SOCKS5 域名绑定地址失败")?;
+        }
+        0x04 => {
+            let mut buf = [0u8; 18];
+            stream
+                .read_exact(&mut buf)
+                .await
+                .context("读取 SOCKS5 IPv6 绑定地址失败")?;
+        }
+        other => bail!("未知的 SOCKS5 地址类型: {}", other),
+    }
+
+    // 3. 发送 HTTP HEAD 探测请求
+    let http_req = format!(
+        "HEAD {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: ssh-rocket-probe\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(http_req.as_bytes())
+        .await
+        .context("发送 HTTP 探测请求失败")?;
+
+    let mut http_resp = [0u8; 12];
+    stream
+        .read_exact(&mut http_resp)
+        .await
+        .context("读取 HTTP 探测响应失败")?;
+    let status_line = std::str::from_utf8(&http_resp).unwrap_or("");
+    if !status_line.starts_with("HTTP/1.") {
+        bail!("HTTP 探测收到异常响应: {:?}", status_line);
+    }
+
+    Ok(())
 }

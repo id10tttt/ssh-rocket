@@ -4,4 +4,4 @@ mod ssh;
 
 pub use helper_client::PrivilegedHelperSession;
 pub use ipc::{HelperCommand, HelperEvent};
-pub use ssh::{SshSession, wait_for_tcp};
+pub use ssh::{check_socks_health, wait_for_tcp, SshSession};
