@@ -2,6 +2,7 @@ pub mod i18n;
 mod tray;
 pub mod ui;
 
+use crate::i18n::tr;
 use adw::prelude::*;
 use gtk4::{self as gtk, gio, glib};
 use libadwaita as adw;
@@ -2093,7 +2094,7 @@ fn build_ui(app: &adw::Application) {
 
         row.add_suffix(&sw);
         row.set_activatable_widget(Some(&sw));
-        rules_view.blocked_apps_list_box.append(&row);
+        rules_view.blocked_apps_group.add(&row);
 
         rules_view.app_switches.borrow_mut().push((
             format!("{} {}", app.name, app.executable).to_lowercase(),
@@ -2113,8 +2114,10 @@ fn build_ui(app: &adw::Application) {
     }
 
     let refresh_blocked_impl: Rc<dyn Fn()> = {
-        let procs_list_box = rules_view.procs_list_box.clone();
-        let blocked_targets_list_box = rules_view.blocked_targets_list_box.clone();
+        let procs_group = rules_view.procs_group.clone();
+        let procs_rows = rules_view.procs_rows.clone();
+        let blocked_targets_group = rules_view.blocked_targets_group.clone();
+        let blocked_targets_rows = rules_view.blocked_targets_rows.clone();
         let app_switches = rules_view.app_switches.clone();
         let config = config.clone();
         let controller = controller.clone();
@@ -2123,8 +2126,8 @@ fn build_ui(app: &adw::Application) {
         let refresh_counts = refresh_traffic_rule_counts_fn.clone();
 
         Rc::new(move || {
-            while let Some(child) = procs_list_box.first_child() {
-                procs_list_box.remove(&child);
+            for row in procs_rows.borrow_mut().drain(..) {
+                procs_group.remove(&row);
             }
             let current = config.borrow();
             let procs: Vec<String> = current
@@ -2140,8 +2143,8 @@ fn build_ui(app: &adw::Application) {
                 })
                 .collect();
 
-            while let Some(child) = blocked_targets_list_box.first_child() {
-                blocked_targets_list_box.remove(&child);
+            for row in blocked_targets_rows.borrow_mut().drain(..) {
+                blocked_targets_group.remove(&row);
             }
             let blocked_domains: Vec<DomainRule> = current
                 .settings
@@ -2171,6 +2174,7 @@ fn build_ui(app: &adw::Application) {
                 del_btn.add_css_class("flat");
                 del_btn.add_css_class("destructive-action");
                 del_btn.set_valign(gtk::Align::Center);
+                del_btn.set_tooltip_text(Some(tr("rules.domain.remove_source")));
 
                 let target = proc_name.clone();
                 let config_ref = config.clone();
@@ -2197,7 +2201,8 @@ fn build_ui(app: &adw::Application) {
                     }
                 });
                 row.add_suffix(&del_btn);
-                procs_list_box.append(&row);
+                procs_group.add(&row);
+                procs_rows.borrow_mut().push(row);
             }
 
             for rule in blocked_domains {
@@ -2213,6 +2218,7 @@ fn build_ui(app: &adw::Application) {
                 del_btn.add_css_class("flat");
                 del_btn.add_css_class("destructive-action");
                 del_btn.set_valign(gtk::Align::Center);
+                del_btn.set_tooltip_text(Some(tr("rules.domain.remove_source")));
 
                 let pattern = rule.pattern.clone();
                 let kind = rule.kind;
@@ -2241,7 +2247,8 @@ fn build_ui(app: &adw::Application) {
                     }
                 });
                 row.add_suffix(&del_btn);
-                blocked_targets_list_box.append(&row);
+                blocked_targets_group.add(&row);
+                blocked_targets_rows.borrow_mut().push(row);
             }
 
             for rule in blocked_ips {
@@ -2257,6 +2264,7 @@ fn build_ui(app: &adw::Application) {
                 del_btn.add_css_class("flat");
                 del_btn.add_css_class("destructive-action");
                 del_btn.set_valign(gtk::Align::Center);
+                del_btn.set_tooltip_text(Some(tr("rules.domain.remove_source")));
 
                 let network = rule.network;
                 let config_ref = config.clone();
@@ -2281,7 +2289,8 @@ fn build_ui(app: &adw::Application) {
                     }
                 });
                 row.add_suffix(&del_btn);
-                blocked_targets_list_box.append(&row);
+                blocked_targets_group.add(&row);
+                blocked_targets_rows.borrow_mut().push(row);
             }
 
             for (_, row, sw) in app_switches.borrow().iter() {

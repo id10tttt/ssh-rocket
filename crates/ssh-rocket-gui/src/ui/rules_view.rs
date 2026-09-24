@@ -77,14 +77,13 @@ pub struct RulesView {
     pub procs_group: adw::PreferencesGroup,
     pub new_proc_row: adw::EntryRow,
     pub add_proc_btn: gtk::Button,
-    pub procs_list_box: gtk::Box,
+    pub procs_rows: Rc<RefCell<Vec<adw::ActionRow>>>,
     pub blocked_targets_group: adw::PreferencesGroup,
     pub new_target_row: adw::EntryRow,
     pub add_target_btn: gtk::Button,
-    pub blocked_targets_list_box: gtk::Box,
+    pub blocked_targets_rows: Rc<RefCell<Vec<adw::ActionRow>>>,
     pub blocked_apps_group: adw::PreferencesGroup,
     pub app_search_row: adw::EntryRow,
-    pub blocked_apps_list_box: gtk::Box,
     pub app_switches: Rc<RefCell<Vec<(String, adw::ActionRow, gtk::Switch)>>>,
 }
 
@@ -152,7 +151,11 @@ impl RulesView {
         routing_page.append(&domain_stack);
 
         // 2.1 规则总览 (Overview)
-        let overview_page = adw::PreferencesPage::new();
+        let overview_box = gtk::Box::new(gtk::Orientation::Vertical, 16);
+        overview_box.set_margin_start(18);
+        overview_box.set_margin_end(18);
+        overview_box.set_margin_top(12);
+        overview_box.set_margin_bottom(18);
         let routing_group = adw::PreferencesGroup::builder().title(tr("rules.domain.default_policy")).build();
         let policy_row = adw::ComboRow::builder()
             .title(tr("rules.domain.unmatched"))
@@ -171,7 +174,7 @@ impl RulesView {
         ipv6_row.add_prefix(&gtk::Image::from_icon_name("network-wired-symbolic"));
         routing_group.add(&policy_row);
         routing_group.add(&ipv6_row);
-        overview_page.add(&routing_group);
+        overview_box.append(&routing_group);
 
         let initial_rule_source = {
             let current = config.borrow();
@@ -198,7 +201,7 @@ impl RulesView {
         rule_status_row.add_prefix(&gtk::Image::from_icon_name("folder-download-symbolic"));
         rule_status_row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
         configurations_group.add(&rule_status_row);
-        overview_page.add(&configurations_group);
+        overview_box.append(&configurations_group);
 
         let custom_summary_group = adw::PreferencesGroup::builder().title(tr("rules.domain.custom_group")).build();
         let quick_add_rule_btn = gtk::Button::from_icon_name("list-add-symbolic");
@@ -214,10 +217,10 @@ impl RulesView {
         custom_summary_row.add_prefix(&gtk::Image::from_icon_name("document-edit-symbolic"));
         custom_summary_row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
         custom_summary_group.add(&custom_summary_row);
-        overview_page.add(&custom_summary_group);
+        overview_box.append(&custom_summary_group);
 
         let overview_scroller = gtk::ScrolledWindow::builder()
-            .child(&overview_page)
+            .child(&overview_box)
             .vexpand(true)
             .build();
         domain_stack.add_named(&overview_scroller, Some("overview"));
@@ -231,7 +234,11 @@ impl RulesView {
         detail_header.append(&detail_back_btn);
         detail_header.append(&detail_title_lbl);
 
-        let detail_preferences = adw::PreferencesPage::new();
+        let detail_body = gtk::Box::new(gtk::Orientation::Vertical, 16);
+        detail_body.set_margin_start(18);
+        detail_body.set_margin_end(18);
+        detail_body.set_margin_top(12);
+        detail_body.set_margin_bottom(18);
         let source_group = adw::PreferencesGroup::builder().title(tr("rules.domain.source_provider")).build();
         let source_detail_row = adw::ActionRow::new();
         source_detail_row.add_prefix(&gtk::Image::from_icon_name("folder-download-symbolic"));
@@ -244,7 +251,7 @@ impl RulesView {
         remove_source_btn.set_tooltip_text(Some(tr("rules.domain.remove_source")));
         source_detail_row.add_suffix(&remove_source_btn);
         source_group.add(&source_detail_row);
-        detail_preferences.add(&source_group);
+        detail_body.append(&source_group);
 
         let contents_group = adw::PreferencesGroup::builder().title(tr("rules.domain.entries")).build();
         let imported_summary_row = adw::ActionRow::builder()
@@ -254,10 +261,10 @@ impl RulesView {
         imported_summary_row.add_prefix(&gtk::Image::from_icon_name("view-list-symbolic"));
         imported_summary_row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
         contents_group.add(&imported_summary_row);
-        detail_preferences.add(&contents_group);
+        detail_body.append(&contents_group);
 
         let detail_scroller = gtk::ScrolledWindow::builder()
-            .child(&detail_preferences)
+            .child(&detail_body)
             .vexpand(true)
             .build();
         detail_page.append(&detail_scroller);
@@ -349,8 +356,6 @@ impl RulesView {
         rules_stack.add_titled(&routing_page, Some("routing"), tr("rules.tab.domain"));
 
         // --- 3. 黑名单策略 (Blocked) ---
-        let blocked_page = adw::PreferencesPage::new();
-
         let procs_group = adw::PreferencesGroup::builder()
             .title(tr("rules.blocked.proc_group"))
             .build();
@@ -358,12 +363,9 @@ impl RulesView {
         let add_proc_btn = gtk::Button::from_icon_name("list-add-symbolic");
         add_proc_btn.add_css_class("flat");
         add_proc_btn.set_valign(gtk::Align::Center);
+        add_proc_btn.set_tooltip_text(Some(tr("rules.blocked.proc_add")));
         new_proc_row.add_suffix(&add_proc_btn);
         procs_group.add(&new_proc_row);
-
-        let procs_list_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        procs_group.add(&procs_list_box);
-        blocked_page.add(&procs_group);
 
         let blocked_targets_group = adw::PreferencesGroup::builder()
             .title(tr("rules.blocked.target_group"))
@@ -372,29 +374,35 @@ impl RulesView {
         let add_target_btn = gtk::Button::from_icon_name("list-add-symbolic");
         add_target_btn.add_css_class("flat");
         add_target_btn.set_valign(gtk::Align::Center);
+        add_target_btn.set_tooltip_text(Some(tr("rules.blocked.target_add")));
         new_target_row.add_suffix(&add_target_btn);
         blocked_targets_group.add(&new_target_row);
-
-        let blocked_targets_list_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        blocked_targets_group.add(&blocked_targets_list_box);
-        blocked_page.add(&blocked_targets_group);
 
         let blocked_apps_group = adw::PreferencesGroup::builder()
             .title(tr("rules.blocked.app_group"))
             .build();
         let app_search_row = adw::EntryRow::builder().title(tr("rules.blocked.app_search")).build();
+        let app_search_icon = gtk::Image::from_icon_name("system-search-symbolic");
+        app_search_row.add_prefix(&app_search_icon);
         blocked_apps_group.add(&app_search_row);
 
-        let blocked_apps_list_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        blocked_apps_group.add(&blocked_apps_list_box);
-        blocked_page.add(&blocked_apps_group);
+        let blocked_body = gtk::Box::new(gtk::Orientation::Vertical, 16);
+        blocked_body.set_margin_start(18);
+        blocked_body.set_margin_end(18);
+        blocked_body.set_margin_top(12);
+        blocked_body.set_margin_bottom(18);
+        blocked_body.append(&procs_group);
+        blocked_body.append(&blocked_targets_group);
+        blocked_body.append(&blocked_apps_group);
 
         let blocked_scroller = gtk::ScrolledWindow::builder()
-            .child(&blocked_page)
+            .child(&blocked_body)
             .vexpand(true)
             .build();
         rules_stack.add_titled(&blocked_scroller, Some("blocked"), tr("rules.tab.blocked"));
 
+        let procs_rows = Rc::new(RefCell::new(Vec::<adw::ActionRow>::new()));
+        let blocked_targets_rows = Rc::new(RefCell::new(Vec::<adw::ActionRow>::new()));
         let app_switches = Rc::new(RefCell::new(Vec::<(String, adw::ActionRow, gtk::Switch)>::new()));
 
         Self {
@@ -448,14 +456,13 @@ impl RulesView {
             procs_group,
             new_proc_row,
             add_proc_btn,
-            procs_list_box,
+            procs_rows,
             blocked_targets_group,
             new_target_row,
             add_target_btn,
-            blocked_targets_list_box,
+            blocked_targets_rows,
             blocked_apps_group,
             app_search_row,
-            blocked_apps_list_box,
             app_switches,
         }
     }
