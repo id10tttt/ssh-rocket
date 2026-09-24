@@ -47,14 +47,14 @@ pub struct TrafficView {
     pub app_traffic_search: gtk::SearchEntry,
     pub traffic_scope_filter: gtk::DropDown,
     pub app_traffic_sort: gtk::DropDown,
-    pub app_traffic_list_box: gtk::Box,
+    pub app_traffic_list_box: gtk::ListBox,
 
     // --- Tab 3: 实时连接 & 规则分布 ---
     pub conn_scroller: gtk::ScrolledWindow,
     pub conn_group: adw::PreferencesGroup,
     pub conn_search: gtk::SearchEntry,
     pub conn_stats_label: gtk::Label,
-    pub conn_list_box: gtk::Box,
+    pub conn_list_box: gtk::ListBox,
 
     pub distribution_group: adw::PreferencesGroup,
     pub total_rules_label: gtk::Label,
@@ -79,11 +79,7 @@ impl TrafficView {
     }
 
     pub fn new() -> Self {
-        let page = gtk::Box::new(gtk::Orientation::Vertical, 10);
-        page.set_margin_start(16);
-        page.set_margin_end(16);
-        page.set_margin_top(12);
-        page.set_margin_bottom(16);
+        let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
         page.set_vexpand(true);
         page.set_hexpand(true);
 
@@ -94,7 +90,8 @@ impl TrafficView {
 
         // 顶部分段切换栏
         let switcher_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        switcher_box.set_margin_bottom(6);
+        switcher_box.set_margin_top(12);
+        switcher_box.set_margin_bottom(8);
         let stack_switcher = gtk::StackSwitcher::new();
         stack_switcher.set_stack(Some(&stack));
         stack_switcher.set_halign(gtk::Align::Center);
@@ -105,7 +102,11 @@ impl TrafficView {
         // ==========================================
         // Tab 1: 监控总览 (Overview)
         // ==========================================
-        let overview_content = adw::PreferencesPage::new();
+        let overview_box = gtk::Box::new(gtk::Orientation::Vertical, 16);
+        overview_box.set_margin_start(18);
+        overview_box.set_margin_end(18);
+        overview_box.set_margin_top(12);
+        overview_box.set_margin_bottom(18);
 
         // 1.1 会话与传输总览卡片 (3 列 KPI)
         let overview_group = adw::PreferencesGroup::builder()
@@ -130,7 +131,7 @@ impl TrafficView {
         overview_card.append(&tile_direct);
 
         overview_group.add(&overview_card);
-        overview_content.add(&overview_group);
+        overview_box.append(&overview_group);
 
         // 1.2 Speed
         let speed_group = adw::PreferencesGroup::builder()
@@ -411,10 +412,10 @@ impl TrafficView {
 
         speed_card.append(&speed_legend_box);
         speed_group.add(&speed_card);
-        overview_content.add(&speed_group);
+        overview_box.append(&speed_group);
 
         let overview_scroller = gtk::ScrolledWindow::builder()
-            .child(&overview_content)
+            .child(&overview_box)
             .vexpand(true)
             .hscrollbar_policy(gtk::PolicyType::Never)
             .build();
@@ -423,7 +424,12 @@ impl TrafficView {
         // ==========================================
         // Tab 2: 应用统计 (App Traffic)
         // ==========================================
-        let apps_content = adw::PreferencesPage::new();
+        let apps_box = gtk::Box::new(gtk::Orientation::Vertical, 16);
+        apps_box.set_margin_start(18);
+        apps_box.set_margin_end(18);
+        apps_box.set_margin_top(12);
+        apps_box.set_margin_bottom(18);
+
         let app_usage_group = adw::PreferencesGroup::builder()
             .title(tr("traffic.apps.title"))
             .build();
@@ -453,12 +459,14 @@ impl TrafficView {
 
         app_usage_group.add(&app_traffic_toolbar);
 
-        let app_traffic_list_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        let app_traffic_list_box = gtk::ListBox::new();
+        app_traffic_list_box.add_css_class("boxed-list");
+        app_traffic_list_box.set_selection_mode(gtk::SelectionMode::None);
         app_usage_group.add(&app_traffic_list_box);
-        apps_content.add(&app_usage_group);
+        apps_box.append(&app_usage_group);
 
         let apps_scroller = gtk::ScrolledWindow::builder()
-            .child(&apps_content)
+            .child(&apps_box)
             .vexpand(true)
             .hscrollbar_policy(gtk::PolicyType::Never)
             .build();
@@ -467,7 +475,11 @@ impl TrafficView {
         // ==========================================
         // Tab 3: 实时连接 (Active Connections) & 规则分布
         // ==========================================
-        let conn_content = adw::PreferencesPage::new();
+        let conn_box = gtk::Box::new(gtk::Orientation::Vertical, 16);
+        conn_box.set_margin_start(18);
+        conn_box.set_margin_end(18);
+        conn_box.set_margin_top(12);
+        conn_box.set_margin_bottom(18);
 
         let conn_group = adw::PreferencesGroup::builder()
             .title(tr("traffic.conn.title"))
@@ -489,9 +501,11 @@ impl TrafficView {
         conn_toolbar.append(&conn_search);
         conn_group.add(&conn_toolbar);
 
-        let conn_list_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        let conn_list_box = gtk::ListBox::new();
+        conn_list_box.add_css_class("boxed-list");
+        conn_list_box.set_selection_mode(gtk::SelectionMode::None);
         conn_group.add(&conn_list_box);
-        conn_content.add(&conn_group);
+        conn_box.append(&conn_group);
 
         let distribution_group = adw::PreferencesGroup::builder()
             .title(tr("traffic.conn.rules_dist"))
@@ -592,10 +606,10 @@ impl TrafficView {
         dist_content.append(&legend_box);
         dist_card.append(&dist_content);
         distribution_group.add(&dist_card);
-        conn_content.add(&distribution_group);
+        conn_box.append(&distribution_group);
 
         let conn_scroller = gtk::ScrolledWindow::builder()
-            .child(&conn_content)
+            .child(&conn_box)
             .vexpand(true)
             .hscrollbar_policy(gtk::PolicyType::Never)
             .build();
@@ -858,7 +872,7 @@ pub fn refresh_app_traffic_list(
     app_traffic_search: &gtk::SearchEntry,
     traffic_scope_filter: &gtk::DropDown,
     app_traffic_sort: &gtk::DropDown,
-    app_traffic_list_box: &gtk::Box,
+    app_traffic_list_box: &gtk::ListBox,
 ) {
     let query = app_traffic_search.text().trim().to_lowercase();
     let scope_mode = traffic_scope_filter.selected(); // 0: 全部, 1: 仅代理, 2: 本地与直连
@@ -944,22 +958,25 @@ pub fn refresh_app_traffic_list(
             .build();
         row.add_prefix(&create_app_icon(&item.icon));
 
-        // 路由走向胶囊徽标 (Badge)
-        let badge = gtk::Label::builder()
-            .label(item.primary_type.label())
-            .css_classes([item.primary_type.badge_class()])
-            .valign(gtk::Align::Center)
-            .build();
-        row.add_suffix(&badge);
-
-        // 右侧高亮总流量
+        // 右侧高亮总流量（左列：固定宽度右对齐）
         let total_lbl = gtk::Label::builder()
             .label(format_bytes(total_bytes))
             .css_classes(["process-traffic-total", "numeric"])
             .valign(gtk::Align::Center)
             .halign(gtk::Align::End)
+            .width_request(85)
             .build();
         row.add_suffix(&total_lbl);
+
+        // 路由走向胶囊徽标（最右侧：固定宽度居中对齐）
+        let badge = gtk::Label::builder()
+            .label(item.primary_type.label())
+            .css_classes([item.primary_type.badge_class()])
+            .valign(gtk::Align::Center)
+            .halign(gtk::Align::Center)
+            .width_request(58)
+            .build();
+        row.add_suffix(&badge);
 
         app_traffic_list_box.append(&row);
     }
@@ -970,7 +987,7 @@ pub fn refresh_connection_list(
     conns_data: &Rc<RefCell<Vec<ActiveConnectionStat>>>,
     conn_search: &gtk::SearchEntry,
     conn_stats_label: &gtk::Label,
-    conn_list_box: &gtk::Box,
+    conn_list_box: &gtk::ListBox,
 ) {
     let query = conn_search.text().trim().to_lowercase();
     let mut items: Vec<ActiveConnectionStat> = conns_data
@@ -1012,13 +1029,7 @@ pub fn refresh_connection_list(
             .build();
         row.add_prefix(&create_app_icon(&conn.icon));
 
-        let badge = gtk::Label::builder()
-            .label(conn.conn_type.label())
-            .css_classes([conn.conn_type.badge_class()])
-            .valign(gtk::Align::Center)
-            .build();
-        row.add_suffix(&badge);
-
+        // 实时上下行流量（左列：固定宽度右对齐）
         let traffic_lbl = gtk::Label::builder()
             .label(&format!(
                 "↑ {}   ↓ {}",
@@ -1028,8 +1039,19 @@ pub fn refresh_connection_list(
             .css_classes(["dim-label", "numeric"])
             .valign(gtk::Align::Center)
             .halign(gtk::Align::End)
+            .width_request(160)
             .build();
         row.add_suffix(&traffic_lbl);
+
+        // 路由走向胶囊徽标（最右侧：固定宽度居中对齐）
+        let badge = gtk::Label::builder()
+            .label(conn.conn_type.label())
+            .css_classes([conn.conn_type.badge_class()])
+            .valign(gtk::Align::Center)
+            .halign(gtk::Align::Center)
+            .width_request(58)
+            .build();
+        row.add_suffix(&badge);
 
         conn_list_box.append(&row);
     }
