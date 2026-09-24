@@ -59,7 +59,8 @@ impl FloatingWidget {
 
         let speed_decimals = Rc::new(Cell::new(config.speed_decimals.clamp(0, 3)));
         let decimals = speed_decimals.get();
-        let width_chars = (8 + if decimals > 0 { 1 + decimals } else { 0 }) as i32;
+        let num_width = if decimals > 0 { 5 + decimals } else { 4 };
+        let width_chars = (num_width + 5) as i32;
         let init_speed = format_speed_fixed(0, decimals as usize);
 
         // --- 左侧：网络流量区 (代理 / 直连，使用网格布局保证列对齐) ---
@@ -154,7 +155,7 @@ impl FloatingWidget {
         // 1. CPU
         let cpu_title = gtk::Label::builder().label("CPU").css_classes(["dim-label", "floating-hw-label"]).build();
         let cpu_label = gtk::Label::builder()
-            .label("0%")
+            .label("  0%")
             .css_classes(["numeric", "floating-hw-val"])
             .halign(gtk::Align::Start)
             .xalign(0.0)
@@ -166,7 +167,7 @@ impl FloatingWidget {
         // 2. RAM
         let ram_title = gtk::Label::builder().label("RAM").css_classes(["dim-label", "floating-hw-label"]).build();
         let ram_label = gtk::Label::builder()
-            .label("0%")
+            .label("  0%")
             .css_classes(["numeric", "floating-hw-val"])
             .halign(gtk::Align::Start)
             .xalign(0.0)
@@ -178,7 +179,7 @@ impl FloatingWidget {
         // 3. GPU
         let gpu_title = gtk::Label::builder().label("GPU").css_classes(["dim-label", "floating-hw-label"]).build();
         let gpu_label = gtk::Label::builder()
-            .label("0%")
+            .label("  0%")
             .css_classes(["numeric", "floating-hw-val"])
             .halign(gtk::Align::Start)
             .xalign(0.0)
@@ -375,7 +376,8 @@ impl FloatingWidget {
         self.fade_delay_secs.set(fade_delay_secs.max(1));
         let dec = speed_decimals.clamp(0, 3);
         self.speed_decimals.set(dec);
-        let width_chars = (8 + if dec > 0 { 1 + dec } else { 0 }) as i32;
+        let num_width = if dec > 0 { 5 + dec } else { 4 };
+        let width_chars = (num_width + 5) as i32;
         self.proxy_up_label.set_width_chars(width_chars);
         self.proxy_down_label.set_width_chars(width_chars);
         self.direct_up_label.set_width_chars(width_chars);
@@ -410,9 +412,9 @@ impl FloatingWidget {
         self.direct_up_label.set_text(&format_speed_fixed(direct_up, dec));
         self.direct_down_label.set_text(&format_speed_fixed(direct_down, dec));
 
-        self.cpu_label.set_text(&format!("{:.0}%", metrics.cpu_percent));
-        self.ram_label.set_text(&format!("{:.0}%", metrics.ram_percent));
-        self.gpu_label.set_text(&format!("{:.0}%", metrics.gpu_percent));
+        self.cpu_label.set_text(&format!("{:>3.0}%", metrics.cpu_percent));
+        self.ram_label.set_text(&format!("{:>3.0}%", metrics.ram_percent));
+        self.gpu_label.set_text(&format!("{:>3.0}%", metrics.gpu_percent));
     }
 
     /// 刷新国际化文本

@@ -33,16 +33,15 @@ pub fn format_speed(bytes_per_second: u64) -> String {
 pub fn format_speed_fixed(bytes_per_second: u64, decimals: usize) -> String {
     let value = bytes_per_second as f64;
     let d = decimals.min(3);
-    if value < 1024.0 * 1024.0 {
-        let kb = value / 1024.0;
-        format!("{kb:.d$} KB/s")
+    let num_width = if d > 0 { 5 + d } else { 4 };
+    let (val, unit) = if value < 1024.0 * 1024.0 {
+        (value / 1024.0, "KB/s")
     } else if value < 1024.0 * 1024.0 * 1024.0 {
-        let mb = value / (1024.0 * 1024.0);
-        format!("{mb:.d$} MB/s")
+        (value / (1024.0 * 1024.0), "MB/s")
     } else {
-        let gb = value / (1024.0 * 1024.0 * 1024.0);
-        format!("{gb:.d$} GB/s")
-    }
+        (value / (1024.0 * 1024.0 * 1024.0), "GB/s")
+    };
+    format!("{val:>num_width$.d$} {unit}")
 }
 
 /// 格式化秒数为 HH:MM:SS
@@ -116,12 +115,12 @@ mod tests {
 
     #[test]
     fn test_format_speed_fixed() {
-        assert_eq!(format_speed_fixed(0, 1), "0.0 KB/s");
-        assert_eq!(format_speed_fixed(0, 0), "0 KB/s");
-        assert_eq!(format_speed_fixed(0, 2), "0.00 KB/s");
-        assert_eq!(format_speed_fixed(1024, 1), "1.0 KB/s");
-        assert_eq!(format_speed_fixed(1536, 1), "1.5 KB/s");
-        assert_eq!(format_speed_fixed(1024 * 1024, 1), "1.0 MB/s");
-        assert_eq!(format_speed_fixed(1024 * 1024 * 1024, 2), "1.00 GB/s");
+        assert_eq!(format_speed_fixed(0, 1), "   0.0 KB/s");
+        assert_eq!(format_speed_fixed(0, 0), "   0 KB/s");
+        assert_eq!(format_speed_fixed(0, 2), "   0.00 KB/s");
+        assert_eq!(format_speed_fixed(1024, 1), "   1.0 KB/s");
+        assert_eq!(format_speed_fixed(1536, 1), "   1.5 KB/s");
+        assert_eq!(format_speed_fixed(1024 * 1024, 1), "   1.0 MB/s");
+        assert_eq!(format_speed_fixed(1024 * 1024 * 1024, 2), "   1.00 GB/s");
     }
 }
