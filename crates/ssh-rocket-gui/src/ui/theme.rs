@@ -183,44 +183,43 @@ pub fn init_theme() {
             border: 1px solid alpha(currentColor, 0.14);
             border-radius: 12px;
             box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
-            padding: 8px 12px;
+            padding: 6px 10px;
             transition: border-color 200ms ease, box-shadow 200ms ease;
         }
         .floating-hud-hover {
             border-color: alpha(#3584e4, 0.65);
             box-shadow: 0 6px 20px rgba(0, 0, 0, 0.38);
         }
-        .floating-badge {
-            font-size: 10px;
-            padding: 1px 5px;
-            border-radius: 4px;
+        .floating-icon-proxy {
+            color: #2ec27e;
         }
-        .badge-proxy-off {
-            background-color: alpha(#77767b, 0.15);
+        .floating-icon-direct {
+            color: #3584e4;
+        }
+        .floating-icon-off {
             color: #77767b;
-            border-radius: 4px;
-            padding: 1px 5px;
-            font-size: 10px;
-            font-weight: 600;
+            opacity: 0.45;
         }
         .floating-stat-num {
             font-size: 11px;
             font-family: monospace;
-            min-width: 60px;
+            min-width: 52px;
         }
         .floating-separator {
-            margin: 0 4px;
-            opacity: 0.18;
+            margin: 0 2px;
+            opacity: 0.16;
         }
         .floating-hw-label {
             font-size: 10px;
             font-weight: 600;
+            min-width: 22px;
         }
         .floating-hw-val {
             font-size: 11px;
             font-family: monospace;
-            min-width: 28px;
+            min-width: 26px;
             font-weight: bold;
+            text-align: right;
         }
         ",
     );
