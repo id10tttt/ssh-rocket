@@ -168,8 +168,11 @@ impl PrivilegedHelperSession {
         if !self.is_active || !self.is_alive() {
             return Ok(());
         }
-        let _ = self.send_command(&HelperCommand::SyncRules).await;
-        Ok(())
+        match self.send_command(&HelperCommand::SyncRules).await? {
+            HelperEvent::RulesSynced => Ok(()),
+            HelperEvent::Error { message } => bail!("{message}"),
+            other => bail!("unexpected response from helper: {other:?}"),
+        }
     }
 
     pub async fn shutdown(&mut self) {

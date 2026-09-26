@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use ipnet::IpNet;
-use ssh_rocket_core::{AppConfig, FlowContext, RoutingEngine, RuleAction};
+use ssh_rocket_core::{AppConfig, FlowContext, GlobalSettings, MatchSource, RoutingEngine, RuleAction};
 use ssh_rocket_runtime::ipc::{HelperCommand, HelperEvent};
 use std::{
     collections::HashMap,
@@ -27,7 +27,8 @@ const MARK: &str = "0x5352";
 const TABLE: &str = "21330";
 const DNS_RULE_PRIORITY: &str = "21328";
 const NFT_TABLE: &str = "ssh_rocket";
-const DNS_LISTEN_PORT: u16 = 15353;
+const DNS_LISTEN_PORT: u16 = ssh_rocket_runtime::DNS_ROUTER_PORT;
+const DOMAIN_RULE_TIMEOUT_SECS: u32 = 1800;
 const TUN_DNS_ADDRESS: &str = "10.0.0.33";
 const MAX_TUN_RETRIES: usize = 3;
 const TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -195,12 +196,13 @@ async fn run_daemon() -> Result<()> {
                         send_event(&mut stdout, &HelperEvent::Stopped).await?;
                     }
                     HelperCommand::SyncRules => {
-                        if let Some(session) = active_session.as_mut() {
-                            if let Err(err) = session.system.assign_apps().await {
-                                eprintln!("[helper] failed to sync app rules: {err}");
+                        match sync_active_rules(&mut active_session).await {
+                            Ok(()) => send_event(&mut stdout, &HelperEvent::RulesSynced).await?,
+                            Err(err) => {
+                                eprintln!("[helper] failed to sync rules: {err}");
+                                send_event(&mut stdout, &HelperEvent::Error { message: err.to_string() }).await?;
                             }
                         }
-                        send_event(&mut stdout, &HelperEvent::RulesSynced).await?;
                     }
                     HelperCommand::Status => {
                         let unhealthy = active_session.as_ref().is_some_and(|session| {
@@ -256,10 +258,8 @@ async fn run_daemon() -> Result<()> {
                     eprintln!("[helper] parent process exited (orphaned), exiting daemon");
                     break;
                 }
-                if let Some(session) = active_session.as_mut() {
-                    if let Err(error) = session.system.assign_apps().await {
-                        eprintln!("app rule synchronization failed: {error}");
-                    }
+                if let Err(error) = sync_active_rules(&mut active_session).await {
+                    eprintln!("[helper] rule synchronization failed: {error}");
                 }
             }
         }
@@ -271,6 +271,47 @@ async fn run_daemon() -> Result<()> {
     clean_stale_resources().await;
     eprintln!("[helper] helper daemon exited cleanly");
     Ok(())
+}
+
+/// 路由配置改变时重建数据面；仅应用规则改变时只重新分配进程。
+async fn sync_active_rules(active_session: &mut Option<ActiveSession>) -> Result<()> {
+    let Some(session) = active_session.as_mut() else {
+        return Ok(());
+    };
+    let config_path = session.system.config_path.clone();
+    let config: AppConfig = serde_json::from_slice(&tokio::fs::read(&config_path).await?)?;
+    if routing_signature(&config.settings)? == routing_signature(&session.system.config.settings)? {
+        return session.system.assign_apps().await;
+    }
+
+    let uid = session.system.uid;
+    let socks_port = session.system.socks_port;
+    let dns_port = session.system.dns_port;
+    let ssh_port = session.system.ssh_port;
+    let ssh_addresses = session.system.ssh_addresses.clone();
+    eprintln!("[helper] routing rules changed, rebuilding transparent proxy");
+    active_session.take().unwrap().stop().await;
+    *active_session = Some(start_proxy_session(
+        config_path,
+        uid,
+        socks_port,
+        dns_port,
+        ssh_port,
+        ssh_addresses,
+    ).await?);
+    Ok(())
+}
+
+fn routing_signature(settings: &GlobalSettings) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&(
+        settings.default_policy,
+        &settings.custom_overrides,
+        &settings.domain_rules,
+        &settings.imported_domain_rules,
+        &settings.ip_rules,
+        &settings.imported_ip_rules,
+        settings.ipv6,
+    ))?)
 }
 
 async fn send_event<W: tokio::io::AsyncWriteExt + Unpin>(
@@ -1000,7 +1041,8 @@ async fn handle_dns_query(
     };
 
     let addresses = parse_dns_addresses(&response);
-    if !addresses.is_empty() {
+    // 默认策略无需写入域名集合，否则共享 CDN 地址会覆盖显式域名规则。
+    if !addresses.is_empty() && decision.source != MatchSource::DefaultPolicy {
         update_domain_addresses(&addresses, decision.action).await;
     }
     if let Err(error) = socket.send_to(&response, peer).await {
@@ -1212,7 +1254,7 @@ async fn update_domain_addresses(addresses: &[IpAddr], action: RuleAction) {
     for address in addresses {
         let suffix = if address.is_ipv4() { "4" } else { "6" };
         let value = address.to_string();
-        batch.push_str(&format!("add element inet {NFT_TABLE} domain_{target_cat}{suffix} {{ {value} timeout 300s }}\n"));
+        batch.push_str(&format!("add element inet {NFT_TABLE} domain_{target_cat}{suffix} {{ {value} timeout {DOMAIN_RULE_TIMEOUT_SECS}s }}\n"));
     }
     if let Ok(mut child) = Command::new("nft")
         .arg("-f")
@@ -1308,6 +1350,25 @@ async fn command(program: &str, args: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ssh_rocket_core::{AppRule, DomainRule, DomainRuleKind};
+
+    #[test]
+    fn routing_signature_tracks_routing_changes_only() {
+        let mut settings = GlobalSettings::default();
+        let original = routing_signature(&settings).unwrap();
+        settings.app_rules.push(AppRule {
+            executable: "firefox".into(),
+            action: RuleAction::Direct,
+        });
+        assert_eq!(routing_signature(&settings).unwrap(), original);
+
+        settings.domain_rules.push(DomainRule {
+            pattern: "example.com".into(),
+            action: RuleAction::Proxy,
+            kind: DomainRuleKind::DomainSuffix,
+        });
+        assert_ne!(routing_signature(&settings).unwrap(), original);
+    }
 
     fn query_with_edns(qtype: u16) -> Vec<u8> {
         let mut packet = vec![

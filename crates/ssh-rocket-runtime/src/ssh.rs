@@ -3,7 +3,7 @@ use ssh_rocket_core::Profile;
 use std::{collections::HashSet, net::IpAddr, process::Stdio, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{lookup_host, TcpStream},
+    net::{lookup_host, TcpStream, UdpSocket},
     process::{Child, ChildStderr, Command},
     time::{sleep, timeout},
 };
@@ -210,6 +210,49 @@ pub async fn check_socks_health(socks_port: u16, deadline: Duration) -> Result<(
     })
     .await
     .context("存活检测超时")?
+}
+
+/// 验证 SSH 的 DNS 端口转发能够实际完成一次解析。
+pub async fn check_dns_health(dns_port: u16, deadline: Duration) -> Result<()> {
+    timeout(deadline, async move {
+        let mut stream = TcpStream::connect(("127.0.0.1", dns_port))
+            .await
+            .context("无法连接到 SSH DNS 转发端口")?;
+        let query = [
+            0x53, 0x52, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
+            0x03, b'c', b'o', b'm', 0x00, 0x00, 0x01, 0x00, 0x01,
+        ];
+        stream.write_all(&(query.len() as u16).to_be_bytes()).await?;
+        stream.write_all(&query).await?;
+        let mut length = [0u8; 2];
+        stream.read_exact(&mut length).await?;
+        let mut response = vec![0u8; u16::from_be_bytes(length) as usize];
+        stream.read_exact(&mut response).await?;
+        if response.len() < 12
+            || response[..2] != query[..2]
+            || response[2] & 0x80 == 0
+            || response[3] & 0x0f != 0
+            || u16::from_be_bytes([response[6], response[7]]) == 0
+        {
+            bail!("SSH DNS 转发返回无效解析结果");
+        }
+
+        let socket = UdpSocket::bind("127.0.0.1:0").await?;
+        socket.send_to(&query, ("127.0.0.1", crate::DNS_ROUTER_PORT)).await?;
+        let mut response = [0u8; 4096];
+        let (size, _) = socket.recv_from(&mut response).await?;
+        if size < 12
+            || response[..2] != query[..2]
+            || response[2] & 0x80 == 0
+            || response[3] & 0x0f == 2
+        {
+            bail!("本地 DNS 路由返回无效解析结果");
+        }
+        Ok(())
+    })
+    .await
+    .context("DNS 健康检查超时")?
 }
 
 async fn probe_endpoint(socks_port: u16, host: &str, path: &str) -> Result<()> {

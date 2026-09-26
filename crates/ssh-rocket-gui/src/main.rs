@@ -11,7 +11,7 @@ use ssh_rocket_core::{
     parse_omega_rules, parse_rule_set, parse_shadowrocket_rules, AppConfig, AppRule, DomainRule,
     DomainRuleKind, IpRule, Language, Profile, RuleAction, RuleImportResult, ThemeMode,
 };
-use ssh_rocket_runtime::{check_socks_health, PrivilegedHelperSession, SshSession};
+use ssh_rocket_runtime::{check_dns_health, check_socks_health, PrivilegedHelperSession, SshSession};
 use std::{
     cell::{Cell, RefCell},
     collections::HashSet,
@@ -20,7 +20,7 @@ use std::{
     process::Command as StdCommand,
     rc::Rc,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc,
     },
     thread,
@@ -132,6 +132,8 @@ pub struct RuntimeController {
     stop: Rc<RefCell<Option<oneshot::Sender<()>>>>,
     helper: Arc<Mutex<Option<PrivilegedHelperSession>>>,
     is_running: Arc<AtomicBool>,
+    generation: Arc<AtomicU64>,
+    worker: Arc<Mutex<()>>,
     runtime: Arc<tokio::runtime::Runtime>,
 }
 
@@ -145,6 +147,8 @@ impl Default for RuntimeController {
             stop: Rc::new(RefCell::new(None)),
             helper: Arc::new(Mutex::new(None)),
             is_running: Arc::new(AtomicBool::new(false)),
+            generation: Arc::new(AtomicU64::new(0)),
+            worker: Arc::new(Mutex::new(())),
             runtime: Arc::new(runtime),
         }
     }
@@ -425,6 +429,7 @@ impl RuntimeController {
     }
 
     pub fn stop(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
         self.is_running.store(false, Ordering::SeqCst);
         if let Some(stop) = self.stop.borrow_mut().take() {
             let _ = stop.send(());
@@ -463,21 +468,31 @@ impl RuntimeController {
         events: mpsc::Sender<RuntimeEvent>,
     ) {
         self.stop();
+        let task_generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.is_running.store(true, Ordering::SeqCst);
         let (stop_tx, mut stop_rx) = oneshot::channel();
         *self.stop.borrow_mut() = Some(stop_tx);
 
         let helper = self.helper.clone();
         let is_running_flag = self.is_running.clone();
+        let generation = self.generation.clone();
+        let worker = self.worker.clone();
 
         self.runtime.spawn(async move {
+            let _worker_guard = worker.lock().await;
+            if generation.load(Ordering::SeqCst) != task_generation {
+                return;
+            }
+            let _ = events.send(RuntimeEvent::Status("正在连接…".into()));
             let desktop_apps = scan_desktop_apps();
             let user_cancelled = Arc::new(AtomicBool::new(false));
                 let mut retry_attempt = 0;
                 let mut app_tracker = AppTrafficTracker::default();
 
                 loop {
-                    if user_cancelled.load(Ordering::SeqCst) {
+                    if user_cancelled.load(Ordering::SeqCst)
+                        || generation.load(Ordering::SeqCst) != task_generation
+                    {
                         break;
                     }
 
@@ -618,6 +633,7 @@ impl RuntimeController {
                             _ = tokio::time::sleep(Duration::from_secs(1)) => continue,
                         }
                     }
+                    drop(helper_guard);
 
                     // 连接成功
                     if retry_attempt > 0 {
@@ -648,10 +664,16 @@ impl RuntimeController {
                                     Err(error) => error.to_string(),
                                 };
                                 let _ = events.send(RuntimeEvent::Log(format!("[reconnect] {disconnect_reason}")));
+                                let _ = events.send(RuntimeEvent::Status("连接断开，正在准备重连…".into()));
                                 break;
                             }
                             _ = health_interval.tick() => {
-                                match check_socks_health(ssh.socks_port, Duration::from_secs(5)).await {
+                                let health = async {
+                                    check_socks_health(ssh.socks_port, Duration::from_secs(5)).await?;
+                                    check_dns_health(ssh.dns_port, Duration::from_secs(8)).await?;
+                                    Ok::<(), anyhow::Error>(())
+                                }.await;
+                                match health {
                                     Ok(()) => {
                                         if health_failures > 0 {
                                             let _ = events.send(RuntimeEvent::Log(
@@ -672,12 +694,14 @@ impl RuntimeController {
                                             let _ = events.send(RuntimeEvent::Log(format!(
                                                 "[health] {disconnect_reason}，准备自动重连..."
                                             )));
+                                            let _ = events.send(RuntimeEvent::Status("连接异常，正在准备重连…".into()));
                                             break;
                                         }
                                     }
                                 }
                             }
                             _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                                let mut helper_guard = helper.lock().await;
                                 let helper_health = match helper_guard.as_mut() {
                                     Some(helper) => helper.check_active().await,
                                     None => Err(anyhow::anyhow!("特权 Helper 会话不可用")),
@@ -685,6 +709,7 @@ impl RuntimeController {
                                 if let Err(error) = helper_health {
                                     disconnect_reason = format!("透明代理健康检查失败: {error}");
                                     let _ = events.send(RuntimeEvent::Log(format!("[helper] {disconnect_reason}")));
+                                    let _ = events.send(RuntimeEvent::Status("连接异常，正在准备重连…".into()));
                                     break;
                                 }
                             }
@@ -708,6 +733,7 @@ impl RuntimeController {
                         }
                     }
 
+                    let mut helper_guard = helper.lock().await;
                     let helper_stop_error = match helper_guard.as_mut() {
                         Some(h) => h.stop().await.err(),
                         None => None,
@@ -748,7 +774,9 @@ impl RuntimeController {
                     }
                 }
 
-                is_running_flag.store(false, Ordering::SeqCst);
+                if generation.load(Ordering::SeqCst) == task_generation {
+                    is_running_flag.store(false, Ordering::SeqCst);
+                }
         });
     }
 }
