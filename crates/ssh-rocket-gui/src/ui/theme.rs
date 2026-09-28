@@ -178,6 +178,7 @@ pub fn init_theme() {
         .floating-hud-window {
             background: none;
             background-color: transparent;
+            color: @window_fg_color;
             box-shadow: none;
             border: none;
         }
