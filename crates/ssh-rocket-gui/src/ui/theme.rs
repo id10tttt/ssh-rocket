@@ -175,20 +175,24 @@ pub fn init_theme() {
         }
 
         /* 桌面悬浮监控球 (HUD) */
+        window.floating-hud-window,
         .floating-hud-window {
+            background: none;
             background-color: transparent;
+            box-shadow: none;
+            border: none;
         }
         .floating-hud-box {
             background-color: alpha(@window_bg_color, 0.88);
             border: 1px solid alpha(currentColor, 0.14);
             border-radius: 12px;
-            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
+            box-shadow: none;
             padding: 6px 10px;
-            transition: border-color 200ms ease, box-shadow 200ms ease;
+            transition: border-color 200ms ease;
         }
         .floating-hud-hover {
             border-color: alpha(#3584e4, 0.65);
-            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.38);
+            box-shadow: none;
         }
         .floating-icon-proxy {
             color: #2ec27e;
