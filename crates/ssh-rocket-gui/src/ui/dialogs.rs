@@ -26,37 +26,63 @@ pub fn show_profile_dialog(
         Some(if editing { tr("dialog.profile.title_edit") } else { tr("dialog.profile.title_new") }),
         None,
     );
-    let columns_box = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    columns_box.set_homogeneous(true);
-    columns_box.set_width_request(560);
+    let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    card.add_css_class("card");
+    card.set_width_request(460);
 
-    let server_group = adw::PreferencesGroup::new();
-    let auth_group = adw::PreferencesGroup::new();
-    let name = adw::EntryRow::builder()
-        .title(tr("dialog.profile.name"))
+    let info = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    info.set_margin_start(16);
+    info.set_margin_end(16);
+    info.set_margin_top(14);
+    info.set_margin_bottom(14);
+
+    let make_row = |label_text: &str, widget: &gtk::Widget| -> gtk::Box {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        row.set_valign(gtk::Align::Center);
+        let label = gtk::Label::new(Some(label_text));
+        label.add_css_class("dim-label");
+        label.set_halign(gtk::Align::Start);
+        label.set_width_request(100);
+        label.set_xalign(0.0);
+        row.append(&label);
+        row.append(widget);
+        row
+    };
+
+    let name = gtk::Entry::builder()
         .text(&source.name)
+        .hexpand(true)
         .build();
-    let host = adw::EntryRow::builder()
-        .title(tr("dialog.profile.host"))
-        .text(&source.host)
-        .build();
-    let port = adw::EntryRow::builder()
-        .title(tr("dialog.profile.port"))
-        .text(source.port.to_string())
-        .build();
-    let username = adw::EntryRow::builder()
-        .title(tr("dialog.profile.username"))
-        .text(&source.username)
-        .build();
+    let name_row = make_row(tr("dialog.profile.name"), name.upcast_ref());
 
-    let auth_type_row = adw::ComboRow::builder()
-        .title(tr("dialog.profile.auth_type"))
-        .model(&gtk::StringList::new(&[tr("dialog.profile.auth_key"), tr("dialog.profile.auth_password")]))
+    let host = gtk::Entry::builder()
+        .text(&source.host)
+        .hexpand(true)
+        .build();
+    let host_row = make_row(tr("dialog.profile.host"), host.upcast_ref());
+
+    let port = gtk::Entry::builder()
+        .text(source.port.to_string())
+        .hexpand(true)
+        .build();
+    let port_row = make_row(tr("dialog.profile.port"), port.upcast_ref());
+
+    let username = gtk::Entry::builder()
+        .text(&source.username)
+        .hexpand(true)
+        .build();
+    let username_row = make_row(tr("dialog.profile.username"), username.upcast_ref());
+
+    let auth_model = gtk::StringList::new(&[tr("dialog.profile.auth_key"), tr("dialog.profile.auth_password")]);
+    let auth_dropdown = gtk::DropDown::builder()
+        .model(&auth_model)
         .selected(match source.auth_type {
             AuthType::Key => 0,
             AuthType::Password => 1,
         })
+        .hexpand(true)
         .build();
+    let auth_row = make_row(tr("dialog.profile.auth_type"), auth_dropdown.upcast_ref());
 
     // 收集可用 SSH 私钥列表
     let mut discovered = crate::ssh_key::scan_ssh_keys();
@@ -94,35 +120,35 @@ pub fn show_profile_dialog(
         }
     }
 
-    let identity_row = adw::ComboRow::builder()
-        .title(tr("dialog.profile.identity"))
+    let key_dropdown = gtk::DropDown::builder()
         .model(&string_list)
         .selected(initial_selected)
+        .hexpand(true)
         .build();
 
     let last_selected = Rc::new(Cell::new(initial_selected));
     let is_updating = Rc::new(Cell::new(false));
 
-    let update_subtitle = {
-        let identity_row = identity_row.clone();
+    let update_key_tooltip = {
+        let key_dropdown = key_dropdown.clone();
         let key_items = key_items.clone();
         Rc::new(move || {
-            let sel = identity_row.selected() as usize;
+            let sel = key_dropdown.selected() as usize;
             let items = key_items.borrow();
             if let Some((_, Some(path))) = items.get(sel) {
-                identity_row.set_subtitle(&path.to_string_lossy());
+                key_dropdown.set_tooltip_text(Some(&path.to_string_lossy()));
             } else {
-                identity_row.set_subtitle("");
+                key_dropdown.set_tooltip_text(None);
             }
         })
     };
-    update_subtitle();
+    update_key_tooltip();
 
     let open_file_chooser = {
         let parent = parent.clone();
         let key_items = key_items.clone();
         let string_list = string_list.clone();
-        let identity_row = identity_row.clone();
+        let key_dropdown = key_dropdown.clone();
         let last_selected = last_selected.clone();
         let is_updating = is_updating.clone();
         Rc::new(move || {
@@ -132,7 +158,7 @@ pub fn show_profile_dialog(
                 .build();
             let key_items = key_items.clone();
             let string_list = string_list.clone();
-            let identity_row = identity_row.clone();
+            let key_dropdown = key_dropdown.clone();
             let last_selected = last_selected.clone();
             let is_updating = is_updating.clone();
             file_dialog.open(Some(&parent), gtk::gio::Cancellable::NONE, move |result| {
@@ -141,8 +167,8 @@ pub fn show_profile_dialog(
                         let mut items = key_items.borrow_mut();
                         if let Some(existing_idx) = items.iter().position(|(_, p)| p.as_ref() == Some(&path)) {
                             is_updating.set(true);
-                            identity_row.set_selected(existing_idx as u32);
-                            identity_row.set_subtitle(&path.to_string_lossy());
+                            key_dropdown.set_selected(existing_idx as u32);
+                            key_dropdown.set_tooltip_text(Some(&path.to_string_lossy()));
                             last_selected.set(existing_idx as u32);
                             is_updating.set(false);
                         } else {
@@ -155,8 +181,8 @@ pub fn show_profile_dialog(
                             items.push((name.clone(), Some(path.clone())));
                             string_list.splice(insert_pos as u32, 0, &[&name]);
                             is_updating.set(true);
-                            identity_row.set_selected(insert_pos as u32);
-                            identity_row.set_subtitle(&path.to_string_lossy());
+                            key_dropdown.set_selected(insert_pos as u32);
+                            key_dropdown.set_tooltip_text(Some(&path.to_string_lossy()));
                             last_selected.set(insert_pos as u32);
                             is_updating.set(false);
                         }
@@ -164,7 +190,7 @@ pub fn show_profile_dialog(
                     }
                 }
                 is_updating.set(true);
-                identity_row.set_selected(last_selected.get());
+                key_dropdown.set_selected(last_selected.get());
                 is_updating.set(false);
             });
         })
@@ -175,15 +201,15 @@ pub fn show_profile_dialog(
         let open_file_chooser = open_file_chooser.clone();
         let last_selected = last_selected.clone();
         let is_updating = is_updating.clone();
-        identity_row.connect_selected_notify(move |row| {
+        key_dropdown.connect_selected_notify(move |dropdown| {
             if is_updating.get() {
                 return;
             }
-            let sel = row.selected() as usize;
+            let sel = dropdown.selected() as usize;
             let items = key_items.borrow();
             if sel < items.len() {
                 if let Some((_, Some(path))) = items.get(sel) {
-                    row.set_subtitle(&path.to_string_lossy());
+                    dropdown.set_tooltip_text(Some(&path.to_string_lossy()));
                     last_selected.set(sel as u32);
                 }
             } else {
@@ -202,43 +228,48 @@ pub fn show_profile_dialog(
             open_file_chooser();
         });
     }
-    identity_row.add_suffix(&browse_btn);
 
-    let password_row = adw::PasswordEntryRow::builder()
-        .title(tr("dialog.profile.password"))
+    let key_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    key_box.set_hexpand(true);
+    key_dropdown.set_hexpand(true);
+    key_box.append(&key_dropdown);
+    key_box.append(&browse_btn);
+    let key_row = make_row(tr("dialog.profile.identity"), key_box.upcast_ref());
+
+    let password_entry = gtk::PasswordEntry::builder()
         .text(source.password.as_deref().unwrap_or_default())
+        .show_peek_icon(true)
+        .hexpand(true)
         .build();
+    let password_row = make_row(tr("dialog.profile.password"), password_entry.upcast_ref());
 
     let update_auth_visibility = {
-        let identity_row = identity_row.clone();
+        let key_row = key_row.clone();
         let password_row = password_row.clone();
-        let auth_type_row = auth_type_row.clone();
+        let auth_dropdown = auth_dropdown.clone();
         Rc::new(move || {
-            let is_key = auth_type_row.selected() == 0;
-            identity_row.set_visible(is_key);
+            let is_key = auth_dropdown.selected() == 0;
+            key_row.set_visible(is_key);
             password_row.set_visible(!is_key);
         })
     };
     update_auth_visibility();
     {
         let update = update_auth_visibility.clone();
-        auth_type_row.connect_selected_notify(move |_| {
+        auth_dropdown.connect_selected_notify(move |_| {
             update();
         });
     }
 
-    server_group.add(&name);
-    server_group.add(&host);
-    server_group.add(&port);
-
-    auth_group.add(&username);
-    auth_group.add(&auth_type_row);
-    auth_group.add(&identity_row);
-    auth_group.add(&password_row);
-
-    columns_box.append(&server_group);
-    columns_box.append(&auth_group);
-    dialog.set_extra_child(Some(&columns_box));
+    info.append(&name_row);
+    info.append(&host_row);
+    info.append(&port_row);
+    info.append(&username_row);
+    info.append(&auth_row);
+    info.append(&key_row);
+    info.append(&password_row);
+    card.append(&info);
+    dialog.set_extra_child(Some(&card));
 
     dialog.add_response("cancel", tr("dialog.cancel"));
     dialog.add_response("save", tr("dialog.save"));
@@ -262,15 +293,15 @@ pub fn show_profile_dialog(
         saved.host = host_text;
         saved.port = port.text().parse::<u16>().unwrap_or(22);
         saved.username = username.text().trim().to_string();
-        let is_key = auth_type_row.selected() == 0;
+        let is_key = auth_dropdown.selected() == 0;
         saved.auth_type = if is_key { AuthType::Key } else { AuthType::Password };
         if is_key {
-            let sel = identity_row.selected() as usize;
+            let sel = key_dropdown.selected() as usize;
             let items = key_items.borrow();
             saved.identity_file = items.get(sel).and_then(|(_, p)| p.clone());
             saved.password = None;
         } else {
-            let pwd_text = password_row.text().to_string();
+            let pwd_text = password_entry.text().to_string();
             saved.password = (!pwd_text.is_empty()).then_some(pwd_text);
             saved.identity_file = None;
         }
