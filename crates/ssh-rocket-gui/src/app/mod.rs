@@ -21,8 +21,12 @@ use crate::{
     tray::TrayManager,
     ui::{
         connect_view::{render_connection_cards, ConnectView},
-        dialogs::{show_profile_dialog, RefreshConnections, RefreshRules},
+        dialogs::{
+            show_forward_dialog, show_profile_dialog, RefreshConnections, RefreshForwards,
+            RefreshRules,
+        },
         floating_widget::FloatingWidget,
+        forward_view::{render_forward_cards, ForwardView},
         logs_view::LogsView,
         rules_view::RulesView,
         settings_view::SettingsView,
@@ -36,6 +40,9 @@ use crate::{
     },
     ActiveConnectionStat, AppTrafficStat,
 };
+use ssh_rocket_runtime::ForwardManager;
+use std::sync::Arc;
+use tokio::sync::Mutex as TokioMutex;
 
 pub fn apply_theme_mode(mode: ThemeMode) {
     let style_manager = adw::StyleManager::default();
@@ -84,6 +91,8 @@ pub fn build_ui(app: &adw::Application) {
     let connect_start_time = Rc::new(RefCell::new(None::<std::time::Instant>));
     let connection_buttons = Rc::new(RefCell::new(Vec::<(String, gtk::Button)>::new()));
     let refresh_connections: RefreshConnections = Rc::new(RefCell::new(None));
+    let refresh_forwards: RefreshForwards = Rc::new(RefCell::new(None));
+    let forward_manager = Arc::new(TokioMutex::new(ForwardManager::new()));
     let tray_manager = Rc::new(RefCell::new(None::<Rc<TrayManager>>));
     let quitting = Rc::new(RefCell::new(false));
 
@@ -128,6 +137,7 @@ pub fn build_ui(app: &adw::Application) {
     let rules_view = RulesView::new(&config);
     let traffic_view = TrafficView::new();
     let logs_view = LogsView::new();
+    let forward_view = ForwardView::new();
     let settings_view = Rc::new(SettingsView::new(
         &config,
         on_theme_changed,
@@ -140,6 +150,7 @@ pub fn build_ui(app: &adw::Application) {
     win.view_stack.add_named(&rules_view.container, Some("rules"));
     win.view_stack.add_named(&traffic_view.page, Some("traffic"));
     win.view_stack.add_named(&logs_view.container, Some("logs"));
+    win.view_stack.add_named(&forward_view.container, Some("forward"));
     win.view_stack.add_named(&settings_view.container, Some("settings"));
 
     let refresh_active_traffic_tab: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
@@ -149,6 +160,7 @@ pub fn build_ui(app: &adw::Application) {
         let win_rules_lbl = win.rules_nav_label.clone();
         let win_traffic_lbl = win.traffic_nav_label.clone();
         let win_logs_lbl = win.logs_nav_label.clone();
+        let win_forward_lbl = win.forward_nav_label.clone();
         let win_settings_lbl = win.settings_nav_label.clone();
         let win_back_btn = win.back_button.clone();
         let win_add_conn = win.add_connection.clone();
@@ -160,8 +172,10 @@ pub fn build_ui(app: &adw::Application) {
         let rules_view_clone = rules_view.clone();
         let traffic_view_clone = traffic_view.clone();
         let logs_view_clone = logs_view.clone();
+        let forward_view_clone = forward_view.clone();
         let settings_view_clone = settings_view.clone();
         let refresh_conn_ref = refresh_connections.clone();
+        let refresh_forward_ref = refresh_forwards.clone();
         let tray_manager_clone = tray_manager.clone();
         let refresh_traffic_tab_clone = refresh_active_traffic_tab.clone();
         let floating_widget_clone = floating_widget.clone();
@@ -171,6 +185,7 @@ pub fn build_ui(app: &adw::Application) {
             win_rules_lbl.set_text(crate::i18n::tr("nav.rules"));
             win_traffic_lbl.set_text(crate::i18n::tr("nav.traffic"));
             win_logs_lbl.set_text(crate::i18n::tr("nav.logs"));
+            win_forward_lbl.set_text(crate::i18n::tr("nav.forward"));
             win_settings_lbl.set_text(crate::i18n::tr("nav.settings"));
             win_back_btn.set_tooltip_text(Some(crate::i18n::tr("btn.back")));
             win_add_conn.set_tooltip_text(Some(crate::i18n::tr("btn.add_connection")));
@@ -185,7 +200,8 @@ pub fn build_ui(app: &adw::Application) {
                     1 => crate::i18n::tr("nav.rules"),
                     2 => crate::i18n::tr("nav.traffic"),
                     3 => crate::i18n::tr("nav.logs"),
-                    4 => crate::i18n::tr("nav.settings"),
+                    4 => crate::i18n::tr("nav.forward"),
+                    5 => crate::i18n::tr("nav.settings"),
                     _ => crate::i18n::tr("nav.connect"),
                 };
                 win_page_title.set_text(title);
@@ -195,6 +211,7 @@ pub fn build_ui(app: &adw::Application) {
             rules_view_clone.refresh_labels();
             traffic_view_clone.refresh_labels();
             logs_view_clone.refresh_labels();
+            forward_view_clone.refresh_labels();
             settings_view_clone.refresh_labels();
 
             if let Some(hud) = floating_widget_clone.borrow().as_ref() {
@@ -202,6 +219,9 @@ pub fn build_ui(app: &adw::Application) {
             }
 
             if let Some(refresh) = refresh_conn_ref.borrow().as_ref() {
+                refresh();
+            }
+            if let Some(refresh) = refresh_forward_ref.borrow().as_ref() {
                 refresh();
             }
             if let Some(refresh) = refresh_traffic_tab_clone.borrow().as_ref() {
@@ -229,11 +249,17 @@ pub fn build_ui(app: &adw::Application) {
                 1 => ("rules", crate::i18n::tr("nav.rules")),
                 2 => ("traffic", crate::i18n::tr("nav.traffic")),
                 3 => ("logs", crate::i18n::tr("nav.logs")),
-                4 => ("settings", crate::i18n::tr("nav.settings")),
+                4 => ("forward", crate::i18n::tr("nav.forward")),
+                5 => ("settings", crate::i18n::tr("nav.settings")),
                 _ => ("connect", crate::i18n::tr("nav.connect")),
             };
             view_stack.set_visible_child_name(name);
-            add_connection.set_visible(name == "connect");
+            add_connection.set_visible(name == "connect" || name == "forward");
+            if name == "forward" {
+                add_connection.set_tooltip_text(Some(crate::i18n::tr("btn.add_forward")));
+            } else if name == "connect" {
+                add_connection.set_tooltip_text(Some(crate::i18n::tr("btn.add_connection")));
+            }
             back_button.set_visible(false);
             header.set_title_widget(Some(&page_title));
             page_title.set_text(title);
@@ -287,12 +313,41 @@ pub fn build_ui(app: &adw::Application) {
         refresh_impl();
     }
 
+    // 4.1 端口转发规则渲染与刷新
+    {
+        let forward_flow = forward_view.forward_flow.clone();
+        let forward_container = forward_view.container.clone();
+        let config = config.clone();
+        let forward_manager = forward_manager.clone();
+        let refresh_handle = refresh_forwards.clone();
+        let parent = win.window.clone();
+
+        let refresh_impl: Rc<dyn Fn()> = Rc::new(move || {
+            render_forward_cards(
+                &forward_flow,
+                &forward_container,
+                &config,
+                &forward_manager,
+                &refresh_handle,
+                &parent,
+            );
+        });
+        *refresh_forwards.borrow_mut() = Some(refresh_impl.clone());
+        refresh_impl();
+    }
+
     {
         let parent = win.window.clone();
         let config = config.clone();
         let refresh_connections = refresh_connections.clone();
+        let refresh_forwards = refresh_forwards.clone();
+        let view_stack = win.view_stack.clone();
         win.add_connection.connect_clicked(move |_| {
-            show_profile_dialog(&parent, config.clone(), None, refresh_connections.clone());
+            if view_stack.visible_child_name().as_deref() == Some("forward") {
+                show_forward_dialog(&parent, config.clone(), None, refresh_forwards.clone());
+            } else {
+                show_profile_dialog(&parent, config.clone(), None, refresh_connections.clone());
+            }
         });
     }
     {
@@ -301,6 +356,30 @@ pub fn build_ui(app: &adw::Application) {
         let refresh_connections = refresh_connections.clone();
         connect_view.empty_add_button.connect_clicked(move |_| {
             show_profile_dialog(&parent, config.clone(), None, refresh_connections.clone());
+        });
+    }
+    {
+        let parent = win.window.clone();
+        let config = config.clone();
+        let refresh_forwards = refresh_forwards.clone();
+        forward_view.empty_add_button.connect_clicked(move |_| {
+            show_forward_dialog(&parent, config.clone(), None, refresh_forwards.clone());
+        });
+    }
+
+    // 4.2 自动启动已启用的端口转发
+    {
+        let config_clone = config.borrow().clone();
+        let forward_manager_clone = forward_manager.clone();
+        tokio::spawn(async move {
+            let mut mgr = forward_manager_clone.lock().await;
+            for rule in config_clone.port_forwards {
+                if rule.enabled {
+                    if let Some(profile) = config_clone.profiles.iter().find(|p| p.id == rule.profile_id) {
+                        let _ = mgr.start(&rule, profile).await;
+                    }
+                }
+            }
         });
     }
 
@@ -565,6 +644,7 @@ pub fn build_ui(app: &adw::Application) {
         let quit_controller = controller.clone();
         let quitting_ref = quitting.clone();
         let log_buffer_ref = logs_view.proxy_log_buffer.clone();
+        let quit_forward_manager = forward_manager.clone();
         match TrayManager::new(
             Rc::new(move || {
                 let current = profiles_config.borrow();
@@ -612,6 +692,10 @@ pub fn build_ui(app: &adw::Application) {
             Rc::new(move || {
                 *quitting_ref.borrow_mut() = true;
                 quit_controller.borrow().shutdown();
+                let f_mgr = quit_forward_manager.clone();
+                tokio::spawn(async move {
+                    f_mgr.lock().await.stop_all().await;
+                });
                 quit_app.quit();
             }),
         ) {

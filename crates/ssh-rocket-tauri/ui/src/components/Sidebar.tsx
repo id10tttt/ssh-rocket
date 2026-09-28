@@ -4,11 +4,12 @@ import {
   ShieldCheck, 
   Activity, 
   ScrollText, 
+  ArrowLeftRight,
   Settings as SettingsIcon,
   AppWindow
 } from 'lucide-react';
 
-export type NavTab = 'connect' | 'rules' | 'traffic' | 'logs' | 'settings';
+export type NavTab = 'connect' | 'rules' | 'traffic' | 'logs' | 'forward' | 'settings';
 
 interface SidebarProps {
   activeTab: NavTab;
@@ -28,6 +29,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'rules', label: '分流规则', icon: ShieldCheck },
     { id: 'traffic', label: '实时流量', icon: Activity },
     { id: 'logs', label: '运行日志', icon: ScrollText },
+    { id: 'forward', label: '端口转发', icon: ArrowLeftRight },
     { id: 'settings', label: '系统设置', icon: SettingsIcon },
   ];
 

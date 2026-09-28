@@ -4110,6 +4110,7 @@ dependencies = [
  "ssh-rocket-core",
  "ssh-rocket-runtime",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -4139,6 +4140,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tun2proxy",
+ "uuid",
 ]
 
 [[package]]

@@ -1,6 +1,7 @@
 pub mod connect_view;
 pub mod dialogs;
 pub mod floating_widget;
+pub mod forward_view;
 pub mod logs_view;
 pub mod rules_view;
 pub mod settings_view;

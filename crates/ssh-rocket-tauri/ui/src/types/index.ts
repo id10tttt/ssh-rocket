@@ -38,9 +38,24 @@ export interface Settings {
   imported_ip_rules: IpRule[];
 }
 
+export type ForwardType = 'local' | 'remote';
+
+export interface PortForwardRule {
+  id: string;
+  name: string;
+  profile_id: string;
+  forward_type: ForwardType;
+  local_host: string;
+  local_port: number;
+  remote_host: string;
+  remote_port: number;
+  enabled: boolean;
+}
+
 export interface AppConfig {
   active_profile_id: string | null;
   profiles: Profile[];
+  port_forwards: PortForwardRule[];
   settings: Settings;
 }
 

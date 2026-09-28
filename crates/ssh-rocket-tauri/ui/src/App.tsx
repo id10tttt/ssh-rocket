@@ -6,6 +6,7 @@ import { ConnectView } from './views/ConnectView';
 import { RulesView } from './views/RulesView';
 import { TrafficView } from './views/TrafficView';
 import { LogsView } from './views/LogsView';
+import { ForwardView } from './views/ForwardView';
 import { SettingsView } from './views/SettingsView';
 import { 
   AppConfig, 
@@ -163,6 +164,12 @@ export function App() {
           <LogsView
             logs={logs}
             onClearLogs={() => setLogs([])}
+          />
+        )}
+        {activeTab === 'forward' && (
+          <ForwardView
+            config={config}
+            onSaveConfig={handleSaveConfig}
           />
         )}
         {activeTab === 'settings' && (

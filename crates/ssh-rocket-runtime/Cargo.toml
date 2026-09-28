@@ -16,6 +16,7 @@ ssh-rocket-core = { path = "../ssh-rocket-core" }
 tokio.workspace = true
 tokio-util.workspace = true
 tun2proxy = { version = "0.8.3", default-features = false }
+uuid.workspace = true
 
 [[bin]]
 name = "ssh-rocket-helper"

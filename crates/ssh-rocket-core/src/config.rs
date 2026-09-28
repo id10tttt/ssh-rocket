@@ -213,12 +213,59 @@ pub struct IpRule {
     pub action: RuleAction,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ForwardType {
+    #[default]
+    Local,
+    Remote,
+}
+
+pub fn default_forward_host() -> String {
+    "127.0.0.1".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortForwardRule {
+    pub id: Uuid,
+    pub name: String,
+    pub profile_id: Uuid,
+    #[serde(default)]
+    pub forward_type: ForwardType,
+    #[serde(default = "default_forward_host")]
+    pub local_host: String,
+    pub local_port: u16,
+    #[serde(default = "default_forward_host")]
+    pub remote_host: String,
+    pub remote_port: u16,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for PortForwardRule {
+    fn default() -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name: String::new(),
+            profile_id: Uuid::nil(),
+            forward_type: ForwardType::Local,
+            local_host: default_forward_host(),
+            local_port: 0,
+            remote_host: default_forward_host(),
+            remote_port: 0,
+            enabled: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     #[serde(default)]
     pub profiles: Vec<Profile>,
     #[serde(default)]
     pub active_profile: Option<Uuid>,
+    #[serde(default)]
+    pub port_forwards: Vec<PortForwardRule>,
     #[serde(default)]
     pub settings: GlobalSettings,
 }
@@ -344,5 +391,37 @@ mod tests {
         assert!((decoded.floating_widget.idle_opacity - 0.35).abs() < 1e-4);
         assert_eq!(decoded.floating_widget.fade_delay_secs, 10);
         assert_eq!(decoded.floating_widget.speed_decimals, 2);
+    }
+
+    #[test]
+    fn test_port_forward_rule_serialization() {
+        let old_json = r#"{
+            "profiles": [],
+            "settings": {}
+        }"#;
+        let config: AppConfig = serde_json::from_str(old_json).expect("deserialize old config without port_forwards");
+        assert!(config.port_forwards.is_empty());
+
+        let rule = PortForwardRule {
+            id: Uuid::new_v4(),
+            name: "MySQL 映射".into(),
+            profile_id: Uuid::new_v4(),
+            forward_type: ForwardType::Local,
+            local_host: "127.0.0.1".into(),
+            local_port: 13306,
+            remote_host: "127.0.0.1".into(),
+            remote_port: 3306,
+            enabled: true,
+        };
+        let mut new_config = AppConfig::default();
+        new_config.port_forwards.push(rule.clone());
+
+        let json = serde_json::to_string(&new_config).expect("serialize config with port_forwards");
+        let decoded: AppConfig = serde_json::from_str(&json).expect("deserialize config with port_forwards");
+        assert_eq!(decoded.port_forwards.len(), 1);
+        assert_eq!(decoded.port_forwards[0].name, "MySQL 映射");
+        assert_eq!(decoded.port_forwards[0].forward_type, ForwardType::Local);
+        assert_eq!(decoded.port_forwards[0].local_port, 13306);
+        assert_eq!(decoded.port_forwards[0].remote_port, 3306);
     }
 }

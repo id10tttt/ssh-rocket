@@ -16,6 +16,8 @@ pub struct MainWindowWidgets {
     pub traffic_nav_label: gtk::Label,
     pub logs_nav: gtk::ListBoxRow,
     pub logs_nav_label: gtk::Label,
+    pub forward_nav: gtk::ListBoxRow,
+    pub forward_nav_label: gtk::Label,
     pub settings_nav: gtk::ListBoxRow,
     pub settings_nav_label: gtk::Label,
     pub header: adw::HeaderBar,
@@ -68,12 +70,14 @@ pub fn create_main_window(app: &adw::Application) -> MainWindowWidgets {
     let (rules_nav, rules_nav_label) = create_navigation_row("ssh-rocket-rules-symbolic", tr("nav.rules"));
     let (traffic_nav, traffic_nav_label) = create_navigation_row("ssh-rocket-traffic-symbolic", tr("nav.traffic"));
     let (logs_nav, logs_nav_label) = create_navigation_row("ssh-rocket-logs-symbolic", tr("nav.logs"));
+    let (forward_nav, forward_nav_label) = create_navigation_row("network-transmit-receive-symbolic", tr("nav.forward"));
     let (settings_nav, settings_nav_label) = create_navigation_row("preferences-system-symbolic", tr("nav.settings"));
 
     navigation.append(&connect_nav);
     navigation.append(&rules_nav);
     navigation.append(&traffic_nav);
     navigation.append(&logs_nav);
+    navigation.append(&forward_nav);
     navigation.append(&settings_nav);
     sidebar.append(&navigation);
     root.append(&sidebar);
@@ -147,6 +151,8 @@ pub fn create_main_window(app: &adw::Application) -> MainWindowWidgets {
         traffic_nav_label,
         logs_nav,
         logs_nav_label,
+        forward_nav,
+        forward_nav_label,
         settings_nav,
         settings_nav_label,
         header,

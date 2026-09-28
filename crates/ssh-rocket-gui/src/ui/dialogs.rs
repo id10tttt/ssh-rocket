@@ -1,17 +1,22 @@
 use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
-use ssh_rocket_core::{parse_rule_set, AppConfig, AuthType, Profile, RuleAction};
+use ssh_rocket_core::{
+    default_forward_host, parse_rule_set, AppConfig, AuthType, ForwardType, PortForwardRule,
+    Profile, RuleAction,
+};
 use std::{
     cell::{Cell, RefCell},
     path::PathBuf,
     rc::Rc,
 };
+use uuid::Uuid;
 
 use crate::{i18n::tr, ListedRule};
 
 pub type RefreshConnections = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
 pub type RefreshRules = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+pub type RefreshForwards = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
 
 /// 显示节点连接配置对话框
 pub fn show_profile_dialog(
@@ -421,5 +426,234 @@ pub fn show_rule_dialog(
             }
         }
     });
+    dialog.present(Some(parent));
+}
+
+/// 显示端口转发规则配置对话框
+pub fn show_forward_dialog(
+    parent: &adw::ApplicationWindow,
+    config: Rc<RefCell<AppConfig>>,
+    rule: Option<PortForwardRule>,
+    refresh: RefreshForwards,
+) {
+    let editing = rule.is_some();
+    let source = rule.unwrap_or_default();
+    let dialog = adw::AlertDialog::new(
+        Some(if editing {
+            tr("dialog.forward.title_edit")
+        } else {
+            tr("dialog.forward.title_new")
+        }),
+        None,
+    );
+
+    let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    card.add_css_class("card");
+    card.set_width_request(460);
+
+    let info = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    info.set_margin_start(16);
+    info.set_margin_end(16);
+    info.set_margin_top(14);
+    info.set_margin_bottom(14);
+
+    let make_row = |label_text: &str, widget: &gtk::Widget| -> gtk::Box {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        row.set_valign(gtk::Align::Center);
+        let label = gtk::Label::new(Some(label_text));
+        label.add_css_class("dim-label");
+        label.set_halign(gtk::Align::Start);
+        label.set_width_request(100);
+        label.set_xalign(0.0);
+        row.append(&label);
+        row.append(widget);
+        row
+    };
+
+    // 规则名称
+    let name_entry = gtk::Entry::builder()
+        .text(&source.name)
+        .placeholder_text(tr("dialog.forward.name"))
+        .hexpand(true)
+        .build();
+    let name_row = make_row(tr("dialog.forward.name"), name_entry.upcast_ref());
+
+    // 转发类型（本地转发 -L / 远程转发 -R）
+    let type_labels = [tr("forward.type.local"), tr("forward.type.remote")];
+    let type_dropdown = gtk::DropDown::from_strings(&type_labels);
+    type_dropdown.set_selected(match source.forward_type {
+        ForwardType::Local => 0,
+        ForwardType::Remote => 1,
+    });
+    type_dropdown.set_hexpand(true);
+    let type_row = make_row(tr("dialog.forward.type"), type_dropdown.upcast_ref());
+
+    // SSH 连接（从 profiles 中选择）
+    let profiles = config.borrow().profiles.clone();
+    let profile_strings: Vec<String> = profiles
+        .iter()
+        .map(|p| format!("{} ({}:{})", p.name, p.host, p.port))
+        .collect();
+    let profile_str_slices: Vec<&str> = profile_strings.iter().map(String::as_str).collect();
+
+    let initial_profile_index = if profiles.is_empty() {
+        0
+    } else {
+        profiles
+            .iter()
+            .position(|p| p.id == source.profile_id)
+            .unwrap_or(0) as u32
+    };
+
+    let profile_dropdown = gtk::DropDown::from_strings(&profile_str_slices);
+    profile_dropdown.set_selected(initial_profile_index);
+    profile_dropdown.set_hexpand(true);
+    if profiles.is_empty() {
+        profile_dropdown.set_sensitive(false);
+    }
+    let profile_row = make_row(tr("dialog.forward.connection"), profile_dropdown.upcast_ref());
+
+    // 本地主机与端口
+    let local_host_entry = gtk::Entry::builder()
+        .text(if source.local_host.is_empty() {
+            default_forward_host()
+        } else {
+            source.local_host.clone()
+        })
+        .hexpand(true)
+        .build();
+    let local_host_row = make_row(tr("dialog.forward.local_host"), local_host_entry.upcast_ref());
+
+    let local_port_entry = gtk::Entry::builder()
+        .text(if source.local_port > 0 {
+            source.local_port.to_string()
+        } else {
+            String::new()
+        })
+        .placeholder_text("例如: 8080")
+        .hexpand(true)
+        .build();
+    let local_port_row = make_row(tr("dialog.forward.local_port"), local_port_entry.upcast_ref());
+
+    // 远端主机与端口
+    let remote_host_entry = gtk::Entry::builder()
+        .text(if source.remote_host.is_empty() {
+            default_forward_host()
+        } else {
+            source.remote_host.clone()
+        })
+        .hexpand(true)
+        .build();
+    let remote_host_row = make_row(tr("dialog.forward.remote_host"), remote_host_entry.upcast_ref());
+
+    let remote_port_entry = gtk::Entry::builder()
+        .text(if source.remote_port > 0 {
+            source.remote_port.to_string()
+        } else {
+            String::new()
+        })
+        .placeholder_text("例如: 80")
+        .hexpand(true)
+        .build();
+    let remote_port_row = make_row(tr("dialog.forward.remote_port"), remote_port_entry.upcast_ref());
+
+    info.append(&name_row);
+    info.append(&type_row);
+    info.append(&profile_row);
+    info.append(&local_host_row);
+    info.append(&local_port_row);
+    info.append(&remote_host_row);
+    info.append(&remote_port_row);
+    card.append(&info);
+    dialog.set_extra_child(Some(&card));
+
+    dialog.add_response("cancel", tr("dialog.cancel"));
+    dialog.add_response("save", tr("dialog.save"));
+    dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+
+    let saved_id = source.id;
+    let profiles_clone = profiles.clone();
+
+    dialog.connect_response(None, move |dialog, response| {
+        if response != "save" {
+            return;
+        }
+        if profiles_clone.is_empty() {
+            dialog.set_body(tr("dialog.forward.no_connection"));
+            return;
+        }
+
+        let l_port = match local_port_entry.text().trim().parse::<u16>() {
+            Ok(p) if p > 0 => p,
+            _ => {
+                dialog.set_body("本地端口必须为 1-65535 之间的有效数字");
+                return;
+            }
+        };
+
+        let r_port = match remote_port_entry.text().trim().parse::<u16>() {
+            Ok(p) if p > 0 => p,
+            _ => {
+                dialog.set_body("目标端口必须为 1-65535 之间的有效数字");
+                return;
+            }
+        };
+
+        let selected_profile_idx = profile_dropdown.selected() as usize;
+        let selected_profile_id = match profiles_clone.get(selected_profile_idx) {
+            Some(p) => p.id,
+            None => {
+                dialog.set_body(tr("dialog.forward.no_connection"));
+                return;
+            }
+        };
+
+        let forward_type = if type_dropdown.selected() == 1 {
+            ForwardType::Remote
+        } else {
+            ForwardType::Local
+        };
+
+        let mut name = name_entry.text().trim().to_string();
+        if name.is_empty() {
+            name = match forward_type {
+                ForwardType::Local => format!("{}:{} -> {}:{}", local_host_entry.text().trim(), l_port, remote_host_entry.text().trim(), r_port),
+                ForwardType::Remote => format!("{}:{} <- {}:{}", remote_host_entry.text().trim(), r_port, local_host_entry.text().trim(), l_port),
+            };
+        }
+
+        let updated_rule = PortForwardRule {
+            id: if editing { saved_id } else { Uuid::new_v4() },
+            name,
+            profile_id: selected_profile_id,
+            forward_type,
+            local_host: {
+                let h = local_host_entry.text().trim().to_string();
+                if h.is_empty() { default_forward_host() } else { h }
+            },
+            local_port: l_port,
+            remote_host: {
+                let h = remote_host_entry.text().trim().to_string();
+                if h.is_empty() { default_forward_host() } else { h }
+            },
+            remote_port: r_port,
+            enabled: source.enabled,
+        };
+
+        let mut current = config.borrow_mut();
+        if let Some(pos) = current.port_forwards.iter().position(|r| r.id == updated_rule.id) {
+            current.port_forwards[pos] = updated_rule;
+        } else {
+            current.port_forwards.push(updated_rule);
+        }
+
+        if current.save().is_ok() {
+            drop(current);
+            if let Some(refresh) = refresh.borrow().as_ref() {
+                refresh();
+            }
+        }
+    });
+
     dialog.present(Some(parent));
 }
