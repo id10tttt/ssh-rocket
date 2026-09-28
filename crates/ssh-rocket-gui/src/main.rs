@@ -7,6 +7,7 @@ mod sys_monitor;
 pub mod traffic_tracker;
 mod tray;
 pub mod ui;
+pub mod ssh_key;
 
 use adw::prelude::*;
 use libadwaita as adw;

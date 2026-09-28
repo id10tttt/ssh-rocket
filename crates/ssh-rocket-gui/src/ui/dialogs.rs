@@ -2,7 +2,11 @@ use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
 use ssh_rocket_core::{parse_rule_set, AppConfig, AuthType, Profile, RuleAction};
-use std::{cell::RefCell, path::PathBuf, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    path::PathBuf,
+    rc::Rc,
+};
 
 use crate::{i18n::tr, ListedRule};
 
@@ -49,40 +53,151 @@ pub fn show_profile_dialog(
         })
         .build();
 
-    let identity = adw::EntryRow::builder()
+    // 收集可用 SSH 私钥列表
+    let mut discovered = crate::ssh_key::scan_ssh_keys();
+    if let Some(existing_path) = &source.identity_file {
+        if !existing_path.as_os_str().is_empty() && !discovered.iter().any(|k| &k.path == existing_path) {
+            let name = existing_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("Custom Key")
+                .to_string();
+            discovered.insert(0, crate::ssh_key::DiscoveredKey {
+                name,
+                path: existing_path.clone(),
+            });
+        }
+    }
+
+    let key_items: Rc<RefCell<Vec<(String, Option<PathBuf>)>>> = Rc::new(RefCell::new(
+        discovered
+            .into_iter()
+            .map(|k| (k.name, Some(k.path)))
+            .collect(),
+    ));
+
+    let string_list = gtk::StringList::new(&[]);
+    for (name, _) in key_items.borrow().iter() {
+        string_list.append(name);
+    }
+    string_list.append(tr("dialog.profile.identity_browse"));
+
+    let mut initial_selected: u32 = 0;
+    if let Some(target) = &source.identity_file {
+        if let Some(idx) = key_items.borrow().iter().position(|(_, p)| p.as_ref() == Some(target)) {
+            initial_selected = idx as u32;
+        }
+    }
+
+    let identity_row = adw::ComboRow::builder()
         .title(tr("dialog.profile.identity"))
-        .text(
-            source
-                .identity_file
-                .as_ref()
-                .map(|path| path.to_string_lossy())
-                .unwrap_or_default(),
-        )
+        .model(&string_list)
+        .selected(initial_selected)
         .build();
+
+    let last_selected = Rc::new(Cell::new(initial_selected));
+    let is_updating = Rc::new(Cell::new(false));
+
+    let update_subtitle = {
+        let identity_row = identity_row.clone();
+        let key_items = key_items.clone();
+        Rc::new(move || {
+            let sel = identity_row.selected() as usize;
+            let items = key_items.borrow();
+            if let Some((_, Some(path))) = items.get(sel) {
+                identity_row.set_subtitle(&path.to_string_lossy());
+            } else {
+                identity_row.set_subtitle("");
+            }
+        })
+    };
+    update_subtitle();
+
+    let open_file_chooser = {
+        let parent = parent.clone();
+        let key_items = key_items.clone();
+        let string_list = string_list.clone();
+        let identity_row = identity_row.clone();
+        let last_selected = last_selected.clone();
+        let is_updating = is_updating.clone();
+        Rc::new(move || {
+            let file_dialog = gtk::FileDialog::builder()
+                .title(tr("dialog.profile.identity_dialog"))
+                .modal(true)
+                .build();
+            let key_items = key_items.clone();
+            let string_list = string_list.clone();
+            let identity_row = identity_row.clone();
+            let last_selected = last_selected.clone();
+            let is_updating = is_updating.clone();
+            file_dialog.open(Some(&parent), gtk::gio::Cancellable::NONE, move |result| {
+                if let Ok(file) = result {
+                    if let Some(path) = file.path() {
+                        let mut items = key_items.borrow_mut();
+                        if let Some(existing_idx) = items.iter().position(|(_, p)| p.as_ref() == Some(&path)) {
+                            is_updating.set(true);
+                            identity_row.set_selected(existing_idx as u32);
+                            identity_row.set_subtitle(&path.to_string_lossy());
+                            last_selected.set(existing_idx as u32);
+                            is_updating.set(false);
+                        } else {
+                            let name = path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("Custom Key")
+                                .to_string();
+                            let insert_pos = items.len();
+                            items.push((name.clone(), Some(path.clone())));
+                            string_list.splice(insert_pos as u32, 0, &[&name]);
+                            is_updating.set(true);
+                            identity_row.set_selected(insert_pos as u32);
+                            identity_row.set_subtitle(&path.to_string_lossy());
+                            last_selected.set(insert_pos as u32);
+                            is_updating.set(false);
+                        }
+                        return;
+                    }
+                }
+                is_updating.set(true);
+                identity_row.set_selected(last_selected.get());
+                is_updating.set(false);
+            });
+        })
+    };
+
+    {
+        let key_items = key_items.clone();
+        let open_file_chooser = open_file_chooser.clone();
+        let last_selected = last_selected.clone();
+        let is_updating = is_updating.clone();
+        identity_row.connect_selected_notify(move |row| {
+            if is_updating.get() {
+                return;
+            }
+            let sel = row.selected() as usize;
+            let items = key_items.borrow();
+            if sel < items.len() {
+                if let Some((_, Some(path))) = items.get(sel) {
+                    row.set_subtitle(&path.to_string_lossy());
+                    last_selected.set(sel as u32);
+                }
+            } else {
+                open_file_chooser();
+            }
+        });
+    }
 
     let browse_btn = gtk::Button::from_icon_name("document-open-symbolic");
     browse_btn.add_css_class("flat");
     browse_btn.set_valign(gtk::Align::Center);
     browse_btn.set_tooltip_text(Some(tr("dialog.profile.identity_btn")));
     {
-        let identity_clone = identity.clone();
-        let parent_clone = parent.clone();
+        let open_file_chooser = open_file_chooser.clone();
         browse_btn.connect_clicked(move |_| {
-            let file_dialog = gtk::FileDialog::builder()
-                .title(tr("dialog.profile.identity_dialog"))
-                .modal(true)
-                .build();
-            let identity_ref = identity_clone.clone();
-            file_dialog.open(Some(&parent_clone), gtk::gio::Cancellable::NONE, move |result| {
-                if let Ok(file) = result {
-                    if let Some(path) = file.path() {
-                        identity_ref.set_text(&path.to_string_lossy());
-                    }
-                }
-            });
+            open_file_chooser();
         });
     }
-    identity.add_suffix(&browse_btn);
+    identity_row.add_suffix(&browse_btn);
 
     let password_row = adw::PasswordEntryRow::builder()
         .title(tr("dialog.profile.password"))
@@ -90,12 +205,12 @@ pub fn show_profile_dialog(
         .build();
 
     let update_auth_visibility = {
-        let identity = identity.clone();
+        let identity_row = identity_row.clone();
         let password_row = password_row.clone();
         let auth_type_row = auth_type_row.clone();
         Rc::new(move || {
             let is_key = auth_type_row.selected() == 0;
-            identity.set_visible(is_key);
+            identity_row.set_visible(is_key);
             password_row.set_visible(!is_key);
         })
     };
@@ -112,7 +227,7 @@ pub fn show_profile_dialog(
     group.add(&port);
     group.add(&username);
     group.add(&auth_type_row);
-    group.add(&identity);
+    group.add(&identity_row);
     group.add(&password_row);
     dialog.set_extra_child(Some(&group));
 
@@ -141,8 +256,9 @@ pub fn show_profile_dialog(
         let is_key = auth_type_row.selected() == 0;
         saved.auth_type = if is_key { AuthType::Key } else { AuthType::Password };
         if is_key {
-            let identity_text = identity.text().trim().to_string();
-            saved.identity_file = (!identity_text.is_empty()).then(|| PathBuf::from(identity_text));
+            let sel = identity_row.selected() as usize;
+            let items = key_items.borrow();
+            saved.identity_file = items.get(sel).and_then(|(_, p)| p.clone());
             saved.password = None;
         } else {
             let pwd_text = password_row.text().to_string();
