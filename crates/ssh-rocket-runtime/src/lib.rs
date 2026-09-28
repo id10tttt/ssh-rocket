@@ -1,4 +1,6 @@
+pub mod dns_router;
 pub mod ipc;
+pub mod system;
 mod helper_client;
 mod ssh;
 
