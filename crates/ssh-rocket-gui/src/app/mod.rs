@@ -40,9 +40,6 @@ use crate::{
     },
     ActiveConnectionStat, AppTrafficStat,
 };
-use ssh_rocket_runtime::ForwardManager;
-use std::sync::Arc;
-use tokio::sync::Mutex as TokioMutex;
 
 pub fn apply_theme_mode(mode: ThemeMode) {
     let style_manager = adw::StyleManager::default();
@@ -92,9 +89,9 @@ pub fn build_ui(app: &adw::Application) {
     let connection_buttons = Rc::new(RefCell::new(Vec::<(String, gtk::Button)>::new()));
     let refresh_connections: RefreshConnections = Rc::new(RefCell::new(None));
     let refresh_forwards: RefreshForwards = Rc::new(RefCell::new(None));
-    let forward_manager = Arc::new(TokioMutex::new(ForwardManager::new()));
     let tray_manager = Rc::new(RefCell::new(None::<Rc<TrayManager>>));
     let quitting = Rc::new(RefCell::new(false));
+    let request_shutdown: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
 
     let floating_widget: Rc<RefCell<Option<FloatingWidget>>> = Rc::new(RefCell::new(None));
     let sys_monitor = Rc::new(RefCell::new(SystemMonitor::new()));
@@ -318,7 +315,8 @@ pub fn build_ui(app: &adw::Application) {
         let forward_flow = forward_view.forward_flow.clone();
         let forward_container = forward_view.container.clone();
         let config = config.clone();
-        let forward_manager = forward_manager.clone();
+        let controller = controller.clone();
+        let event_tx = event_tx.clone();
         let refresh_handle = refresh_forwards.clone();
         let parent = win.window.clone();
 
@@ -327,7 +325,8 @@ pub fn build_ui(app: &adw::Application) {
                 &forward_flow,
                 &forward_container,
                 &config,
-                &forward_manager,
+                &controller,
+                &event_tx,
                 &refresh_handle,
                 &parent,
             );
@@ -370,17 +369,9 @@ pub fn build_ui(app: &adw::Application) {
     // 4.2 自动启动已启用的端口转发
     {
         let config_clone = config.borrow().clone();
-        let forward_manager_clone = forward_manager.clone();
-        tokio::spawn(async move {
-            let mut mgr = forward_manager_clone.lock().await;
-            for rule in config_clone.port_forwards {
-                if rule.enabled {
-                    if let Some(profile) = config_clone.profiles.iter().find(|p| p.id == rule.profile_id) {
-                        let _ = mgr.start(&rule, profile).await;
-                    }
-                }
-            }
-        });
+        controller
+            .borrow()
+            .start_enabled_forwards(config_clone, event_tx.clone());
     }
 
     // 5. 应用列表初始化
@@ -644,7 +635,24 @@ pub fn build_ui(app: &adw::Application) {
         let quit_controller = controller.clone();
         let quitting_ref = quitting.clone();
         let log_buffer_ref = logs_view.proxy_log_buffer.clone();
-        let quit_forward_manager = forward_manager.clone();
+        let quit_action: Rc<dyn Fn()> = Rc::new(move || {
+            if *quitting_ref.borrow() {
+                return;
+            }
+            *quitting_ref.borrow_mut() = true;
+            let completed = quit_controller.borrow().shutdown();
+            let quit_app = quit_app.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+                match completed.try_recv() {
+                    Ok(()) | Err(mpsc::TryRecvError::Disconnected) => {
+                        quit_app.quit();
+                        glib::ControlFlow::Break
+                    }
+                    Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                }
+            });
+        });
+        *request_shutdown.borrow_mut() = Some(quit_action.clone());
         match TrayManager::new(
             Rc::new(move || {
                 let current = profiles_config.borrow();
@@ -689,15 +697,7 @@ pub fn build_ui(app: &adw::Application) {
                 }
             }),
             Rc::new(move || show_window.present()),
-            Rc::new(move || {
-                *quitting_ref.borrow_mut() = true;
-                quit_controller.borrow().shutdown();
-                let f_mgr = quit_forward_manager.clone();
-                tokio::spawn(async move {
-                    f_mgr.lock().await.stop_all().await;
-                });
-                quit_app.quit();
-            }),
+            quit_action,
         ) {
             Ok(manager) => {
                 *tray_manager.borrow_mut() = Some(Rc::new(manager));
@@ -766,16 +766,20 @@ pub fn build_ui(app: &adw::Application) {
         let tray_manager = tray_manager.clone();
         let floating_widget = floating_widget.clone();
         let quitting = quitting.clone();
+        let request_shutdown = request_shutdown.clone();
         win.window.connect_close_request(move |window| {
-            if !*quitting.borrow() && tray_manager.borrow().is_some() {
-                window.set_visible(false);
-                gtk::glib::Propagation::Stop
-            } else {
-                if let Some(hud) = floating_widget.borrow().as_ref() {
-                    hud.window.destroy();
+            if !*quitting.borrow() {
+                if tray_manager.borrow().is_some() {
+                    window.set_visible(false);
+                } else if let Some(shutdown) = request_shutdown.borrow().as_ref() {
+                    shutdown();
                 }
-                gtk::glib::Propagation::Proceed
+                return gtk::glib::Propagation::Stop;
             }
+            if let Some(hud) = floating_widget.borrow().as_ref() {
+                hud.window.destroy();
+            }
+            gtk::glib::Propagation::Proceed
         });
     }
 

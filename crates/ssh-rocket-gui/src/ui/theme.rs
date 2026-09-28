@@ -135,7 +135,6 @@ pub fn init_theme() {
             background-color: alpha(currentColor, 0.08);
             border-radius: 6px;
             min-height: 12px;
-            overflow: hidden;
         }
         .distribution-seg-proxy {
             background-color: #2ec27e;
@@ -221,7 +220,6 @@ pub fn init_theme() {
             font-family: monospace;
             min-width: 26px;
             font-weight: bold;
-            text-align: left;
         }
         ",
     );

@@ -2,14 +2,13 @@ use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
 use ssh_rocket_core::{AppConfig, ForwardType};
-use std::{cell::RefCell, rc::Rc, sync::Arc};
-use tokio::sync::Mutex;
+use std::{cell::RefCell, rc::Rc, sync::mpsc};
 
 use crate::{
+    controller::{RuntimeController, RuntimeEvent},
     i18n::tr,
     ui::dialogs::{show_forward_dialog, RefreshForwards},
 };
-use ssh_rocket_runtime::ForwardManager;
 
 #[derive(Clone)]
 pub struct ForwardView {
@@ -77,7 +76,8 @@ pub fn render_forward_cards(
     forward_flow: &gtk::FlowBox,
     container: &gtk::Stack,
     config: &Rc<RefCell<AppConfig>>,
-    forward_manager: &Arc<Mutex<ForwardManager>>,
+    controller: &Rc<RefCell<RuntimeController>>,
+    event_tx: &mpsc::Sender<RuntimeEvent>,
     refresh_handle: &RefreshForwards,
     parent: &adw::ApplicationWindow,
 ) {
@@ -148,7 +148,8 @@ pub fn render_forward_cards(
 
         {
             let config_clone = config.clone();
-            let forward_manager_clone = forward_manager.clone();
+            let controller_clone = controller.clone();
+            let event_tx = event_tx.clone();
             let rule_id = rule.id;
             let dot_clone = dot.clone();
             switch.connect_state_set(move |_, state| {
@@ -166,17 +167,12 @@ pub fn render_forward_cards(
                         dot_clone.remove_css_class("status-dot-connected");
                     }
 
-                    let mgr = forward_manager_clone.clone();
-                    tokio::spawn(async move {
-                        let mut m = mgr.lock().await;
-                        if state {
-                            if let Some(profile) = profile_opt {
-                                let _ = m.start(&rule_clone, &profile).await;
-                            }
-                        } else {
-                            m.stop(&rule_id).await;
-                        }
-                    });
+                    controller_clone.borrow().set_forward_enabled(
+                        rule_clone,
+                        profile_opt,
+                        state,
+                        event_tx.clone(),
+                    );
                 }
                 gtk::glib::Propagation::Proceed
             });
@@ -207,7 +203,8 @@ pub fn render_forward_cards(
         {
             let config_clone = config.clone();
             let refresh_clone = refresh_handle.clone();
-            let forward_manager_clone = forward_manager.clone();
+            let controller_clone = controller.clone();
+            let event_tx = event_tx.clone();
             let rule_id = rule.id;
             delete_btn.connect_clicked(move |_| {
                 let mut current = config_clone.borrow_mut();
@@ -215,11 +212,9 @@ pub fn render_forward_cards(
                 let _ = current.save();
                 drop(current);
 
-                let mgr = forward_manager_clone.clone();
-                tokio::spawn(async move {
-                    let mut m = mgr.lock().await;
-                    m.stop(&rule_id).await;
-                });
+                controller_clone
+                    .borrow()
+                    .stop_forward(rule_id, event_tx.clone());
 
                 if let Some(refresh) = refresh_clone.borrow().as_ref() {
                     refresh();

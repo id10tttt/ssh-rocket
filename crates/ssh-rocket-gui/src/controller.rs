@@ -1,5 +1,7 @@
-use ssh_rocket_core::{AppConfig, Profile, RuleImportResult};
-use ssh_rocket_runtime::{check_dns_health, check_socks_health, PrivilegedHelperSession, SshSession};
+use ssh_rocket_core::{AppConfig, PortForwardRule, Profile, RuleImportResult};
+use ssh_rocket_runtime::{
+    check_dns_health, check_socks_health, ForwardManager, PrivilegedHelperSession, SshSession,
+};
 use std::{
     cell::RefCell,
     path::PathBuf,
@@ -13,8 +15,10 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
+    runtime::Handle,
     sync::{oneshot, Mutex},
 };
+use uuid::Uuid;
 
 use crate::{
     app_scanner::scan_desktop_apps,
@@ -47,6 +51,7 @@ pub struct RuntimeController {
     is_running: Arc<AtomicBool>,
     generation: Arc<AtomicU64>,
     worker: Arc<Mutex<()>>,
+    forward_manager: Arc<Mutex<ForwardManager>>,
     runtime: Arc<tokio::runtime::Runtime>,
 }
 
@@ -62,6 +67,7 @@ impl Default for RuntimeController {
             is_running: Arc::new(AtomicBool::new(false)),
             generation: Arc::new(AtomicU64::new(0)),
             worker: Arc::new(Mutex::new(())),
+            forward_manager: Arc::new(Mutex::new(ForwardManager::new())),
             runtime: Arc::new(runtime),
         }
     }
@@ -80,17 +86,121 @@ impl RuntimeController {
         }
     }
 
-    pub fn shutdown(&self) {
+    /// 在后台清理透明代理与端口转发资源，并在完成后通知 UI。
+    pub fn shutdown(&self) -> mpsc::Receiver<()> {
         self.stop();
         let helper = self.helper.clone();
+        let forward_manager = self.forward_manager.clone();
         let runtime = self.runtime.clone();
+        let (completed_tx, completed_rx) = mpsc::channel();
         thread::spawn(move || {
             runtime.block_on(async {
-                let mut guard = helper.lock().await;
-                if let Some(mut h) = guard.take() {
-                    h.shutdown().await;
-                }
+                let shutdown_helper = async {
+                    let mut guard = helper.lock().await;
+                    if let Some(mut h) = guard.take() {
+                        h.shutdown().await;
+                    }
+                };
+                let shutdown_forwards = async {
+                    forward_manager.lock().await.stop_all().await;
+                };
+                tokio::join!(shutdown_helper, shutdown_forwards);
             });
+            let _ = completed_tx.send(());
+        });
+        completed_rx
+    }
+
+    /// 启动配置中所有已启用的端口转发规则。
+    pub fn start_enabled_forwards(
+        &self,
+        config: AppConfig,
+        events: mpsc::Sender<RuntimeEvent>,
+    ) {
+        let forward_manager = self.forward_manager.clone();
+        self.runtime.spawn(async move {
+            let mut manager = forward_manager.lock().await;
+            for rule in config.port_forwards.iter().filter(|rule| rule.enabled) {
+                let Some(profile) = config
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == rule.profile_id)
+                else {
+                    let _ = events.send(RuntimeEvent::Log(format!(
+                        "[forward] 无法启动 {}：未找到关联的 SSH 节点",
+                        rule.name
+                    )));
+                    continue;
+                };
+                match manager.start(rule, profile).await {
+                    Ok(()) => {
+                        let _ = events.send(RuntimeEvent::Log(format!(
+                            "[forward] 已启动端口转发：{}",
+                            rule.name
+                        )));
+                    }
+                    Err(error) => {
+                        let _ = events.send(RuntimeEvent::Log(format!(
+                            "[forward] 启动 {} 失败：{error}",
+                            rule.name
+                        )));
+                    }
+                }
+            }
+        });
+    }
+
+    /// 根据界面操作启动或停止单条端口转发规则。
+    pub fn set_forward_enabled(
+        &self,
+        rule: PortForwardRule,
+        profile: Option<Profile>,
+        enabled: bool,
+        events: mpsc::Sender<RuntimeEvent>,
+    ) {
+        let forward_manager = self.forward_manager.clone();
+        self.runtime.spawn(async move {
+            let mut manager = forward_manager.lock().await;
+            if enabled {
+                let Some(profile) = profile else {
+                    let _ = events.send(RuntimeEvent::Log(format!(
+                        "[forward] 无法启动 {}：未找到关联的 SSH 节点",
+                        rule.name
+                    )));
+                    return;
+                };
+                match manager.start(&rule, &profile).await {
+                    Ok(()) => {
+                        let _ = events.send(RuntimeEvent::Log(format!(
+                            "[forward] 已启动端口转发：{}",
+                            rule.name
+                        )));
+                    }
+                    Err(error) => {
+                        let _ = events.send(RuntimeEvent::Log(format!(
+                            "[forward] 启动 {} 失败：{error}",
+                            rule.name
+                        )));
+                    }
+                }
+            } else {
+                manager.stop(&rule.id).await;
+                let _ = events.send(RuntimeEvent::Log(format!(
+                    "[forward] 已停止端口转发：{}",
+                    rule.name
+                )));
+            }
+        });
+    }
+
+    /// 停止并移除指定端口转发对应的后台会话。
+    pub fn stop_forward(&self, rule_id: Uuid, events: mpsc::Sender<RuntimeEvent>) {
+        let forward_manager = self.forward_manager.clone();
+        self.runtime.spawn(async move {
+            forward_manager.lock().await.stop(&rule_id).await;
+            let _ = events.send(RuntimeEvent::Log(format!(
+                "[forward] 已删除端口转发：{rule_id}"
+            )));
         });
     }
 
@@ -121,6 +231,7 @@ impl RuntimeController {
         let is_running_flag = self.is_running.clone();
         let generation = self.generation.clone();
         let worker = self.worker.clone();
+        let runtime_handle = self.runtime.handle().clone();
 
         self.runtime.spawn(async move {
             let _worker_guard = worker.lock().await;
@@ -187,7 +298,12 @@ impl RuntimeController {
                     match PrivilegedHelperSession::ensure_started(&helper_path()).await {
                         Ok((h, stderr)) => {
                             if let Some(stderr) = stderr {
-                                spawn_log_reader(stderr, "helper", events.clone());
+                                spawn_log_reader(
+                                    &runtime_handle,
+                                    stderr,
+                                    "helper",
+                                    events.clone(),
+                                );
                             }
                             *helper_guard = Some(h);
                             let _ = events.send(RuntimeEvent::Log(
@@ -239,7 +355,7 @@ impl RuntimeController {
                 };
 
                 if let Some(stderr) = ssh.take_stderr() {
-                    spawn_log_reader(stderr, "ssh", events.clone());
+                    spawn_log_reader(&runtime_handle, stderr, "ssh", events.clone());
                 }
 
                 let uid = unsafe { libc::getuid() };
@@ -425,11 +541,16 @@ impl RuntimeController {
     }
 }
 
-pub fn spawn_log_reader<R>(reader: R, source: &'static str, events: mpsc::Sender<RuntimeEvent>)
+pub fn spawn_log_reader<R>(
+    runtime: &Handle,
+    reader: R,
+    source: &'static str,
+    events: mpsc::Sender<RuntimeEvent>,
+)
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
-    tokio::spawn(async move {
+    runtime.spawn(async move {
         let mut lines = BufReader::new(reader).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             let _ = events.send(RuntimeEvent::Log(format!("[{source}] {line}")));
@@ -454,4 +575,18 @@ pub fn helper_path() -> PathBuf {
         .ok()
         .and_then(|path| path.parent().map(|parent| parent.join("ssh-rocket-helper")))
         .unwrap_or_else(|| PathBuf::from("ssh-rocket-helper"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RuntimeController;
+    use std::time::Duration;
+
+    #[test]
+    fn shutdown_completes_without_active_sessions() {
+        let controller = RuntimeController::default();
+        let completed = controller.shutdown();
+
+        assert!(completed.recv_timeout(Duration::from_secs(2)).is_ok());
+    }
 }
