@@ -26,7 +26,12 @@ pub fn show_profile_dialog(
         Some(if editing { tr("dialog.profile.title_edit") } else { tr("dialog.profile.title_new") }),
         None,
     );
-    let group = adw::PreferencesGroup::new();
+    let columns_box = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    columns_box.set_homogeneous(true);
+    columns_box.set_width_request(560);
+
+    let server_group = adw::PreferencesGroup::new();
+    let auth_group = adw::PreferencesGroup::new();
     let name = adw::EntryRow::builder()
         .title(tr("dialog.profile.name"))
         .text(&source.name)
@@ -222,14 +227,18 @@ pub fn show_profile_dialog(
         });
     }
 
-    group.add(&name);
-    group.add(&host);
-    group.add(&port);
-    group.add(&username);
-    group.add(&auth_type_row);
-    group.add(&identity_row);
-    group.add(&password_row);
-    dialog.set_extra_child(Some(&group));
+    server_group.add(&name);
+    server_group.add(&host);
+    server_group.add(&port);
+
+    auth_group.add(&username);
+    auth_group.add(&auth_type_row);
+    auth_group.add(&identity_row);
+    auth_group.add(&password_row);
+
+    columns_box.append(&server_group);
+    columns_box.append(&auth_group);
+    dialog.set_extra_child(Some(&columns_box));
 
     dialog.add_response("cancel", tr("dialog.cancel"));
     dialog.add_response("save", tr("dialog.save"));
