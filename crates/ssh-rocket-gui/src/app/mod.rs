@@ -746,12 +746,17 @@ pub fn build_ui(app: &adw::Application) {
         };
 
         let floating_cfg = config.borrow().settings.floating_widget.clone();
+        let get_is_connected = {
+            let is_connected = is_connected.clone();
+            Rc::new(move || *is_connected.borrow())
+        };
         let hud = FloatingWidget::new(
             app,
             &floating_cfg,
             on_show_main,
             on_toggle_proxy,
             on_open_settings,
+            get_is_connected,
         );
         hud.set_shown(floating_cfg.enabled);
         *floating_widget.borrow_mut() = Some(hud);

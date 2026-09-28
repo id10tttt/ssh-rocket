@@ -44,6 +44,7 @@ impl FloatingWidget {
         on_show_main_window: Rc<dyn Fn()>,
         on_toggle_proxy: Rc<dyn Fn()>,
         on_open_settings: Rc<dyn Fn()>,
+        is_proxy_connected: Rc<dyn Fn() -> bool>,
     ) -> Self {
         let window = gtk::Window::builder()
             .application(app)
@@ -270,11 +271,6 @@ impl FloatingWidget {
 
         // --- 交互 3: 右键菜单 (PopoverMenu) ---
         let menu_model = gio::Menu::new();
-        menu_model.append(Some(tr("tray.show_window")), Some("hud.show_main"));
-        menu_model.append(Some(tr("connect.btn.connect")), Some("hud.toggle_proxy"));
-        menu_model.append(Some(tr("nav.settings")), Some("hud.open_settings"));
-        menu_model.append(Some(tr("floating.menu.hide")), Some("hud.hide_hud"));
-
         let popover = gtk::PopoverMenu::from_model(Some(&menu_model));
         popover.set_parent(&root_box);
         popover.set_has_arrow(false);
@@ -314,7 +310,20 @@ impl FloatingWidget {
         let click = gtk::GestureClick::new();
         click.set_button(gdk::BUTTON_SECONDARY);
         let popover_clone = popover.clone();
+        let menu_model_clone = menu_model.clone();
+        let is_proxy_connected = is_proxy_connected.clone();
         click.connect_pressed(move |_, _, x, y| {
+            menu_model_clone.remove_all();
+            menu_model_clone.append(Some(tr("tray.show_window")), Some("hud.show_main"));
+            let toggle_label = if is_proxy_connected() {
+                tr("connect.btn.disconnect")
+            } else {
+                tr("connect.btn.connect")
+            };
+            menu_model_clone.append(Some(toggle_label), Some("hud.toggle_proxy"));
+            menu_model_clone.append(Some(tr("nav.settings")), Some("hud.open_settings"));
+            menu_model_clone.append(Some(tr("floating.menu.hide")), Some("hud.hide_hud"));
+
             let rect = gdk::Rectangle::new(x as i32, y as i32, 1, 1);
             popover_clone.set_pointing_to(Some(&rect));
             popover_clone.popup();

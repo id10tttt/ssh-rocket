@@ -262,7 +262,7 @@ pub fn tr(key: &'static str) -> &'static str {
         "settings.language.en" => if is_en { "English" } else { "English" },
 
         // Tools & Floating HUD
-        "floating.menu.hide" => if is_en { "Hide Floating HUD" } else { "关闭悬浮球" },
+        "floating.menu.hide" => if is_en { "Hide" } else { "隐藏" },
         "settings.tools.group" => if is_en { "Tools &amp; Plugins" } else { "小工具插件" },
         "settings.tools.desc" => if is_en { "Manage desktop widgets and extensions" } else { "管理桌面小工具与辅助插件" },
         "settings.floating.title" => if is_en { "Desktop Floating HUD" } else { "桌面悬浮监控球" },
