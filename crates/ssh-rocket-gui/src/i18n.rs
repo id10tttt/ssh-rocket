@@ -216,6 +216,7 @@ pub fn tr(key: &'static str) -> &'static str {
         "logs.tab.direct" => if is_en { "Direct" } else { "直连" },
         "logs.btn.copy" => if is_en { "Copy Logs" } else { "复制日志" },
         "logs.btn.clear" => if is_en { "Clear Logs" } else { "清空日志" },
+        "logs.btn.open_file" => if is_en { "Open Log File" } else { "打开日志文件" },
 
         // Settings View
         "settings.title" => if is_en { "Settings" } else { "应用设置" },

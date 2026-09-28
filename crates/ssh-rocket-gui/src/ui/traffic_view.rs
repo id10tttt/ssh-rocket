@@ -788,23 +788,35 @@ pub fn refresh_traffic_rule_counts(
     direct_legend_label: &gtk::Label,
 ) {
     let current = config.borrow();
-    let imported = crate::imported_rules(&current);
-    let custom = crate::custom_rules(&current);
     let app_count = scan_desktop_apps().len();
 
     let mut direct_count = 0usize;
     let mut proxy_count = 0usize;
     let mut reject_count = 0usize;
 
-    for rule in &imported {
-        match rule.action() {
+    for rule in &current.settings.imported_domain_rules {
+        match rule.action {
             RuleAction::Direct => direct_count += 1,
             RuleAction::Proxy => proxy_count += 1,
             RuleAction::Block => reject_count += 1,
         }
     }
-    for rule in &custom {
-        match rule.action() {
+    for rule in &current.settings.imported_ip_rules {
+        match rule.action {
+            RuleAction::Direct => direct_count += 1,
+            RuleAction::Proxy => proxy_count += 1,
+            RuleAction::Block => reject_count += 1,
+        }
+    }
+    for rule in &current.settings.domain_rules {
+        match rule.action {
+            RuleAction::Direct => direct_count += 1,
+            RuleAction::Proxy => proxy_count += 1,
+            RuleAction::Block => reject_count += 1,
+        }
+    }
+    for rule in &current.settings.ip_rules {
+        match rule.action {
             RuleAction::Direct => direct_count += 1,
             RuleAction::Proxy => proxy_count += 1,
             RuleAction::Block => reject_count += 1,

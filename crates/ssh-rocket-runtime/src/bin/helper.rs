@@ -279,8 +279,20 @@ async fn sync_active_rules(active_session: &mut Option<ActiveSession>) -> Result
         return Ok(());
     };
     let config_path = session.system.config_path.clone();
+    let current_mtime = tokio::fs::metadata(&config_path)
+        .await
+        .and_then(|m| m.modified())
+        .ok();
+
+    // 若配置文件修改时间未变化，说明规则文件未更改，直接复用内存中规则分配进程
+    if current_mtime.is_some() && current_mtime == session.system.config_mtime {
+        return session.system.assign_apps().await;
+    }
+
     let config: AppConfig = serde_json::from_slice(&tokio::fs::read(&config_path).await?)?;
+    session.system.config_mtime = current_mtime;
     if routing_signature(&config.settings)? == routing_signature(&session.system.config.settings)? {
+        session.system.config.settings.app_rules = config.settings.app_rules;
         return session.system.assign_apps().await;
     }
 
@@ -593,6 +605,7 @@ struct SystemState {
     ssh_port: u16,
     ssh_addresses: Vec<IpAddr>,
     config_path: PathBuf,
+    config_mtime: Option<std::time::SystemTime>,
     config: AppConfig,
     current_pids: HashMap<u32, &'static str>,
 }
@@ -607,6 +620,7 @@ impl SystemState {
         config_path: PathBuf,
         config: AppConfig,
     ) -> Self {
+        let config_mtime = std::fs::metadata(&config_path).and_then(|m| m.modified()).ok();
         Self {
             uid,
             socks_port,
@@ -614,6 +628,7 @@ impl SystemState {
             ssh_port,
             ssh_addresses,
             config_path,
+            config_mtime,
             config,
             current_pids: HashMap::new(),
         }
@@ -717,11 +732,6 @@ impl SystemState {
     }
 
     async fn assign_apps(&mut self) -> Result<()> {
-        if let Ok(bytes) = tokio::fs::read(&self.config_path).await {
-            if let Ok(config) = serde_json::from_slice::<AppConfig>(&bytes) {
-                self.config.settings.app_rules = config.settings.app_rules;
-            }
-        }
         let rules: HashMap<_, _> = self
             .config
             .settings

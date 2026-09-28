@@ -1147,6 +1147,29 @@ fn build_ui(app: &adw::Application) {
 
     let controller = Rc::new(RefCell::new(RuntimeController::default()));
     let (event_tx, event_rx) = mpsc::channel::<RuntimeEvent>();
+    let (file_log_tx, file_log_rx) = mpsc::channel::<String>();
+    thread::spawn(move || {
+        let Ok(log_path) = AppConfig::log_file_path() else {
+            return;
+        };
+        if let Some(parent) = log_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let file = match fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let mut writer = std::io::BufWriter::new(file);
+        use std::io::Write;
+        while let Ok(line) = file_log_rx.recv() {
+            let _ = writer.write_all(line.as_bytes());
+            let _ = writer.flush();
+        }
+    });
     let is_connected = Rc::new(RefCell::new(false));
     let connect_start_time = Rc::new(RefCell::new(None::<std::time::Instant>));
     let connection_buttons = Rc::new(RefCell::new(Vec::<(String, gtk::Button)>::new()));
@@ -2504,6 +2527,20 @@ fn build_ui(app: &adw::Application) {
             }
         });
     }
+    {
+        logs_view.open_logs_btn.connect_clicked(move |_| {
+            if let Ok(log_path) = AppConfig::log_file_path() {
+                if let Some(parent) = log_path.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                if !log_path.exists() {
+                    let _ = fs::write(&log_path, "");
+                }
+                let uri = format!("file://{}", log_path.display());
+                let _ = gio::AppInfo::launch_default_for_uri(&uri, None::<&gio::AppLaunchContext>);
+            }
+        });
+    }
 
     // 10. 托盘初始化
     {
@@ -2781,10 +2818,14 @@ fn build_ui(app: &adw::Application) {
         let sys_monitor = sys_monitor.clone();
         let latest_proxy_speed = latest_proxy_speed.clone();
         let floating_widget = floating_widget.clone();
+        let file_log_tx = file_log_tx.clone();
         let mut sys_sample_counter = 0u32;
 
         gtk::glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+            let mut event_count = 0usize;
+            let loop_start = std::time::Instant::now();
             while let Ok(event) = event_rx.try_recv() {
+                event_count += 1;
                 match event {
                     RuntimeEvent::Connected => {
                         latest_proxy_speed.set((0, 0));
@@ -2888,13 +2929,29 @@ fn build_ui(app: &adw::Application) {
                             .map(|gstr| gstr.to_string())
                             .unwrap_or_else(|_| "00:00:00".to_string());
                         let formatted = format!("[{time_str}] {line}\n");
+                        let _ = file_log_tx.send(formatted.clone());
+
+                        const MAX_LOG_LINES: i32 = 1000;
+                        let is_logs_visible = view_stack.visible_child_name().as_deref() == Some("logs");
 
                         let append_to = |buffer: &gtk::TextBuffer, view: &gtk::TextView| {
                             let mut end = buffer.end_iter();
                             buffer.insert(&mut end, &formatted);
-                            let end = buffer.end_iter();
-                            let mark = buffer.create_mark(None, &end, false);
-                            view.scroll_mark_onscreen(&mark);
+
+                            let line_count = buffer.line_count();
+                            if line_count > MAX_LOG_LINES {
+                                let mut prune_end = buffer.start_iter();
+                                prune_end.forward_lines(line_count - MAX_LOG_LINES);
+                                let mut prune_start = buffer.start_iter();
+                                buffer.delete(&mut prune_start, &mut prune_end);
+                            }
+
+                            if is_logs_visible {
+                                let end_iter = buffer.end_iter();
+                                let mark = buffer.create_mark(None, &end_iter, false);
+                                view.scroll_mark_onscreen(&mark);
+                                buffer.delete_mark(&mark);
+                            }
                         };
 
                         append_to(&all_log_buffer, &all_log_view);
@@ -3005,6 +3062,10 @@ fn build_ui(app: &adw::Application) {
                         }
                         controller_ref.borrow().sync_rules();
                     }
+                }
+
+                if event_count >= 30 || loop_start.elapsed() >= std::time::Duration::from_millis(15) {
+                    break;
                 }
             }
             if let Some(start) = *connect_start_time.borrow() {

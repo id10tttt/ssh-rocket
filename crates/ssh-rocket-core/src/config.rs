@@ -230,6 +230,16 @@ impl AppConfig {
             .ok_or(ConfigError::NoConfigDirectory)
     }
 
+    pub fn log_dir() -> Result<PathBuf, ConfigError> {
+        dirs::data_dir()
+            .map(|path| path.join("ssh-rocket").join("logs"))
+            .ok_or(ConfigError::NoConfigDirectory)
+    }
+
+    pub fn log_file_path() -> Result<PathBuf, ConfigError> {
+        Self::log_dir().map(|path| path.join("ssh-rocket.log"))
+    }
+
     pub fn load() -> Result<Self, ConfigError> {
         let path = Self::path()?;
         if !path.exists() {

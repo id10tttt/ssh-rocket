@@ -19,6 +19,7 @@ pub struct LogsView {
     pub direct_log_view: gtk::TextView,
     pub copy_logs_btn: gtk::Button,
     pub clear_logs_btn: gtk::Button,
+    pub open_logs_btn: gtk::Button,
 }
 
 impl LogsView {
@@ -53,6 +54,11 @@ impl LogsView {
         clear_logs.add_css_class("flat");
         clear_logs.set_tooltip_text(Some(tr("logs.btn.clear")));
         log_header.append(&clear_logs);
+
+        let open_logs = gtk::Button::from_icon_name("document-open-symbolic");
+        open_logs.add_css_class("flat");
+        open_logs.set_tooltip_text(Some(tr("logs.btn.open_file")));
+        log_header.append(&open_logs);
 
         log_page.append(&log_header);
 
@@ -143,6 +149,7 @@ impl LogsView {
             direct_log_view,
             copy_logs_btn: copy_logs,
             clear_logs_btn: clear_logs,
+            open_logs_btn: open_logs,
         }
     }
 
@@ -153,5 +160,6 @@ impl LogsView {
         self.log_stack.page(&self.direct_log_scroller).set_title(tr("logs.tab.direct"));
         self.copy_logs_btn.set_tooltip_text(Some(tr("logs.btn.copy")));
         self.clear_logs_btn.set_tooltip_text(Some(tr("logs.btn.clear")));
+        self.open_logs_btn.set_tooltip_text(Some(tr("logs.btn.open_file")));
     }
 }
