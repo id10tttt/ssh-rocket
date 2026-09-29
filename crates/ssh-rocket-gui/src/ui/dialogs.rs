@@ -447,73 +447,172 @@ pub fn show_forward_dialog(
         None,
     );
 
-    let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    card.add_css_class("card");
-    card.set_width_request(460);
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 18);
+    content.set_width_request(520);
 
-    let info = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    info.set_margin_start(16);
-    info.set_margin_end(16);
-    info.set_margin_top(14);
-    info.set_margin_bottom(14);
-
-    let make_row = |label_text: &str, widget: &gtk::Widget| -> gtk::Box {
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        row.set_valign(gtk::Align::Center);
+    let make_field = |label_text: &str, widget: &gtk::Widget| -> gtk::Box {
+        let field = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        field.set_hexpand(true);
         let label = gtk::Label::new(Some(label_text));
-        label.add_css_class("dim-label");
+        label.add_css_class("heading");
         label.set_halign(gtk::Align::Start);
-        label.set_width_request(100);
         label.set_xalign(0.0);
-        row.append(&label);
-        row.append(widget);
-        row
+        label.set_mnemonic_widget(Some(widget));
+        field.append(&label);
+        field.append(widget);
+        field
     };
 
-    // 规则名称
-    let name_entry = gtk::Entry::builder()
-        .text(&source.name)
-        .placeholder_text(tr("dialog.forward.name"))
-        .hexpand(true)
-        .build();
-    let name_row = make_row(tr("dialog.forward.name"), name_entry.upcast_ref());
-
-    // 转发类型（本地转发 -L / 远程转发 -R）
-    let type_labels = [tr("forward.type.local"), tr("forward.type.remote")];
-    let type_dropdown = gtk::DropDown::from_strings(&type_labels);
-    type_dropdown.set_selected(match source.forward_type {
-        ForwardType::Local => 0,
-        ForwardType::Remote => 1,
-    });
-    type_dropdown.set_hexpand(true);
-    let type_row = make_row(tr("dialog.forward.type"), type_dropdown.upcast_ref());
-
-    // SSH 连接（从 profiles 中选择）
+    // SSH 连接
     let profiles = config.borrow().profiles.clone();
     let profile_strings: Vec<String> = profiles
         .iter()
         .map(|p| format!("{} ({}:{})", p.name, p.host, p.port))
         .collect();
     let profile_str_slices: Vec<&str> = profile_strings.iter().map(String::as_str).collect();
-
-    let initial_profile_index = if profiles.is_empty() {
-        0
-    } else {
-        profiles
-            .iter()
-            .position(|p| p.id == source.profile_id)
-            .unwrap_or(0) as u32
-    };
-
+    let initial_profile_index = profiles
+        .iter()
+        .position(|p| p.id == source.profile_id)
+        .unwrap_or(0) as u32;
     let profile_dropdown = gtk::DropDown::from_strings(&profile_str_slices);
     profile_dropdown.set_selected(initial_profile_index);
     profile_dropdown.set_hexpand(true);
-    if profiles.is_empty() {
-        profile_dropdown.set_sensitive(false);
-    }
-    let profile_row = make_row(tr("dialog.forward.connection"), profile_dropdown.upcast_ref());
+    profile_dropdown.set_sensitive(!profiles.is_empty());
+    content.append(&make_field(
+        tr("dialog.forward.connection"),
+        profile_dropdown.upcast_ref(),
+    ));
 
-    // 本地主机与端口
+    // 映射方向
+    let direction_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let direction_label = gtk::Label::new(Some(tr("dialog.forward.direction")));
+    direction_label.add_css_class("heading");
+    direction_label.set_halign(gtk::Align::Start);
+    direction_box.append(&direction_label);
+
+    let direction_buttons = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+
+    let make_direction_button = |title: &str, description: &str| {
+        let button = gtk::ToggleButton::new();
+        button.add_css_class("forward-direction-button");
+        button.set_hexpand(true);
+
+        let button_content = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        button_content.set_margin_start(12);
+        button_content.set_margin_end(12);
+        button_content.set_margin_top(10);
+        button_content.set_margin_bottom(10);
+
+        let labels = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        labels.set_hexpand(true);
+        let title_label = gtk::Label::new(Some(title));
+        title_label.add_css_class("heading");
+        title_label.set_halign(gtk::Align::Start);
+        let description_label = gtk::Label::new(Some(description));
+        description_label.add_css_class("dim-label");
+        description_label.set_halign(gtk::Align::Start);
+        description_label.set_wrap(true);
+        description_label.set_xalign(0.0);
+        labels.append(&title_label);
+        labels.append(&description_label);
+
+        let check = gtk::Image::from_icon_name("object-select-symbolic");
+        check.set_visible(false);
+        check.set_valign(gtk::Align::Center);
+        button_content.append(&labels);
+        button_content.append(&check);
+        button.set_child(Some(&button_content));
+        (button, check)
+    };
+
+    let (local_direction, local_check) = make_direction_button(
+        tr("forward.type.local"),
+        tr("forward.type.local_desc"),
+    );
+    let (remote_direction, remote_check) = make_direction_button(
+        tr("forward.type.remote"),
+        tr("forward.type.remote_desc"),
+    );
+    remote_direction.set_group(Some(&local_direction));
+    match source.forward_type {
+        ForwardType::Local => local_direction.set_active(true),
+        ForwardType::Remote => remote_direction.set_active(true),
+    }
+    local_check.set_visible(local_direction.is_active());
+    remote_check.set_visible(remote_direction.is_active());
+    {
+        let check = local_check.clone();
+        local_direction.connect_toggled(move |button| check.set_visible(button.is_active()));
+    }
+    {
+        let check = remote_check.clone();
+        remote_direction.connect_toggled(move |button| check.set_visible(button.is_active()));
+    }
+    direction_buttons.append(&local_direction);
+    direction_buttons.append(&remote_direction);
+    direction_box.append(&direction_buttons);
+    content.append(&direction_box);
+
+    // 端口映射
+    let mapping_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let mapping_title = gtk::Label::new(Some(tr("dialog.forward.mapping")));
+    mapping_title.add_css_class("heading");
+    mapping_title.set_halign(gtk::Align::Start);
+    mapping_box.append(&mapping_title);
+
+    let mapping_fields = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    mapping_fields.set_valign(gtk::Align::Center);
+    let local_port_entry = gtk::Entry::builder()
+        .text(if source.local_port > 0 {
+            source.local_port.to_string()
+        } else {
+            String::new()
+        })
+        .placeholder_text("8080")
+        .hexpand(true)
+        .build();
+    local_port_entry.set_input_purpose(gtk::InputPurpose::Digits);
+    let local_port_error = gtk::Label::new(Some(tr("dialog.forward.invalid_port")));
+    local_port_error.add_css_class("error");
+    local_port_error.set_halign(gtk::Align::Start);
+    local_port_error.set_visible(false);
+    let local_port_field = make_field(
+        tr("dialog.forward.local_port"),
+        local_port_entry.upcast_ref(),
+    );
+    local_port_field.append(&local_port_error);
+
+    let arrow = gtk::Label::new(Some("→"));
+    arrow.add_css_class("forward-mapping-arrow");
+    arrow.set_accessible_role(gtk::AccessibleRole::Presentation);
+    arrow.set_valign(gtk::Align::Center);
+
+    let remote_port_entry = gtk::Entry::builder()
+        .text(if source.remote_port > 0 {
+            source.remote_port.to_string()
+        } else {
+            String::new()
+        })
+        .placeholder_text("80")
+        .hexpand(true)
+        .build();
+    remote_port_entry.set_input_purpose(gtk::InputPurpose::Digits);
+    let remote_port_error = gtk::Label::new(Some(tr("dialog.forward.invalid_port")));
+    remote_port_error.add_css_class("error");
+    remote_port_error.set_halign(gtk::Align::Start);
+    remote_port_error.set_visible(false);
+    let remote_port_field = make_field(
+        tr("dialog.forward.server_port"),
+        remote_port_entry.upcast_ref(),
+    );
+    remote_port_field.append(&remote_port_error);
+    mapping_fields.append(&local_port_field);
+    mapping_fields.append(&arrow);
+    mapping_fields.append(&remote_port_field);
+    mapping_box.append(&mapping_fields);
+    content.append(&mapping_box);
+
+    // 高级地址设置
     let local_host_entry = gtk::Entry::builder()
         .text(if source.local_host.is_empty() {
             default_forward_host()
@@ -522,20 +621,6 @@ pub fn show_forward_dialog(
         })
         .hexpand(true)
         .build();
-    let local_host_row = make_row(tr("dialog.forward.local_host"), local_host_entry.upcast_ref());
-
-    let local_port_entry = gtk::Entry::builder()
-        .text(if source.local_port > 0 {
-            source.local_port.to_string()
-        } else {
-            String::new()
-        })
-        .placeholder_text("例如: 8080")
-        .hexpand(true)
-        .build();
-    let local_port_row = make_row(tr("dialog.forward.local_port"), local_port_entry.upcast_ref());
-
-    // 远端主机与端口
     let remote_host_entry = gtk::Entry::builder()
         .text(if source.remote_host.is_empty() {
             default_forward_host()
@@ -544,28 +629,67 @@ pub fn show_forward_dialog(
         })
         .hexpand(true)
         .build();
-    let remote_host_row = make_row(tr("dialog.forward.remote_host"), remote_host_entry.upcast_ref());
+    let local_host_label = gtk::Label::new(None);
+    local_host_label.add_css_class("heading");
+    local_host_label.set_halign(gtk::Align::Start);
+    local_host_label.set_mnemonic_widget(Some(&local_host_entry));
+    let local_host_field = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    local_host_field.append(&local_host_label);
+    local_host_field.append(&local_host_entry);
+    let remote_host_label = gtk::Label::new(None);
+    remote_host_label.add_css_class("heading");
+    remote_host_label.set_halign(gtk::Align::Start);
+    remote_host_label.set_mnemonic_widget(Some(&remote_host_entry));
+    let remote_host_field = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    remote_host_field.append(&remote_host_label);
+    remote_host_field.append(&remote_host_entry);
+    let advanced_fields = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    advanced_fields.set_margin_top(10);
+    advanced_fields.append(&local_host_field);
+    advanced_fields.append(&remote_host_field);
+    let advanced = gtk::Expander::builder()
+        .label(tr("dialog.forward.advanced"))
+        .child(&advanced_fields)
+        .build();
+    content.append(&advanced);
 
-    let remote_port_entry = gtk::Entry::builder()
-        .text(if source.remote_port > 0 {
-            source.remote_port.to_string()
-        } else {
-            String::new()
-        })
-        .placeholder_text("例如: 80")
+    let update_direction = {
+        let local_host_label = local_host_label.clone();
+        let remote_host_label = remote_host_label.clone();
+        let mapping_fields = mapping_fields.clone();
+        let local_port_field = local_port_field.clone();
+        let remote_port_field = remote_port_field.clone();
+        let arrow = arrow.clone();
+        move |is_remote: bool| {
+            if is_remote {
+                local_host_label.set_text(tr("dialog.forward.local_target_host"));
+                remote_host_label.set_text(tr("dialog.forward.server_bind_host"));
+                mapping_fields.reorder_child_after(&remote_port_field, None::<&gtk::Widget>);
+                mapping_fields.reorder_child_after(&arrow, Some(&remote_port_field));
+                mapping_fields.reorder_child_after(&local_port_field, Some(&arrow));
+            } else {
+                local_host_label.set_text(tr("dialog.forward.local_bind_host"));
+                remote_host_label.set_text(tr("dialog.forward.server_target_host"));
+                mapping_fields.reorder_child_after(&local_port_field, None::<&gtk::Widget>);
+                mapping_fields.reorder_child_after(&arrow, Some(&local_port_field));
+                mapping_fields.reorder_child_after(&remote_port_field, Some(&arrow));
+            }
+        }
+    };
+    update_direction(remote_direction.is_active());
+    remote_direction.connect_toggled(move |button| update_direction(button.is_active()));
+
+    // 可选名称
+    let name_entry = gtk::Entry::builder()
+        .text(&source.name)
+        .placeholder_text(tr("dialog.forward.name_placeholder"))
         .hexpand(true)
         .build();
-    let remote_port_row = make_row(tr("dialog.forward.remote_port"), remote_port_entry.upcast_ref());
-
-    info.append(&name_row);
-    info.append(&type_row);
-    info.append(&profile_row);
-    info.append(&local_host_row);
-    info.append(&local_port_row);
-    info.append(&remote_host_row);
-    info.append(&remote_port_row);
-    card.append(&info);
-    dialog.set_extra_child(Some(&card));
+    content.append(&make_field(
+        tr("dialog.forward.name"),
+        name_entry.upcast_ref(),
+    ));
+    dialog.set_extra_child(Some(&content));
 
     dialog.add_response("cancel", tr("dialog.cancel"));
     dialog.add_response("save", tr("dialog.save"));
@@ -583,21 +707,30 @@ pub fn show_forward_dialog(
             return;
         }
 
+        local_port_error.set_visible(false);
+        remote_port_error.set_visible(false);
+
         let l_port = match local_port_entry.text().trim().parse::<u16>() {
             Ok(p) if p > 0 => p,
             _ => {
-                dialog.set_body("本地端口必须为 1-65535 之间的有效数字");
+                local_port_error.set_visible(true);
+                local_port_entry.add_css_class("error");
+                local_port_entry.grab_focus();
                 return;
             }
         };
+        local_port_entry.remove_css_class("error");
 
         let r_port = match remote_port_entry.text().trim().parse::<u16>() {
             Ok(p) if p > 0 => p,
             _ => {
-                dialog.set_body("目标端口必须为 1-65535 之间的有效数字");
+                remote_port_error.set_visible(true);
+                remote_port_entry.add_css_class("error");
+                remote_port_entry.grab_focus();
                 return;
             }
         };
+        remote_port_entry.remove_css_class("error");
 
         let selected_profile_idx = profile_dropdown.selected() as usize;
         let selected_profile_id = match profiles_clone.get(selected_profile_idx) {
@@ -608,7 +741,7 @@ pub fn show_forward_dialog(
             }
         };
 
-        let forward_type = if type_dropdown.selected() == 1 {
+        let forward_type = if remote_direction.is_active() {
             ForwardType::Remote
         } else {
             ForwardType::Local
@@ -618,7 +751,7 @@ pub fn show_forward_dialog(
         if name.is_empty() {
             name = match forward_type {
                 ForwardType::Local => format!("{}:{} -> {}:{}", local_host_entry.text().trim(), l_port, remote_host_entry.text().trim(), r_port),
-                ForwardType::Remote => format!("{}:{} <- {}:{}", remote_host_entry.text().trim(), r_port, local_host_entry.text().trim(), l_port),
+                ForwardType::Remote => format!("{}:{} -> {}:{}", remote_host_entry.text().trim(), r_port, local_host_entry.text().trim(), l_port),
             };
         }
 

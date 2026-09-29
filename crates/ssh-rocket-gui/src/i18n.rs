@@ -87,19 +87,25 @@ pub fn tr(key: &'static str) -> &'static str {
         "forward.btn.add" => if is_en { "Add Rule" } else { "添加规则" },
         "forward.menu.edit" => if is_en { "Edit" } else { "编辑" },
         "forward.menu.delete" => if is_en { "Delete" } else { "删除" },
-        "forward.type.local" => if is_en { "Local Forward (-L)" } else { "本地转发 (-L)" },
-        "forward.type.remote" => if is_en { "Remote Forward (-R)" } else { "远程转发 (-R)" },
-        "forward.type.local_desc" => if is_en { "Local -> Remote: Access remote service locally" } else { "本地 -> 远端：本地端口绑定到远端服务" },
-        "forward.type.remote_desc" => if is_en { "Remote -> Local: Expose local service to remote" } else { "远端 -> 本地：远端端口绑定到本地服务" },
+        "forward.type.local" => if is_en { "Local → Server" } else { "本地 → 服务器" },
+        "forward.type.remote" => if is_en { "Server → Local" } else { "服务器 → 本地" },
+        "forward.type.local_desc" => if is_en { "Bind a local port to a server port" } else { "将本地端口绑定到服务器端口" },
+        "forward.type.remote_desc" => if is_en { "Bind a server port to a local port" } else { "将服务器端口绑定到本地端口" },
         "dialog.forward.title_new" => if is_en { "New Forwarding Rule" } else { "新建端口转发" },
         "dialog.forward.title_edit" => if is_en { "Edit Forwarding Rule" } else { "编辑端口转发" },
-        "dialog.forward.type" => if is_en { "Forward Type" } else { "转发类型" },
+        "dialog.forward.direction" => if is_en { "Direction" } else { "映射方向" },
+        "dialog.forward.mapping" => if is_en { "Port Mapping" } else { "端口映射" },
         "dialog.forward.connection" => if is_en { "SSH Connection" } else { "SSH 连接" },
-        "dialog.forward.local_host" => if is_en { "Local Host" } else { "本地地址" },
+        "dialog.forward.local_bind_host" => if is_en { "Local Listen Address" } else { "本地监听地址" },
+        "dialog.forward.local_target_host" => if is_en { "Local Target Address" } else { "本地目标地址" },
+        "dialog.forward.server_bind_host" => if is_en { "Server Listen Address" } else { "服务器监听地址" },
+        "dialog.forward.server_target_host" => if is_en { "Server Target Address" } else { "服务器目标地址" },
         "dialog.forward.local_port" => if is_en { "Local Port" } else { "本地端口" },
-        "dialog.forward.remote_host" => if is_en { "Remote Host" } else { "目标主机" },
-        "dialog.forward.remote_port" => if is_en { "Remote Port" } else { "目标端口" },
-        "dialog.forward.name" => if is_en { "Rule Name" } else { "规则名称" },
+        "dialog.forward.server_port" => if is_en { "Server Port" } else { "服务器端口" },
+        "dialog.forward.advanced" => if is_en { "Advanced Settings" } else { "高级设置" },
+        "dialog.forward.name" => if is_en { "Name (Optional)" } else { "名称（可选）" },
+        "dialog.forward.name_placeholder" => if is_en { "Generated automatically when left blank" } else { "留空时自动生成" },
+        "dialog.forward.invalid_port" => if is_en { "Enter a port from 1 to 65535" } else { "请输入 1–65535 之间的端口" },
         "dialog.forward.no_connection" => if is_en { "Please add an SSH connection first" } else { "请先添加 SSH 节点连接" },
 
         // Connection View
@@ -313,4 +319,3 @@ mod tests {
         assert_eq!(configured_language(), Language::Auto);
     }
 }
-

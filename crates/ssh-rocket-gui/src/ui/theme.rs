@@ -96,6 +96,26 @@ pub fn init_theme() {
             font-weight: 600;
         }
 
+        /* 端口映射方向选择与拓扑箭头 */
+        .forward-direction-button {
+            min-height: 64px;
+            border-radius: 10px;
+        }
+        .forward-direction-button:checked {
+            border-color: alpha(@accent_color, 0.75);
+            background-color: alpha(@accent_color, 0.12);
+        }
+        .forward-direction-button:checked image {
+            color: @accent_color;
+        }
+        .forward-mapping-arrow {
+            color: @accent_color;
+            font-size: 22px;
+            font-weight: bold;
+            min-width: 32px;
+            margin-top: 26px;
+        }
+
         /* 流量图表组件 */
         .chart-track {
             background-color: alpha(currentColor, 0.08);
