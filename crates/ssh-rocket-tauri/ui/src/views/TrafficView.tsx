@@ -1,13 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { 
-  Activity, 
-  ArrowUp, 
-  ArrowDown, 
-  Network, 
-  Layers, 
-  Radio 
-} from 'lucide-react';
-import { AppTrafficStat, ActiveConnectionStat, SpeedDto } from '../types';
+import { Search } from 'lucide-react';
+import { ActiveConnectionStat, AppTrafficStat, SpeedDto } from '../types';
+import { Card, PageHeader, PreferenceGroup, Segmented } from '../components/Adwaita';
+import { useI18n } from '../i18n';
 
 interface TrafficViewProps {
   speed: SpeedDto;
@@ -16,222 +11,153 @@ interface TrafficViewProps {
   isRunning: boolean;
 }
 
+type TrafficTab = 'overview' | 'apps' | 'connections';
+
+const formatBytes = (bytes: number) => {
+  if (bytes < 1024) return `${bytes.toFixed(0)} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
+};
+
 export const TrafficView: React.FC<TrafficViewProps> = ({
   speed,
   appTraffic,
   activeConnections,
-  isRunning
+  isRunning,
 }) => {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [history, setHistory] = useState<{ up: number[]; down: number[] }>({
+  const { tr } = useI18n();
+  const [tab, setTab] = useState<TrafficTab>('overview');
+  const [query, setQuery] = useState('');
+  const historyRef = useRef<{ up: number[]; down: number[] }>({
     up: new Array(40).fill(0),
     down: new Array(40).fill(0),
   });
+  const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const formatBytes = (bytes: number) => {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-  };
-
-  const formatSpeed = (bytesPerSec: number) => {
-    return `${formatBytes(bytesPerSec)}/s`;
-  };
-
-  // Update speed history
   useEffect(() => {
-    setHistory(prev => ({
-      up: [...prev.up.slice(1), speed.upload],
-      down: [...prev.down.slice(1), speed.download],
-    }));
-  }, [speed]);
-
-  // Render canvas curve
-  useEffect(() => {
+    const current = historyRef.current;
+    const history = {
+      up: [...current.up.slice(1), speed.upload],
+      down: [...current.down.slice(1), speed.download],
+    };
+    historyRef.current = history;
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const width = canvas.width;
-    const height = canvas.height;
-    ctx.clearRect(0, 0, width, height);
-
-    const maxVal = Math.max(
-      ...history.up,
-      ...history.down,
-      1024 * 100 // minimum 100 KB/s scale
-    );
-
-    const drawCurve = (data: number[], strokeColor: string, fillColor: string) => {
-      ctx.beginPath();
-      const step = width / (data.length - 1);
-      data.forEach((val, i) => {
-        const x = i * step;
-        const y = height - (val / maxVal) * (height - 20) - 10;
-        if (i === 0) {
-          ctx.moveTo(x, y);
-        } else {
-          const prevX = (i - 1) * step;
-          const prevY = height - (data[i - 1] / maxVal) * (height - 20) - 10;
-          const cx = (prevX + x) / 2;
-          ctx.bezierCurveTo(cx, prevY, cx, y, x, y);
-        }
+    const context = canvas.getContext('2d');
+    if (!context) return;
+    const { width, height } = canvas;
+    context.clearRect(0, 0, width, height);
+    const maxValue = Math.max(...history.up, ...history.down, 100 * 1024);
+    const styles = getComputedStyle(document.documentElement);
+    const draw = (values: number[], color: string) => {
+      context.beginPath();
+      values.forEach((value, index) => {
+        const x = index * width / (values.length - 1);
+        const y = height - 12 - value / maxValue * (height - 24);
+        if (index === 0) context.moveTo(x, y);
+        else context.lineTo(x, y);
       });
-      ctx.strokeStyle = strokeColor;
-      ctx.lineWidth = 2;
-      ctx.stroke();
-
-      // Fill area
-      ctx.lineTo(width, height);
-      ctx.lineTo(0, height);
-      ctx.closePath();
-      ctx.fillStyle = fillColor;
-      ctx.fill();
+      context.strokeStyle = color;
+      context.lineWidth = 2;
+      context.stroke();
     };
+    draw(history.down, styles.getPropertyValue('--success').trim());
+    draw(history.up, '#3584e4');
+  }, [speed, tab]);
 
-    // Draw download (blue/emerald)
-    drawCurve(history.down, '#10b981', 'rgba(16, 185, 129, 0.12)');
-    // Draw upload (amber/blue)
-    drawCurve(history.up, '#3b82f6', 'rgba(59, 130, 246, 0.12)');
-  }, [history]);
+  const filteredApps = appTraffic.filter((item) =>
+    `${item.name} ${item.id}`.toLowerCase().includes(query.toLowerCase()),
+  );
+  const filteredConnections = activeConnections.filter((item) =>
+    `${item.proc_name} ${item.peer_addr}`.toLowerCase().includes(query.toLowerCase()),
+  );
+  const totalUpload = appTraffic.reduce((sum, item) => sum + item.upload, 0);
+  const totalDownload = appTraffic.reduce((sum, item) => sum + item.download, 0);
+  const proxyTotal = appTraffic.reduce((sum, item) => sum + item.proxy_upload + item.proxy_download, 0);
+  const directTotal = appTraffic.reduce((sum, item) => sum + item.direct_upload + item.direct_download, 0);
 
   return (
-    <div className="h-full flex flex-col space-y-4 max-w-5xl mx-auto p-2">
-      {/* Top Speed Stat Cards */}
-      <div className="grid grid-cols-2 gap-4">
-        <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 flex items-center justify-between shadow-lg backdrop-blur-sm">
-          <div className="flex items-center gap-3.5">
-            <div className="w-11 h-11 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
-              <ArrowDown className="w-5 h-5" />
-            </div>
-            <div>
-              <span className="text-[11px] font-medium text-slate-400">实时下载速率</span>
-              <h3 className="text-xl font-bold text-white font-mono mt-0.5">
-                {formatSpeed(speed.download)}
-              </h3>
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 flex items-center justify-between shadow-lg backdrop-blur-sm">
-          <div className="flex items-center gap-3.5">
-            <div className="w-11 h-11 rounded-xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400">
-              <ArrowUp className="w-5 h-5" />
-            </div>
-            <div>
-              <span className="text-[11px] font-medium text-slate-400">实时上传速率</span>
-              <h3 className="text-xl font-bold text-white font-mono mt-0.5">
-                {formatSpeed(speed.upload)}
-              </h3>
-            </div>
-          </div>
-        </div>
+    <div className="app-page">
+      <PageHeader title={tr('流量监控', 'Traffic')} />
+      <div className="traffic-switcher">
+        <Segmented
+          value={tab}
+          onChange={(value) => {
+            setTab(value);
+            setQuery('');
+          }}
+          label={tr('流量页面', 'Traffic Page')}
+          options={[
+            { value: 'overview', label: tr('监控总览', 'Overview') },
+            { value: 'apps', label: tr('应用统计', 'App Usage') },
+            { value: 'connections', label: tr('实时连接', 'Active Connections') },
+          ]}
+        />
       </div>
 
-      {/* Speed Chart Card */}
-      <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 shadow-lg backdrop-blur-sm flex flex-col">
-        <div className="flex items-center justify-between mb-2">
-          <div className="flex items-center gap-2">
-            <Activity className="w-4 h-4 text-blue-400" />
-            <h4 className="text-xs font-semibold text-white">速率波动曲线 (实时)</h4>
-          </div>
-          <div className="flex items-center gap-4 text-[11px] font-mono">
-            <div className="flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
-              <span className="text-slate-400">下载</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-blue-500" />
-              <span className="text-slate-400">上传</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="w-full h-32 relative bg-slate-950/40 rounded-xl overflow-hidden border border-slate-800/60">
-          <canvas
-            ref={canvasRef}
-            width={880}
-            height={128}
-            className="w-full h-full block"
-          />
-        </div>
-      </div>
-
-      {/* Active Connections & App Traffic Split */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 flex-1 min-h-0">
-        {/* App Traffic Table */}
-        <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 shadow-lg backdrop-blur-sm flex flex-col min-h-0">
-          <div className="flex items-center gap-2 mb-3 pb-2 border-b border-slate-800">
-            <Layers className="w-4 h-4 text-indigo-400" />
-            <h4 className="text-xs font-semibold text-white">应用流量排行</h4>
-          </div>
-          <div className="overflow-y-auto flex-1 divide-y divide-slate-800/50">
-            {appTraffic.length === 0 ? (
-              <div className="h-full flex items-center justify-center text-xs text-slate-500">
-                暂无应用流量数据
+      <div className="app-page-content traffic-content">
+        {tab === 'overview' && (
+          <>
+            <PreferenceGroup title={tr('会话与传输总览', 'Session & Traffic Overview')} description={isRunning ? tr('已连接', 'Connected') : tr('未连接', 'Disconnected')}>
+              <div className="traffic-kpis">
+                <div><span>{tr('总流量', 'Total Traffic')}</span><strong>{formatBytes(totalUpload + totalDownload)}</strong><small>↑ {formatBytes(totalUpload)}　↓ {formatBytes(totalDownload)}</small></div>
+                <div><span>{tr('代理流量', 'Proxy Traffic')}</span><strong>{formatBytes(proxyTotal)}</strong><small>{appTraffic.filter((item) => item.proxy_upload + item.proxy_download > 0).length} {tr('个应用', 'apps')}</small></div>
+                <div><span>{tr('直连流量', 'Direct Traffic')}</span><strong>{formatBytes(directTotal)}</strong><small>{appTraffic.filter((item) => item.direct_upload + item.direct_download > 0).length} {tr('个应用', 'apps')}</small></div>
               </div>
-            ) : (
-              appTraffic.map((app) => (
-                <div key={app.id} className="flex items-center justify-between py-2 text-xs">
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-7 h-7 rounded-lg bg-slate-800 flex items-center justify-center text-[11px] font-bold text-slate-300">
-                      {app.name.charAt(0).toUpperCase()}
-                    </div>
-                    <div>
-                      <div className="font-medium text-white truncate max-w-[130px]">{app.name}</div>
-                      <div className="text-[10px] text-slate-500 font-mono">{app.id}</div>
-                    </div>
-                  </div>
-                  <div className="text-right font-mono text-[11px]">
-                    <div className="text-emerald-400">↓ {formatBytes(app.download)}</div>
-                    <div className="text-blue-400">↑ {formatBytes(app.upload)}</div>
-                  </div>
+            </PreferenceGroup>
+            <PreferenceGroup title={tr('实时速率', 'Real-time Speed')}>
+              <Card className="traffic-chart-card">
+                <div className="traffic-chart-header">
+                  <span><i className="download" />{tr('下载', 'Download')} {formatBytes(speed.download)}/s</span>
+                  <span><i className="upload" />{tr('上传', 'Upload')} {formatBytes(speed.upload)}/s</span>
                 </div>
-              ))
-            )}
-          </div>
-        </div>
+                <canvas ref={canvasRef} width={820} height={185} aria-label={tr('实时上传与下载速率曲线', 'Real-time upload and download speed chart')} />
+              </Card>
+            </PreferenceGroup>
+          </>
+        )}
 
-        {/* Active Connections Table */}
-        <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 shadow-lg backdrop-blur-sm flex flex-col min-h-0">
-          <div className="flex items-center gap-2 mb-3 pb-2 border-b border-slate-800">
-            <Network className="w-4 h-4 text-emerald-400" />
-            <h4 className="text-xs font-semibold text-white">活跃连接监控 ({activeConnections.length})</h4>
-          </div>
-          <div className="overflow-y-auto flex-1 divide-y divide-slate-800/50">
-            {activeConnections.length === 0 ? (
-              <div className="h-full flex items-center justify-center text-xs text-slate-500">
-                暂无活跃连接
-              </div>
-            ) : (
-              activeConnections.map((conn, idx) => (
-                <div key={idx} className="flex items-center justify-between py-2 text-xs">
-                  <div className="truncate max-w-[200px]">
-                    <div className="flex items-center gap-2">
-                      <span className={`px-1.5 py-0.2 rounded text-[10px] font-medium ${
-                        conn.conn_type === 'Proxy' ? 'bg-blue-500/20 text-blue-400' :
-                        conn.conn_type === 'Direct' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-700 text-slate-300'
-                      }`}>
-                        {conn.conn_type}
-                      </span>
-                      <span className="font-medium text-white">{conn.proc_name}</span>
-                    </div>
-                    <div className="text-[10px] text-slate-500 font-mono truncate mt-0.5">
-                      {conn.peer_addr}
-                    </div>
-                  </div>
-                  <div className="text-right font-mono text-[11px] text-slate-400">
-                    <div>↓ {formatBytes(conn.download)}</div>
-                    <div>↑ {formatBytes(conn.upload)}</div>
-                  </div>
+        {tab === 'apps' && (
+          <PreferenceGroup title={tr('应用流量排行', 'Application Traffic')}>
+            <div className="traffic-toolbar">
+              <label className="search-entry">
+                <Search aria-hidden="true" />
+                <input className="adw-search" value={query} placeholder={tr('搜索应用', 'Search Apps')} onChange={(event) => setQuery(event.target.value)} />
+              </label>
+            </div>
+            <div className="table-card">
+              {filteredApps.length === 0 ? <div className="list-empty">{tr('暂无应用流量数据', 'No application traffic data')}</div> : filteredApps.map((app) => (
+                <div className="table-row traffic-row" key={app.id}>
+                  <div className="app-avatar">{app.name.slice(0, 1).toUpperCase()}</div>
+                  <div className="traffic-copy"><strong>{app.name}</strong><span>{app.id}</span></div>
+                  <span className={`badge ${app.primary_type.toLowerCase()}`}>{app.primary_type}</span>
+                  <div className="traffic-values"><span>↓ {formatBytes(app.download)}</span><span>↑ {formatBytes(app.upload)}</span></div>
                 </div>
-              ))
-            )}
-          </div>
-        </div>
+              ))}
+            </div>
+          </PreferenceGroup>
+        )}
+
+        {tab === 'connections' && (
+          <PreferenceGroup title={tr('活跃连接', 'Active Connections')} description={`${filteredConnections.length} ${tr('条连接', 'connections')}`}>
+            <div className="traffic-toolbar">
+              <label className="search-entry">
+                <Search aria-hidden="true" />
+                <input className="adw-search" value={query} placeholder={tr('搜索连接', 'Search Connections')} onChange={(event) => setQuery(event.target.value)} />
+              </label>
+            </div>
+            <div className="table-card">
+              {filteredConnections.length === 0 ? <div className="list-empty">{tr('暂无活跃连接', 'No active connections')}</div> : filteredConnections.map((connection, index) => (
+                <div className="table-row traffic-row" key={`${connection.local_addr}-${index}`}>
+                  <div className="traffic-copy"><strong>{connection.proc_name}</strong><span>{connection.local_addr} → {connection.peer_addr}</span></div>
+                  <span className={`badge ${connection.conn_type.toLowerCase()}`}>{connection.conn_type}</span>
+                  <div className="traffic-values"><span>↓ {formatBytes(connection.download)}</span><span>↑ {formatBytes(connection.upload)}</span></div>
+                </div>
+              ))}
+            </div>
+          </PreferenceGroup>
+        )}
       </div>
     </div>
   );

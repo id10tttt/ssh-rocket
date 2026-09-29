@@ -1,16 +1,17 @@
 import React, { useState } from 'react';
-import { 
-  Server, 
-  Key, 
-  Power, 
-  Eye, 
-  EyeOff, 
-  Globe, 
-  Radio, 
-  CheckCircle2, 
-  AlertCircle 
-} from 'lucide-react';
+import { Edit3, Eye, EyeOff, KeyRound, Plus, Rocket, Trash2 } from 'lucide-react';
 import { AppConfig, Profile } from '../types';
+import {
+  Button,
+  Card,
+  Dialog,
+  EmptyState,
+  Field,
+  IconButton,
+  PageHeader,
+  StatusDot,
+} from '../components/Adwaita';
+import { useI18n } from '../i18n';
 
 interface ConnectViewProps {
   config: AppConfig | null;
@@ -21,6 +22,19 @@ interface ConnectViewProps {
   onSaveConfig: (cfg: AppConfig) => void;
 }
 
+type AuthKind = 'password' | 'private_key';
+
+const emptyProfile = (): Profile => ({
+  id: crypto.randomUUID(),
+  name: '',
+  host: '',
+  port: 22,
+  username: '',
+  auth_type: 'key',
+  password: null,
+  identity_file: '~/.ssh/id_ed25519',
+});
+
 export const ConnectView: React.FC<ConnectViewProps> = ({
   config,
   isRunning,
@@ -29,257 +43,211 @@ export const ConnectView: React.FC<ConnectViewProps> = ({
   onStop,
   onSaveConfig,
 }) => {
-  const [showPassword, setShowPassword] = useState(false);
-  const activeProfile = config?.profiles.find(p => p.id === config.active_profile_id) || config?.profiles[0];
+  const { tr } = useI18n();
+  const [draft, setDraft] = useState<Profile | null>(null);
+  const [showSecret, setShowSecret] = useState(false);
+  const [error, setError] = useState('');
 
-  const handleProfileFieldChange = (field: keyof Profile, value: any) => {
-    if (!config || !activeProfile) return;
-    const updatedProfiles = config.profiles.map(p => {
-      if (p.id === activeProfile.id) {
-        return { ...p, [field]: value };
-      }
-      return p;
+  const profiles = config?.profiles ?? [];
+  const activeId = config?.active_profile ?? profiles[0]?.id ?? null;
+
+  const getAuthKind = (profile: Profile): AuthKind =>
+    profile.auth_type === 'password' ? 'password' : 'private_key';
+
+  const getAuthValue = (profile: Profile) => {
+    if (getAuthKind(profile) === 'password') return profile.password ?? '';
+    return profile.identity_file ?? '';
+  };
+
+  const setAuth = (kind: AuthKind, value: string) => {
+    setDraft((current) => current ? {
+      ...current,
+      auth_type: kind === 'password' ? 'password' : 'key',
+      password: kind === 'password' ? value : null,
+      identity_file: kind === 'private_key' ? value : null,
+    } : current);
+  };
+
+  const saveProfile = () => {
+    if (!config || !draft) return;
+    if (!draft.host.trim()) {
+      setError(tr('服务器地址不能为空', 'Server address cannot be empty'));
+      return;
+    }
+    const exists = profiles.some((profile) => profile.id === draft.id);
+    const nextProfiles = exists
+      ? profiles.map((profile) => profile.id === draft.id ? draft : profile)
+      : [...profiles, draft];
+    onSaveConfig({
+      ...config,
+      profiles: nextProfiles,
+      active_profile: config.active_profile ?? draft.id,
     });
-    onSaveConfig({ ...config, profiles: updatedProfiles });
+    setDraft(null);
   };
 
-  const handleAuthChange = (type: 'password' | 'private_key', value: string) => {
-    if (!config || !activeProfile) return;
-    const auth_method = type === 'password' ? { Password: value } : { PrivateKey: { path: value, passphrase: null } };
-    handleProfileFieldChange('auth_method', auth_method);
+  const removeProfile = (profileId: string) => {
+    if (!config) return;
+    const nextProfiles = profiles.filter((profile) => profile.id !== profileId);
+    onSaveConfig({
+      ...config,
+      profiles: nextProfiles,
+      active_profile: activeId === profileId ? nextProfiles[0]?.id ?? null : activeId,
+    });
   };
 
-  const getPasswordValue = () => {
-    if (activeProfile?.auth_method && 'Password' in activeProfile.auth_method) {
-      return activeProfile.auth_method.Password;
-    }
-    return '';
+  const selectProfile = (profileId: string) => {
+    if (!config) return;
+    onSaveConfig({ ...config, active_profile: profileId });
   };
-
-  const getPrivateKeyPath = () => {
-    if (activeProfile?.auth_method && 'PrivateKey' in activeProfile.auth_method) {
-      return activeProfile.auth_method.PrivateKey.path;
-    }
-    return '';
-  };
-
-  const isPrivateKey = activeProfile?.auth_method && 'PrivateKey' in activeProfile.auth_method;
 
   return (
-    <div className="space-y-6 max-w-4xl mx-auto p-2">
-      {/* Top Status & Connect Action Hero */}
-      <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 flex items-center justify-between shadow-xl backdrop-blur-sm">
-        <div className="flex items-center gap-4">
-          <div className={`w-14 h-14 rounded-2xl flex items-center justify-center border transition-all duration-300 ${
-            isRunning 
-              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' 
-              : 'bg-slate-800/60 border-slate-700/60 text-slate-400'
-          }`}>
-            <Radio className={`w-7 h-7 ${isRunning ? 'animate-pulse' : ''}`} />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <span className={`inline-block w-2.5 h-2.5 rounded-full ${isRunning ? 'bg-emerald-500' : 'bg-slate-500'}`} />
-              <h2 className="text-lg font-semibold text-white">{statusText || (isRunning ? '已连接' : '未连接')}</h2>
-            </div>
-            <p className="text-xs text-slate-400 mt-1">
-              {isRunning 
-                ? `已接管系统网络流量 -> ${activeProfile?.host || '远程代理'}` 
-                : '点击右侧按钮启动透明代理加速与流量分流'}
-            </p>
+    <div className="app-page">
+      <PageHeader title={tr('节点连接', 'Connections')}>
+        <IconButton
+          label={tr('添加连接', 'Add Connection')}
+          onClick={() => {
+            setError('');
+            setDraft(emptyProfile());
+          }}
+        >
+          <Plus />
+        </IconButton>
+      </PageHeader>
+
+      {profiles.length === 0 ? (
+        <div className="app-page-content is-centered">
+          <EmptyState
+            icon={<Rocket />}
+            title={tr('暂无节点配置', 'No Nodes Configured')}
+            description={tr('添加 SSH 节点服务器以开启透明代理', 'Add an SSH server to enable transparent proxy')}
+          >
+            <Button variant="suggested" onClick={() => setDraft(emptyProfile())}>
+              {tr('添加连接', 'Add Connection')}
+            </Button>
+          </EmptyState>
+        </div>
+      ) : (
+        <div className="app-page-content">
+          <div className="card-grid connection-grid">
+            {profiles.map((profile) => {
+              const isActive = profile.id === activeId;
+              const isThisRunning = isActive && isRunning;
+              return (
+                <Card key={profile.id} className={isActive ? 'connection-card is-active' : 'connection-card'}>
+                  <div className="card-title-row">
+                    <StatusDot state={isThisRunning ? 'connected' : 'disconnected'} />
+                    <h3>{profile.name || tr('未命名', 'Untitled')}</h3>
+                    {isActive && <span className="badge proxy">{tr('默认', 'Default')}</span>}
+                    <IconButton
+                      label={tr('编辑', 'Edit')}
+                      disabled={isThisRunning}
+                      onClick={() => {
+                        setError('');
+                        setDraft({ ...profile });
+                      }}
+                    >
+                      <Edit3 />
+                    </IconButton>
+                    <IconButton
+                      label={tr('删除', 'Delete')}
+                      disabled={isThisRunning}
+                      onClick={() => removeProfile(profile.id)}
+                    >
+                      <Trash2 />
+                    </IconButton>
+                  </div>
+                  <dl className="connection-details">
+                    <div><dt>{tr('服务器', 'Server')}</dt><dd>{profile.host}:{profile.port}</dd></div>
+                    <div><dt>{tr('用户名', 'Username')}</dt><dd>{profile.username || '—'}</dd></div>
+                    <div><dt>{tr('认证', 'Authentication')}</dt><dd>{getAuthKind(profile) === 'password' ? tr('密码认证', 'Password') : tr('私钥认证', 'Private Key')}</dd></div>
+                  </dl>
+                  <div className="connection-actions">
+                    {!isActive && (
+                      <Button variant="flat" onClick={() => selectProfile(profile.id)}>{tr('设为默认', 'Set as Default')}</Button>
+                    )}
+                    <span className="dim-label">{isThisRunning ? statusText : tr('未连接', 'Disconnected')}</span>
+                    {isThisRunning ? (
+                      <Button variant="destructive" onClick={onStop}>{tr('断开连接', 'Disconnect')}</Button>
+                    ) : (
+                      <Button variant="suggested" onClick={() => onStart(profile.id)}>{tr('连接', 'Connect')}</Button>
+                    )}
+                  </div>
+                </Card>
+              );
+            })}
           </div>
         </div>
+      )}
 
-        <div>
-          {isRunning ? (
-            <button
-              onClick={onStop}
-              className="flex items-center gap-2 px-6 py-3 bg-rose-600 hover:bg-rose-500 text-white font-medium rounded-xl shadow-lg shadow-rose-900/30 active:scale-95 transition-all"
-            >
-              <Power className="w-5 h-5" />
-              <span>断开连接</span>
-            </button>
-          ) : (
-            <button
-              onClick={() => onStart(activeProfile?.id)}
-              className="flex items-center gap-2 px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white font-medium rounded-xl shadow-lg shadow-blue-900/30 active:scale-95 transition-all"
-            >
-              <Power className="w-5 h-5" />
-              <span>启动代理</span>
-            </button>
+      {draft && (
+        <Dialog
+          title={profiles.some((profile) => profile.id === draft.id) ? tr('编辑连接', 'Edit Connection') : tr('新建连接', 'New Connection')}
+          onClose={() => setDraft(null)}
+          footer={(
+            <>
+              <Button onClick={() => setDraft(null)}>{tr('取消', 'Cancel')}</Button>
+              <Button variant="suggested" onClick={saveProfile}>{tr('保存', 'Save')}</Button>
+            </>
           )}
-        </div>
-      </div>
-
-      {/* Dual Column Configuration Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {/* Card 1: Remote SSH Node */}
-        <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 shadow-lg backdrop-blur-sm">
-          <div className="flex items-center gap-2.5 mb-4 pb-3 border-b border-slate-800/80">
-            <Server className="w-5 h-5 text-blue-400" />
-            <h3 className="text-sm font-semibold text-white">远程 SSH 节点</h3>
-          </div>
-
-          <div className="space-y-4 text-xs">
-            <div>
-              <label className="block text-slate-400 mb-1.5 font-medium">配置名称</label>
+        >
+          <div className="connection-form">
+            <Field label={tr('名称', 'Name')}>
               <input
-                type="text"
-                disabled={isRunning}
-                value={activeProfile?.name || ''}
-                onChange={e => handleProfileFieldChange('name', e.target.value)}
-                placeholder="例如: 香港高速节点"
-                className="w-full bg-slate-950/70 border border-slate-800 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-blue-500 disabled:opacity-50"
+                value={draft.name}
+                onChange={(event) => setDraft({ ...draft, name: event.target.value })}
               />
-            </div>
-
-            <div className="grid grid-cols-3 gap-3">
-              <div className="col-span-2">
-                <label className="block text-slate-400 mb-1.5 font-medium">服务器地址 (Host)</label>
+            </Field>
+            <div className="form-grid-host">
+              <Field label={tr('服务器地址', 'Server Address')} error={error}>
                 <input
-                  type="text"
-                  disabled={isRunning}
-                  value={activeProfile?.host || ''}
-                  onChange={e => handleProfileFieldChange('host', e.target.value)}
-                  placeholder="1.2.3.4 或域名"
-                  className="w-full bg-slate-950/70 border border-slate-800 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-blue-500 disabled:opacity-50"
+                  value={draft.host}
+                  autoFocus
+                  onChange={(event) => {
+                    setError('');
+                    setDraft({ ...draft, host: event.target.value });
+                  }}
                 />
-              </div>
-              <div>
-                <label className="block text-slate-400 mb-1.5 font-medium">SSH 端口</label>
+              </Field>
+              <Field label={tr('端口', 'Port')}>
                 <input
                   type="number"
-                  disabled={isRunning}
-                  value={activeProfile?.port || 22}
-                  onChange={e => handleProfileFieldChange('port', parseInt(e.target.value) || 22)}
-                  className="w-full bg-slate-950/70 border border-slate-800 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-blue-500 disabled:opacity-50"
+                  min={1}
+                  max={65535}
+                  value={draft.port}
+                  onChange={(event) => setDraft({ ...draft, port: Number(event.target.value) || 22 })}
                 />
-              </div>
+              </Field>
             </div>
-
-            <div>
-              <label className="block text-slate-400 mb-1.5 font-medium">登录用户名</label>
-              <input
-                type="text"
-                disabled={isRunning}
-                value={activeProfile?.user || ''}
-                onChange={e => handleProfileFieldChange('user', e.target.value)}
-                placeholder="root"
-                className="w-full bg-slate-950/70 border border-slate-800 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-blue-500 disabled:opacity-50"
-              />
-            </div>
-
-            <div>
-              <div className="flex items-center justify-between mb-1.5">
-                <label className="text-slate-400 font-medium">认证方式</label>
-                <div className="flex gap-2">
-                  <button
-                    disabled={isRunning}
-                    onClick={() => handleAuthChange('password', '')}
-                    className={`px-2 py-0.5 rounded text-[11px] font-medium transition-all ${
-                      !isPrivateKey ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400'
-                    }`}
-                  >
-                    密码
-                  </button>
-                  <button
-                    disabled={isRunning}
-                    onClick={() => handleAuthChange('private_key', '~/.ssh/id_rsa')}
-                    className={`px-2 py-0.5 rounded text-[11px] font-medium transition-all ${
-                      isPrivateKey ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400'
-                    }`}
-                  >
-                    私钥文件
-                  </button>
-                </div>
-              </div>
-
-              {!isPrivateKey ? (
-                <div className="relative">
-                  <input
-                    type={showPassword ? 'text' : 'password'}
-                    disabled={isRunning}
-                    value={getPasswordValue()}
-                    onChange={e => handleAuthChange('password', e.target.value)}
-                    placeholder="请输入 SSH 密码"
-                    className="w-full bg-slate-950/70 border border-slate-800 rounded-lg pl-3 pr-9 py-2 text-white focus:outline-none focus:border-blue-500 disabled:opacity-50"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    className="absolute right-2.5 top-2 text-slate-400 hover:text-slate-200"
-                  >
-                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                </div>
-              ) : (
+            <Field label={tr('用户名', 'Username')}>
+              <input value={draft.username} onChange={(event) => setDraft({ ...draft, username: event.target.value })} />
+            </Field>
+            <Field label={tr('认证方式', 'Authentication')}>
+              <select
+                value={getAuthKind(draft)}
+                onChange={(event) => setAuth(event.target.value as AuthKind, '')}
+              >
+                <option value="private_key">{tr('私钥认证', 'Private Key')}</option>
+                <option value="password">{tr('密码认证', 'Password')}</option>
+              </select>
+            </Field>
+            <Field label={getAuthKind(draft) === 'password' ? tr('SSH 密码', 'SSH Password') : tr('私钥', 'Private Key')}>
+              <div className="secret-entry">
                 <input
-                  type="text"
-                  disabled={isRunning}
-                  value={getPrivateKeyPath()}
-                  onChange={e => handleAuthChange('private_key', e.target.value)}
-                  placeholder="私钥路径, 如 /home/user/.ssh/id_ed25519"
-                  className="w-full bg-slate-950/70 border border-slate-800 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-blue-500 disabled:opacity-50"
+                  type={getAuthKind(draft) === 'password' && !showSecret ? 'password' : 'text'}
+                  value={getAuthValue(draft)}
+                  onChange={(event) => setAuth(getAuthKind(draft), event.target.value)}
                 />
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Card 2: Local Socks & DNS */}
-        <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 shadow-lg backdrop-blur-sm flex flex-col justify-between">
-          <div>
-            <div className="flex items-center gap-2.5 mb-4 pb-3 border-b border-slate-800/80">
-              <Globe className="w-5 h-5 text-emerald-400" />
-              <h3 className="text-sm font-semibold text-white">本地监听与分流设置</h3>
-            </div>
-
-            <div className="space-y-4 text-xs">
-              <div>
-                <label className="block text-slate-400 mb-1.5 font-medium">本地 Socks5 代理端口</label>
-                <div className="bg-slate-950/70 border border-slate-800 rounded-lg px-3 py-2 text-slate-300 font-mono">
-                  127.0.0.1:17880
-                </div>
-                <p className="text-[11px] text-slate-500 mt-1">由系统守护核心自动管理监听</p>
+                {getAuthKind(draft) === 'password' ? (
+                  <IconButton label={showSecret ? tr('隐藏密码', 'Hide Password') : tr('显示密码', 'Show Password')} onClick={() => setShowSecret(!showSecret)}>
+                    {showSecret ? <EyeOff /> : <Eye />}
+                  </IconButton>
+                ) : <KeyRound aria-hidden="true" />}
               </div>
-
-              <div>
-                <label className="block text-slate-400 mb-1.5 font-medium">远端 DNS 解析服务器</label>
-                <input
-                  type="text"
-                  disabled={isRunning}
-                  value={config?.settings.dns_server || '8.8.8.8'}
-                  onChange={e => {
-                    if (config) {
-                      onSaveConfig({
-                        ...config,
-                        settings: { ...config.settings, dns_server: e.target.value }
-                      });
-                    }
-                  }}
-                  className="w-full bg-slate-950/70 border border-slate-800 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-blue-500 disabled:opacity-50"
-                />
-              </div>
-
-              <div className="pt-2">
-                <div className="bg-slate-950/40 border border-slate-800/60 rounded-xl p-3 space-y-2">
-                  <div className="flex items-center gap-2 text-slate-300">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                    <span>透明代理与 TUN 模式</span>
-                  </div>
-                  <p className="text-[11px] text-slate-500">
-                    通过特权 Helper 会话接管系统网络路由，实现全局应用与域名的毫秒级分流。
-                  </p>
-                </div>
-              </div>
-            </div>
+            </Field>
           </div>
-
-          <div className="text-[11px] text-slate-500 text-center py-2">
-            配置修改将实时保存在本地磁盘
-          </div>
-        </div>
-      </div>
+        </Dialog>
+      )}
     </div>
   );
 };

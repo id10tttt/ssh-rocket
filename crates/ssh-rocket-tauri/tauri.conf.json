@@ -11,8 +11,8 @@
       {
         "title": "SSH Rocket",
         "label": "main",
-        "width": 960,
-        "height": 650,
+        "width": 920,
+        "height": 640,
         "minWidth": 800,
         "minHeight": 550,
         "center": true,

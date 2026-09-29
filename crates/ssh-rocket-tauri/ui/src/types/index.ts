@@ -5,13 +5,15 @@ export interface Profile {
   name: string;
   host: string;
   port: number;
-  user: string;
-  auth_method: any;
+  username: string;
+  auth_type: 'key' | 'password';
+  password: string | null;
+  identity_file: string | null;
 }
 
 export interface DomainRule {
   pattern: string;
-  kind: 'Domain' | 'DomainSuffix' | 'DomainKeyword' | 'Legacy';
+  kind: 'domain' | 'domain-suffix' | 'domain-keyword' | 'legacy';
   action: RuleAction;
 }
 
@@ -26,11 +28,21 @@ export interface AppRule {
 }
 
 export interface Settings {
-  auto_start: boolean;
-  system_proxy: boolean;
   dns_server: string;
-  dns_port: number;
-  rule_source: string;
+  default_policy: RuleAction;
+  custom_overrides: IpRule[];
+  rule_source_url: string;
+  rule_source_name: string;
+  rule_source_updated_at: number;
+  ipv6: boolean;
+  theme_mode: 'auto' | 'light' | 'dark';
+  language: 'auto' | 'chinese' | 'english';
+  floating_widget: {
+    enabled: boolean;
+    idle_opacity: number;
+    fade_delay_secs: number;
+    speed_decimals: number;
+  };
   app_rules: AppRule[];
   domain_rules: DomainRule[];
   ip_rules: IpRule[];
@@ -53,7 +65,7 @@ export interface PortForwardRule {
 }
 
 export interface AppConfig {
-  active_profile_id: string | null;
+  active_profile: string | null;
   profiles: Profile[];
   port_forwards: PortForwardRule[];
   settings: Settings;

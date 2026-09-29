@@ -1,6 +1,9 @@
 import React from 'react';
-import { Settings as SettingsIcon, Shield, Laptop, Network } from 'lucide-react';
-import { AppConfig } from '../types';
+import { invoke } from '@tauri-apps/api/core';
+import { Languages, MonitorCog, Moon } from 'lucide-react';
+import { AppConfig, Settings } from '../types';
+import { ActionRow, PageHeader, PreferenceGroup, Switch } from '../components/Adwaita';
+import { useI18n } from '../i18n';
 
 interface SettingsViewProps {
   config: AppConfig | null;
@@ -8,97 +11,107 @@ interface SettingsViewProps {
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({ config, onSaveConfig }) => {
-  const handleToggle = (key: 'auto_start' | 'system_proxy') => {
-    if (!config) return;
-    onSaveConfig({
-      ...config,
-      settings: {
-        ...config.settings,
-        [key]: !config.settings[key],
-      },
-    });
+  const { tr } = useI18n();
+  if (!config) {
+    return <div className="app-page"><PageHeader title={tr('应用设置', 'Settings')} /></div>;
+  }
+
+  const updateSettings = (patch: Partial<Settings>) => {
+    onSaveConfig({ ...config, settings: { ...config.settings, ...patch } });
   };
 
-  const handleDnsChange = (val: string) => {
-    if (!config) return;
-    onSaveConfig({
-      ...config,
-      settings: {
-        ...config.settings,
-        dns_server: val,
-      },
-    });
+  const updateFloating = (patch: Partial<Settings['floating_widget']>) => {
+    updateSettings({ floating_widget: { ...config.settings.floating_widget, ...patch } });
+  };
+
+  const toggleFloating = async () => {
+    const enabled = !config.settings.floating_widget.enabled;
+    updateFloating({ enabled });
+    try {
+      await invoke('set_floating_window_visible', { visible: enabled });
+    } catch (error) {
+      console.error(error);
+    }
   };
 
   return (
-    <div className="space-y-6 max-w-3xl mx-auto p-2">
-      <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 shadow-lg backdrop-blur-sm space-y-6">
-        <div className="flex items-center gap-2.5 pb-4 border-b border-slate-800">
-          <SettingsIcon className="w-5 h-5 text-blue-400" />
-          <h3 className="text-sm font-semibold text-white">常规与系统偏好</h3>
+    <div className="app-page">
+      <PageHeader title={tr('应用设置', 'Settings')} />
+      <div className="app-page-content settings-content">
+        <div className="settings-columns">
+          <PreferenceGroup title={tr('外观', 'Appearance')}>
+            <ActionRow title={tr('主题', 'Theme')} prefix={<Moon />}>
+              <select
+                className="row-select"
+                value={config.settings.theme_mode}
+                onChange={(event) => updateSettings({ theme_mode: event.target.value as Settings['theme_mode'] })}
+              >
+                <option value="auto">{tr('跟随系统', 'Follow System')}</option>
+                <option value="light">{tr('浅色', 'Light')}</option>
+                <option value="dark">{tr('深色', 'Dark')}</option>
+              </select>
+            </ActionRow>
+          </PreferenceGroup>
+
+          <PreferenceGroup title={tr('语言与区域', 'Language & Region')}>
+            <ActionRow title={tr('界面语言', 'Interface Language')} prefix={<Languages />}>
+              <select
+                className="row-select"
+                value={config.settings.language}
+                onChange={(event) => updateSettings({ language: event.target.value as Settings['language'] })}
+              >
+                <option value="auto">{tr('跟随系统', 'Follow System')}</option>
+                <option value="chinese">简体中文</option>
+                <option value="english">English</option>
+              </select>
+            </ActionRow>
+          </PreferenceGroup>
         </div>
 
-        {/* Setting Items */}
-        <div className="space-y-4">
-          <div className="flex items-center justify-between py-2">
-            <div>
-              <h4 className="text-xs font-semibold text-white">开机自动启动</h4>
-              <p className="text-[11px] text-slate-400 mt-0.5">登录桌面系统后在后台自动静默启动服务</p>
-            </div>
-            <button
-              onClick={() => handleToggle('auto_start')}
-              className={`w-12 h-6 rounded-full transition-colors relative ${
-                config?.settings.auto_start ? 'bg-blue-600' : 'bg-slate-800'
-              }`}
-            >
-              <div
-                className={`w-4 h-4 rounded-full bg-white transition-transform absolute top-1 ${
-                  config?.settings.auto_start ? 'left-7' : 'left-1'
-                }`}
-              />
-            </button>
-          </div>
-
-          <div className="flex items-center justify-between py-2 border-t border-slate-800/60">
-            <div>
-              <h4 className="text-xs font-semibold text-white">系统全局代理联动</h4>
-              <p className="text-[11px] text-slate-400 mt-0.5">连接成功后自动配置系统网络代理环境 (GNOME / macOS)</p>
-            </div>
-            <button
-              onClick={() => handleToggle('system_proxy')}
-              className={`w-12 h-6 rounded-full transition-colors relative ${
-                config?.settings.system_proxy ? 'bg-blue-600' : 'bg-slate-800'
-              }`}
-            >
-              <div
-                className={`w-4 h-4 rounded-full bg-white transition-transform absolute top-1 ${
-                  config?.settings.system_proxy ? 'left-7' : 'left-1'
-                }`}
-              />
-            </button>
-          </div>
-
-          <div className="py-2 border-t border-slate-800/60">
-            <h4 className="text-xs font-semibold text-white mb-1">远端 DNS 解析服务器</h4>
-            <p className="text-[11px] text-slate-400 mb-2">防止本地 DNS 污染，默认采用 Google Public DNS</p>
-            <input
-              type="text"
-              value={config?.settings.dns_server || '8.8.8.8'}
-              onChange={e => handleDnsChange(e.target.value)}
-              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500 font-mono"
+        <PreferenceGroup title={tr('小工具与插件', 'Widgets & Plugins')} description={tr('配置桌面悬浮监控组件', 'Configure the desktop floating monitor')}>
+          <ActionRow
+            title={tr('悬浮监控球', 'Floating Monitor')}
+            subtitle={tr('在桌面显示实时网络速度与硬件占用', 'Show live network speed and hardware usage on the desktop')}
+            prefix={<MonitorCog />}
+          >
+            <Switch
+              checked={config.settings.floating_widget.enabled}
+              label={tr('悬浮监控球', 'Floating Monitor')}
+              onClick={toggleFloating}
             />
-          </div>
-        </div>
-      </div>
-
-      <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 shadow-lg backdrop-blur-sm space-y-3">
-        <h4 className="text-xs font-semibold text-white">关于 SSH Rocket (Tauri 2.0)</h4>
-        <p className="text-xs text-slate-400 leading-relaxed">
-          基于 Rust 原生内核驱动的跨平台 SSH 透明代理工具，专为 Linux (Wayland) 与 macOS 打造。
-        </p>
-        <div className="text-[11px] text-slate-500 font-mono pt-2">
-          v2.0.0 • GPL-3.0-or-later
-        </div>
+          </ActionRow>
+          <ActionRow title={tr('闲置透明度', 'Idle Opacity')} subtitle="10% – 90%">
+            <input
+              className="row-number"
+              type="number"
+              min={10}
+              max={90}
+              step={5}
+              value={Math.round(config.settings.floating_widget.idle_opacity * 100)}
+              onChange={(event) => updateFloating({ idle_opacity: Number(event.target.value) / 100 })}
+            />
+          </ActionRow>
+          <ActionRow title={tr('淡出延迟', 'Fade Delay')}>
+            <input
+              className="row-number"
+              type="number"
+              min={1}
+              max={30}
+              value={config.settings.floating_widget.fade_delay_secs}
+              onChange={(event) => updateFloating({ fade_delay_secs: Number(event.target.value) })}
+            />
+          </ActionRow>
+          <ActionRow title={tr('网速小数位数', 'Speed Decimal Places')} subtitle={tr('0 – 3 位', '0 – 3 digits')}>
+            <input
+              className="row-number"
+              type="number"
+              min={0}
+              max={3}
+              value={config.settings.floating_widget.speed_decimals}
+              onChange={(event) => updateFloating({ speed_decimals: Number(event.target.value) })}
+            />
+          </ActionRow>
+        </PreferenceGroup>
       </div>
     </div>
   );

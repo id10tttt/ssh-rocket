@@ -104,3 +104,17 @@ pub async fn toggle_floating_window(app: AppHandle) -> Result<bool, String> {
         Err("悬浮窗口不存在".into())
     }
 }
+
+#[tauri::command]
+pub async fn set_floating_window_visible(app: AppHandle, visible: bool) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("floating") {
+        if visible {
+            window.show().map_err(|e| e.to_string())?;
+        } else {
+            window.hide().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    } else {
+        Err("悬浮窗口不存在".into())
+    }
+}

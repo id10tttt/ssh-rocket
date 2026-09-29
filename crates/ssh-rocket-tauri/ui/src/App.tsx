@@ -8,6 +8,9 @@ import { TrafficView } from './views/TrafficView';
 import { LogsView } from './views/LogsView';
 import { ForwardView } from './views/ForwardView';
 import { SettingsView } from './views/SettingsView';
+import { StatusDot } from './components/Adwaita';
+import { I18nProvider } from './components/I18nProvider';
+import { resolveLanguage, translate } from './i18n';
 import { 
   AppConfig, 
   DesktopApp, 
@@ -85,6 +88,15 @@ export function App() {
     };
   }, []);
 
+  useEffect(() => {
+    const theme = config?.settings.theme_mode;
+    if (theme === 'light' || theme === 'dark') {
+      document.documentElement.dataset.theme = theme;
+    } else {
+      delete document.documentElement.dataset.theme;
+    }
+  }, [config?.settings.theme_mode]);
+
   const handleSaveConfig = async (newConfig: AppConfig) => {
     setConfig(newConfig);
     try {
@@ -98,7 +110,7 @@ export function App() {
     try {
       await invoke('start_service', { profileId: profileId || null });
     } catch (err: any) {
-      alert(`启动失败: ${err}`);
+      alert(`${translate(resolveLanguage(config?.settings.language), '启动失败', 'Failed to start')}: ${err}`);
     }
   };
 
@@ -117,69 +129,80 @@ export function App() {
     return res;
   };
 
-  const handleToggleHud = async () => {
-    try {
-      await invoke('toggle_floating_window');
-    } catch (err) {
-      console.error(err);
-    }
+  const formatSpeed = (bytes: number) => {
+    if (bytes < 1024) return `${bytes.toFixed(0)} B/s`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB/s`;
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB/s`;
   };
 
+  const connectionState = isRunning
+    ? 'connected'
+    : statusText.includes('正在') || /connecting/i.test(statusText)
+      ? 'connecting'
+      : 'disconnected';
+  const language = resolveLanguage(config?.settings.language);
+  const tr = (chinese: string, english: string) => translate(language, chinese, english);
+  const localizedStatus = ({
+    未连接: tr('未连接', 'Disconnected'),
+    已连接: tr('已连接', 'Connected'),
+    '正在连接…': tr('正在连接…', 'Connecting…'),
+    '正在断开…': tr('正在断开…', 'Disconnecting…'),
+  } as Record<string, string>)[statusText] ?? statusText;
+
+  useEffect(() => {
+    document.documentElement.lang = language === 'en' ? 'en' : 'zh-CN';
+  }, [language]);
+
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-slate-950 text-slate-100">
-      <Sidebar
-        activeTab={activeTab}
-        onTabChange={setActiveTab}
-        isRunning={isRunning}
-        onToggleHud={handleToggleHud}
-      />
-      <main className="flex-1 h-screen overflow-y-auto p-6">
-        {activeTab === 'connect' && (
-          <ConnectView
-            config={config}
-            isRunning={isRunning}
-            statusText={statusText}
-            onStart={handleStart}
-            onStop={handleStop}
-            onSaveConfig={handleSaveConfig}
-          />
-        )}
-        {activeTab === 'rules' && (
-          <RulesView
-            config={config}
-            desktopApps={desktopApps}
-            onSaveConfig={handleSaveConfig}
-            onImportRules={handleImportRules}
-          />
-        )}
-        {activeTab === 'traffic' && (
-          <TrafficView
-            speed={speed}
-            appTraffic={appTraffic}
-            activeConnections={activeConnections}
-            isRunning={isRunning}
-          />
-        )}
-        {activeTab === 'logs' && (
-          <LogsView
-            logs={logs}
-            onClearLogs={() => setLogs([])}
-          />
-        )}
-        {activeTab === 'forward' && (
-          <ForwardView
-            config={config}
-            onSaveConfig={handleSaveConfig}
-          />
-        )}
-        {activeTab === 'settings' && (
-          <SettingsView
-            config={config}
-            onSaveConfig={handleSaveConfig}
-          />
-        )}
-      </main>
-    </div>
+    <I18nProvider language={language}>
+      <div className="app-shell">
+        <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
+        <main className="app-main">
+          <div className="app-view">
+            {activeTab === 'connect' && (
+              <ConnectView
+                config={config}
+                isRunning={isRunning}
+                statusText={localizedStatus}
+                onStart={handleStart}
+                onStop={handleStop}
+                onSaveConfig={handleSaveConfig}
+              />
+            )}
+            {activeTab === 'rules' && (
+              <RulesView
+                config={config}
+                desktopApps={desktopApps}
+                onSaveConfig={handleSaveConfig}
+                onImportRules={handleImportRules}
+              />
+            )}
+            {activeTab === 'traffic' && (
+              <TrafficView
+                speed={speed}
+                appTraffic={appTraffic}
+                activeConnections={activeConnections}
+                isRunning={isRunning}
+              />
+            )}
+            {activeTab === 'logs' && (
+              <LogsView logs={logs} onClearLogs={() => setLogs([])} />
+            )}
+            {activeTab === 'forward' && (
+              <ForwardView config={config} onSaveConfig={handleSaveConfig} />
+            )}
+            {activeTab === 'settings' && (
+              <SettingsView config={config} onSaveConfig={handleSaveConfig} />
+            )}
+          </div>
+          <footer className="app-statusbar">
+            <StatusDot state={connectionState} />
+            <span className="status-copy">{localizedStatus}</span>
+            <span className="speed-copy">↑ {formatSpeed(speed.upload)}　↓ {formatSpeed(speed.download)}</span>
+          </footer>
+        </main>
+      </div>
+    </I18nProvider>
   );
 }
 

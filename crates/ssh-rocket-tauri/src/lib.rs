@@ -7,6 +7,7 @@ pub mod types;
 
 use commands::*;
 use controller::RuntimeController;
+use ssh_rocket_core::AppConfig;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
@@ -31,6 +32,7 @@ pub fn run() {
             get_desktop_apps,
             import_rules,
             toggle_floating_window,
+            set_floating_window_visible,
         ])
         .setup(|app| {
             // 系统托盘菜单
@@ -66,6 +68,15 @@ pub fn run() {
                     _ => {}
                 })
                 .build(app)?;
+
+            if AppConfig::load()
+                .map(|config| config.settings.floating_widget.enabled)
+                .unwrap_or(false)
+            {
+                if let Some(window) = app.get_webview_window("floating") {
+                    window.show()?;
+                }
+            }
 
             Ok(())
         })

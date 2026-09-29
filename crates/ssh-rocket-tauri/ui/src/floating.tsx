@@ -10,7 +10,7 @@ interface SpeedDto {
   download: number;
 }
 
-function FloatingHUD() {
+export function FloatingHUD() {
   const [speed, setSpeed] = useState<SpeedDto>({ upload: 0, download: 0 });
   const [statusText, setStatusText] = useState('未连接');
 
@@ -40,25 +40,25 @@ function FloatingHUD() {
   return (
     <div
       onMouseDown={handleMouseDown}
-      className="w-full h-full bg-slate-900/90 border border-slate-700/80 rounded-2xl p-2.5 flex items-center justify-between text-white backdrop-blur-md shadow-2xl cursor-move select-none"
+      className="floating-hud"
     >
-      <div className="flex items-center gap-2">
-        <div className="w-8 h-8 rounded-xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-400">
-          <Rocket className="w-4 h-4" />
+      <div className="floating-identity">
+        <div className={statusText === '已连接' ? 'floating-logo is-connected' : 'floating-logo'}>
+          <Rocket />
         </div>
-        <div className="flex flex-col">
-          <span className="text-[10px] text-slate-400 font-medium">SSH Rocket</span>
-          <span className="text-[10px] text-emerald-400 font-mono truncate max-w-[65px]">{statusText}</span>
+        <div className="floating-copy">
+          <strong>SSH Rocket</strong>
+          <span>{statusText}</span>
         </div>
       </div>
 
-      <div className="flex flex-col items-end font-mono text-[11px] leading-tight space-y-0.5">
-        <div className="flex items-center gap-1 text-emerald-400">
-          <ArrowDown className="w-3 h-3" />
+      <div className="floating-speeds">
+        <div className="download">
+          <ArrowDown />
           <span>{formatBytes(speed.download)}/s</span>
         </div>
-        <div className="flex items-center gap-1 text-blue-400">
-          <ArrowUp className="w-3 h-3" />
+        <div className="upload">
+          <ArrowUp />
           <span>{formatBytes(speed.upload)}/s</span>
         </div>
       </div>
