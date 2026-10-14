@@ -77,13 +77,13 @@ impl FloatingWidget {
         proxy_icon.add_css_class("floating-icon-off");
         proxy_icon.set_tooltip_text(Some(tr("action.proxy")));
 
-        let proxy_up_box = gtk::Box::new(gtk::Orientation::Horizontal, 1);
+        let proxy_up_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         let proxy_up_arrow = gtk::Label::builder()
             .label("↑")
             .css_classes(["stat-arrow-up", "floating-stat-arrow"])
             .build();
         let proxy_up_label = gtk::Label::builder()
-            .label(&init_speed)
+            .label(init_speed.trim_start())
             .css_classes(["numeric", "floating-stat-num"])
             .halign(gtk::Align::Start)
             .xalign(0.0)
@@ -92,13 +92,13 @@ impl FloatingWidget {
         proxy_up_box.append(&proxy_up_arrow);
         proxy_up_box.append(&proxy_up_label);
 
-        let proxy_down_box = gtk::Box::new(gtk::Orientation::Horizontal, 1);
+        let proxy_down_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         let proxy_down_arrow = gtk::Label::builder()
             .label("↓")
             .css_classes(["stat-arrow-down", "floating-stat-arrow"])
             .build();
         let proxy_down_label = gtk::Label::builder()
-            .label(&init_speed)
+            .label(init_speed.trim_start())
             .css_classes(["numeric", "floating-stat-num"])
             .halign(gtk::Align::Start)
             .xalign(0.0)
@@ -117,13 +117,13 @@ impl FloatingWidget {
         direct_icon.add_css_class("floating-icon-direct");
         direct_icon.set_tooltip_text(Some(tr("action.direct")));
 
-        let direct_up_box = gtk::Box::new(gtk::Orientation::Horizontal, 1);
+        let direct_up_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         let direct_up_arrow = gtk::Label::builder()
             .label("↑")
             .css_classes(["stat-arrow-up", "floating-stat-arrow"])
             .build();
         let direct_up_label = gtk::Label::builder()
-            .label(&init_speed)
+            .label(init_speed.trim_start())
             .css_classes(["numeric", "floating-stat-num"])
             .halign(gtk::Align::Start)
             .xalign(0.0)
@@ -132,13 +132,13 @@ impl FloatingWidget {
         direct_up_box.append(&direct_up_arrow);
         direct_up_box.append(&direct_up_label);
 
-        let direct_down_box = gtk::Box::new(gtk::Orientation::Horizontal, 1);
+        let direct_down_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         let direct_down_arrow = gtk::Label::builder()
             .label("↓")
             .css_classes(["stat-arrow-down", "floating-stat-arrow"])
             .build();
         let direct_down_label = gtk::Label::builder()
-            .label(&init_speed)
+            .label(init_speed.trim_start())
             .css_classes(["numeric", "floating-stat-num"])
             .halign(gtk::Align::Start)
             .xalign(0.0)
@@ -420,18 +420,22 @@ impl FloatingWidget {
         if is_proxy_connected {
             self.proxy_icon.remove_css_class("floating-icon-off");
             self.proxy_icon.add_css_class("floating-icon-proxy");
-            self.proxy_up_label.set_text(&format_speed_fixed(proxy_up, dec));
-            self.proxy_down_label.set_text(&format_speed_fixed(proxy_down, dec));
+            let proxy_up_text = format_speed_fixed(proxy_up, dec);
+            let proxy_down_text = format_speed_fixed(proxy_down, dec);
+            self.proxy_up_label.set_text(proxy_up_text.trim_start());
+            self.proxy_down_label.set_text(proxy_down_text.trim_start());
         } else {
             self.proxy_icon.remove_css_class("floating-icon-proxy");
             self.proxy_icon.add_css_class("floating-icon-off");
             let zero = format_speed_fixed(0, dec);
-            self.proxy_up_label.set_text(&zero);
-            self.proxy_down_label.set_text(&zero);
+            self.proxy_up_label.set_text(zero.trim_start());
+            self.proxy_down_label.set_text(zero.trim_start());
         }
 
-        self.direct_up_label.set_text(&format_speed_fixed(direct_up, dec));
-        self.direct_down_label.set_text(&format_speed_fixed(direct_down, dec));
+        let direct_up_text = format_speed_fixed(direct_up, dec);
+        let direct_down_text = format_speed_fixed(direct_down, dec);
+        self.direct_up_label.set_text(direct_up_text.trim_start());
+        self.direct_down_label.set_text(direct_down_text.trim_start());
 
         self.cpu_label.set_text(&format!("{:>3.0}%", metrics.cpu_percent));
         self.ram_label.set_text(&format!("{:>3.0}%", metrics.ram_percent));

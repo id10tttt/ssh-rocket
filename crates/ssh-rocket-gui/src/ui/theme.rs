@@ -225,7 +225,7 @@ pub fn init_theme() {
             opacity: 0.45;
         }
         .floating-stat-num {
-            font-size: 8px;
+            font-size: 12px;
             font-family: monospace;
         }
         .floating-stat-arrow {
