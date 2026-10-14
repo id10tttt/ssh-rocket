@@ -61,12 +61,12 @@ impl FloatingWidget {
         let speed_decimals = Rc::new(Cell::new(config.speed_decimals.clamp(0, 3)));
         let decimals = speed_decimals.get();
         let num_width = if decimals > 0 { 5 + decimals } else { 4 };
-        let width_chars = (num_width + 5) as i32;
+        let width_chars = (num_width + 2) as i32;
         let init_speed = format_speed_fixed(0, decimals as usize);
 
         // --- 左侧：网络流量区 (代理 / 直连，使用网格布局保证列对齐) ---
         let net_grid = gtk::Grid::builder()
-            .column_spacing(4)
+            .column_spacing(2)
             .row_spacing(3)
             .valign(gtk::Align::Center)
             .build();
@@ -113,7 +113,7 @@ impl FloatingWidget {
 
         // 直连行 (图标 + 上传 + 下载)
         let direct_icon = gtk::Image::from_icon_name("applications-internet-symbolic");
-        direct_icon.set_pixel_size(12);
+        direct_icon.set_pixel_size(16);
         direct_icon.add_css_class("floating-icon-direct");
         direct_icon.set_tooltip_text(Some(tr("action.direct")));
 
@@ -398,7 +398,7 @@ impl FloatingWidget {
         let dec = speed_decimals.clamp(0, 3);
         self.speed_decimals.set(dec);
         let num_width = if dec > 0 { 5 + dec } else { 4 };
-        let width_chars = (num_width + 5) as i32;
+        let width_chars = (num_width + 2) as i32;
         self.proxy_up_label.set_width_chars(width_chars);
         self.proxy_down_label.set_width_chars(width_chars);
         self.direct_up_label.set_width_chars(width_chars);
