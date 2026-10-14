@@ -9,7 +9,7 @@ use std::{
 
 const STATUS_PATH: &str = "/StatusNotifierItem";
 const MENU_PATH: &str = "/MenuBar";
-const SPEED_LABEL_GUIDE: &str = "1023K/s▲ 1023K/s▼";
+const SPEED_LABEL_GUIDE: &str = "1023K/s↑ 1023K/s↓";
 const SPEED_FIELD_WIDTH: usize = 7;
 
 const STATUS_XML: &str = r#"
@@ -293,7 +293,7 @@ fn format_speed_label(upload: u64, download: u64) -> String {
     let upload = format_tray_speed(upload);
     let download = format_tray_speed(download);
     format!(
-        "{}▲ {}▼",
+        "{}↑ {}↓",
         pad_speed_field(&upload),
         pad_speed_field(&download)
     )
@@ -541,7 +541,7 @@ mod tests {
     fn formats_single_line_speed_label() {
         assert_eq!(
             format_speed_label(14 * 1024, 2 * 1024),
-            "14.0K/s▲ \u{2007}2.0K/s▼"
+            "14.0K/s↑ \u{2007}2.0K/s↓"
         );
     }
 
@@ -549,7 +549,7 @@ mod tests {
     fn pads_short_speed_fields_without_changing_arrow_positions() {
         assert_eq!(
             format_speed_label(0, 421),
-            "\u{2007}\u{2007}\u{2007}0B/s▲ \u{2007}421B/s▼"
+            "\u{2007}\u{2007}\u{2007}0B/s↑ \u{2007}421B/s↓"
         );
     }
 
