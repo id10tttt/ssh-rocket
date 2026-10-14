@@ -8,7 +8,7 @@ use std::{
 
 const STATUS_PATH: &str = "/StatusNotifierItem";
 const MENU_PATH: &str = "/MenuBar";
-const SPEED_LABEL_GUIDE: &str = "1023K/s↑\n1023K/s↓";
+const SPEED_LABEL_GUIDE: &str = "1023K/s↑ 1023K/s↓";
 
 const STATUS_XML: &str = r#"
 <node>
@@ -74,6 +74,7 @@ struct TrayShared {
     select_profile: Rc<dyn Fn(usize)>,
     toggle_connection: Rc<dyn Fn()>,
     show_window: Rc<dyn Fn()>,
+    show_floating_widget: Rc<dyn Fn()>,
     quit: Rc<dyn Fn()>,
 }
 
@@ -90,6 +91,7 @@ impl TrayManager {
         select_profile: Rc<dyn Fn(usize)>,
         toggle_connection: Rc<dyn Fn()>,
         show_window: Rc<dyn Fn()>,
+        show_floating_widget: Rc<dyn Fn()>,
         quit: Rc<dyn Fn()>,
     ) -> Result<Self, glib::Error> {
         let connection = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)?;
@@ -101,6 +103,7 @@ impl TrayManager {
             select_profile,
             toggle_connection,
             show_window,
+            show_floating_widget,
             quit,
         });
 
@@ -149,7 +152,8 @@ impl TrayManager {
                                 match id {
                                     201 => (menu_shared.toggle_connection)(),
                                     203 => (menu_shared.show_window)(),
-                                    204 => (menu_shared.quit)(),
+                                    204 => (menu_shared.show_floating_widget)(),
+                                    205 => (menu_shared.quit)(),
                                     _ => {}
                                 }
                             }
@@ -257,7 +261,7 @@ fn status_property(shared: &TrayShared, property: &str) -> glib::Variant {
 
 fn format_speed_label(upload: u64, download: u64) -> String {
     format!(
-        "{}↑\n{}↓",
+        "{}↑ {}↓",
         format_tray_speed(upload),
         format_tray_speed(download)
     )
@@ -316,7 +320,8 @@ fn menu_layout(shared: &TrayShared) -> glib::Variant {
     children.push(menu_item(201, toggle_label, enabled));
     children.push(menu_separator(202));
     children.push(menu_item(203, crate::i18n::tr("tray.show_window"), true));
-    children.push(menu_item(204, crate::i18n::tr("tray.quit"), true));
+    children.push(menu_item(204, crate::i18n::tr("tray.show_floating"), true));
+    children.push(menu_item(205, crate::i18n::tr("tray.quit"), true));
 
     let mut root_properties = HashMap::new();
     root_properties.insert("children-display".to_string(), "submenu".to_variant());
@@ -365,10 +370,10 @@ mod tests {
     }
 
     #[test]
-    fn formats_two_line_speed_label() {
+    fn formats_single_line_speed_label() {
         assert_eq!(
             format_speed_label(14 * 1024, 2 * 1024),
-            "14.0K/s↑\n2.0K/s↓"
+            "14.0K/s↑ 2.0K/s↓"
         );
     }
 

@@ -635,6 +635,8 @@ pub fn build_ui(app: &adw::Application) {
         let quit_controller = controller.clone();
         let quitting_ref = quitting.clone();
         let log_buffer_ref = logs_view.proxy_log_buffer.clone();
+        let show_floating_config = config.clone();
+        let show_floating_widget = floating_widget.clone();
         let quit_action: Rc<dyn Fn()> = Rc::new(move || {
             if *quitting_ref.borrow() {
                 return;
@@ -697,6 +699,16 @@ pub fn build_ui(app: &adw::Application) {
                 }
             }),
             Rc::new(move || show_window.present()),
+            Rc::new(move || {
+                {
+                    let mut current = show_floating_config.borrow_mut();
+                    current.settings.floating_widget.enabled = true;
+                    let _ = current.save();
+                }
+                if let Some(hud) = show_floating_widget.borrow().as_ref() {
+                    hud.set_shown(true);
+                }
+            }),
             quit_action,
         ) {
             Ok(manager) => {
