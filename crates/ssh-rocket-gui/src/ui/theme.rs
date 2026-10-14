@@ -205,9 +205,9 @@ pub fn init_theme() {
         .floating-hud-box {
             background-color: alpha(@window_bg_color, 0.88);
             border: 1px solid alpha(currentColor, 0.14);
-            border-radius: 12px;
+            border-radius: 10px;
             box-shadow: none;
-            padding: 6px 10px;
+            padding: 4px 6px;
             transition: border-color 200ms ease;
         }
         .floating-hud-hover {
@@ -225,21 +225,24 @@ pub fn init_theme() {
             opacity: 0.45;
         }
         .floating-stat-num {
-            font-size: 11px;
+            font-size: 8px;
             font-family: monospace;
         }
+        .floating-stat-arrow {
+            font-size: 9px;
+        }
         .floating-separator {
-            margin: 0 2px;
+            margin: 0;
             opacity: 0.16;
         }
         .floating-hw-label {
-            font-size: 10px;
+            font-size: 8px;
             font-weight: 600;
         }
         .floating-hw-val {
-            font-size: 11px;
+            font-size: 8px;
             font-family: monospace;
-            min-width: 26px;
+            min-width: 20px;
             font-weight: bold;
         }
         ",

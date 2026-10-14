@@ -55,7 +55,7 @@ impl FloatingWidget {
             .css_classes(["floating-hud-window"])
             .build();
 
-        let root_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let root_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         root_box.add_css_class("floating-hud-box");
 
         let speed_decimals = Rc::new(Cell::new(config.speed_decimals.clamp(0, 3)));
@@ -66,19 +66,22 @@ impl FloatingWidget {
 
         // --- 左侧：网络流量区 (代理 / 直连，使用网格布局保证列对齐) ---
         let net_grid = gtk::Grid::builder()
-            .column_spacing(8)
-            .row_spacing(4)
+            .column_spacing(4)
+            .row_spacing(3)
             .valign(gtk::Align::Center)
             .build();
 
         // 代理行 (图标 + 上传 + 下载)
         let proxy_icon = gtk::Image::from_icon_name("ssh-rocket-symbolic");
-        proxy_icon.set_pixel_size(14);
+        proxy_icon.set_pixel_size(12);
         proxy_icon.add_css_class("floating-icon-off");
         proxy_icon.set_tooltip_text(Some(tr("action.proxy")));
 
-        let proxy_up_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
-        let proxy_up_arrow = gtk::Label::builder().label("↑").css_classes(["stat-arrow-up"]).build();
+        let proxy_up_box = gtk::Box::new(gtk::Orientation::Horizontal, 1);
+        let proxy_up_arrow = gtk::Label::builder()
+            .label("↑")
+            .css_classes(["stat-arrow-up", "floating-stat-arrow"])
+            .build();
         let proxy_up_label = gtk::Label::builder()
             .label(&init_speed)
             .css_classes(["numeric", "floating-stat-num"])
@@ -89,8 +92,11 @@ impl FloatingWidget {
         proxy_up_box.append(&proxy_up_arrow);
         proxy_up_box.append(&proxy_up_label);
 
-        let proxy_down_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
-        let proxy_down_arrow = gtk::Label::builder().label("↓").css_classes(["stat-arrow-down"]).build();
+        let proxy_down_box = gtk::Box::new(gtk::Orientation::Horizontal, 1);
+        let proxy_down_arrow = gtk::Label::builder()
+            .label("↓")
+            .css_classes(["stat-arrow-down", "floating-stat-arrow"])
+            .build();
         let proxy_down_label = gtk::Label::builder()
             .label(&init_speed)
             .css_classes(["numeric", "floating-stat-num"])
@@ -107,12 +113,15 @@ impl FloatingWidget {
 
         // 直连行 (图标 + 上传 + 下载)
         let direct_icon = gtk::Image::from_icon_name("applications-internet-symbolic");
-        direct_icon.set_pixel_size(14);
+        direct_icon.set_pixel_size(12);
         direct_icon.add_css_class("floating-icon-direct");
         direct_icon.set_tooltip_text(Some(tr("action.direct")));
 
-        let direct_up_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
-        let direct_up_arrow = gtk::Label::builder().label("↑").css_classes(["stat-arrow-up"]).build();
+        let direct_up_box = gtk::Box::new(gtk::Orientation::Horizontal, 1);
+        let direct_up_arrow = gtk::Label::builder()
+            .label("↑")
+            .css_classes(["stat-arrow-up", "floating-stat-arrow"])
+            .build();
         let direct_up_label = gtk::Label::builder()
             .label(&init_speed)
             .css_classes(["numeric", "floating-stat-num"])
@@ -123,8 +132,11 @@ impl FloatingWidget {
         direct_up_box.append(&direct_up_arrow);
         direct_up_box.append(&direct_up_label);
 
-        let direct_down_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
-        let direct_down_arrow = gtk::Label::builder().label("↓").css_classes(["stat-arrow-down"]).build();
+        let direct_down_box = gtk::Box::new(gtk::Orientation::Horizontal, 1);
+        let direct_down_arrow = gtk::Label::builder()
+            .label("↓")
+            .css_classes(["stat-arrow-down", "floating-stat-arrow"])
+            .build();
         let direct_down_label = gtk::Label::builder()
             .label(&init_speed)
             .css_classes(["numeric", "floating-stat-num"])
@@ -148,7 +160,7 @@ impl FloatingWidget {
 
         // --- 右侧：系统硬件资源监控 (网格布局保证硬件名和数值左对齐) ---
         let sys_grid = gtk::Grid::builder()
-            .column_spacing(4)
+            .column_spacing(2)
             .row_spacing(2)
             .valign(gtk::Align::Center)
             .build();
