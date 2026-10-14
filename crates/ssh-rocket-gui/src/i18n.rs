@@ -157,8 +157,15 @@ pub fn tr(key: &'static str) -> &'static str {
         "tray.disconnect" => if is_en { "Disconnect" } else { "断开连接" },
         "tray.connecting" => if is_en { "Connecting…" } else { "正在连接…" },
         "tray.disconnecting" => if is_en { "Disconnecting…" } else { "正在断开…" },
+        "tray.open" => if is_en { "Open SSH Rocket" } else { "打开 SSH Rocket" },
         "tray.show_window" => if is_en { "Show" } else { "显示" },
+        "tray.connected" => if is_en { "Connected" } else { "已连接" },
+        "tray.disconnected" => if is_en { "Disconnected" } else { "未连接" },
+        "tray.global_policy" => if is_en { "Global Policy" } else { "全局策略" },
+        "tray.server" => if is_en { "Server" } else { "服务器节点" },
+        "tray.no_server" => if is_en { "None" } else { "无" },
         "tray.show_floating" => if is_en { "Show Floating HUD" } else { "显示悬浮监控球" },
+        "tray.show_speed" => if is_en { "Show Speed" } else { "显示网速" },
         "tray.quit" => if is_en { "Quit" } else { "退出" },
 
         // Rules View - Tabs

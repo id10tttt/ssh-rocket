@@ -1,5 +1,6 @@
 use gtk4::{gio, glib};
 use glib::variant::{ObjectPath, ToVariant};
+use ssh_rocket_core::RuleAction;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -70,11 +71,16 @@ struct TrayShared {
     state: Cell<TrayConnectionState>,
     speed_label: RefCell<String>,
     revision: Cell<u32>,
-    profiles: Rc<dyn Fn() -> Vec<(String, bool)>>,
+    profiles: Rc<dyn Fn() -> Vec<(String, String, bool)>>,
     select_profile: Rc<dyn Fn(usize)>,
+    policy: Rc<dyn Fn() -> RuleAction>,
+    select_policy: Rc<dyn Fn(RuleAction)>,
     toggle_connection: Rc<dyn Fn()>,
     show_window: Rc<dyn Fn()>,
-    show_floating_widget: Rc<dyn Fn()>,
+    floating_visible: Rc<dyn Fn() -> bool>,
+    set_floating_visible: Rc<dyn Fn(bool)>,
+    speed_visible: Rc<dyn Fn() -> bool>,
+    set_speed_visible: Rc<dyn Fn(bool)>,
     quit: Rc<dyn Fn()>,
 }
 
@@ -87,11 +93,16 @@ pub struct TrayManager {
 
 impl TrayManager {
     pub fn new(
-        profiles: Rc<dyn Fn() -> Vec<(String, bool)>>,
+        profiles: Rc<dyn Fn() -> Vec<(String, String, bool)>>,
         select_profile: Rc<dyn Fn(usize)>,
+        policy: Rc<dyn Fn() -> RuleAction>,
+        select_policy: Rc<dyn Fn(RuleAction)>,
         toggle_connection: Rc<dyn Fn()>,
         show_window: Rc<dyn Fn()>,
-        show_floating_widget: Rc<dyn Fn()>,
+        floating_visible: Rc<dyn Fn() -> bool>,
+        set_floating_visible: Rc<dyn Fn(bool)>,
+        speed_visible: Rc<dyn Fn() -> bool>,
+        set_speed_visible: Rc<dyn Fn(bool)>,
         quit: Rc<dyn Fn()>,
     ) -> Result<Self, glib::Error> {
         let connection = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)?;
@@ -101,9 +112,14 @@ impl TrayManager {
             revision: Cell::new(1),
             profiles,
             select_profile,
+            policy,
+            select_policy,
             toggle_connection,
             show_window,
-            show_floating_widget,
+            floating_visible,
+            set_floating_visible,
+            speed_visible,
+            set_speed_visible,
             quit,
         });
 
@@ -152,8 +168,19 @@ impl TrayManager {
                                 match id {
                                     201 => (menu_shared.toggle_connection)(),
                                     203 => (menu_shared.show_window)(),
-                                    204 => (menu_shared.show_floating_widget)(),
+                                    204 => {
+                                        let visible = !(menu_shared.floating_visible)();
+                                        (menu_shared.set_floating_visible)(visible);
+                                    }
                                     205 => (menu_shared.quit)(),
+                                    206 => {
+                                        let visible = !(menu_shared.speed_visible)();
+                                        (menu_shared.set_speed_visible)(visible);
+                                        emit_speed_label_changed(&menu_connection, &menu_shared);
+                                    }
+                                    300 => (menu_shared.select_policy)(RuleAction::Proxy),
+                                    301 => (menu_shared.select_policy)(RuleAction::Direct),
+                                    302 => (menu_shared.select_policy)(RuleAction::Block),
                                     _ => {}
                                 }
                             }
@@ -215,13 +242,9 @@ impl TrayManager {
         *current = label.clone();
         drop(current);
 
-        let _ = self.connection.emit_signal(
-            None,
-            STATUS_PATH,
-            "org.kde.StatusNotifierItem",
-            "XAyatanaNewLabel",
-            Some(&(label.as_str(), SPEED_LABEL_GUIDE).to_variant()),
-        );
+        if (self.shared.speed_visible)() {
+            emit_speed_label_changed(&self.connection, &self.shared);
+        }
     }
 
     pub fn refresh_menu(&self) {
@@ -253,7 +276,13 @@ fn status_property(shared: &TrayShared, property: &str) -> glib::Variant {
         }.to_variant(),
         "Menu" => ObjectPath::try_from(MENU_PATH).expect("valid menu object path").to_variant(),
         "ItemIsMenu" => true.to_variant(),
-        "XAyatanaLabel" => shared.speed_label.borrow().as_str().to_variant(),
+        "XAyatanaLabel" => {
+            if (shared.speed_visible)() {
+                shared.speed_label.borrow().as_str().to_variant()
+            } else {
+                "".to_variant()
+            }
+        }
         "XAyatanaLabelGuide" => SPEED_LABEL_GUIDE.to_variant(),
         _ => ().to_variant(),
     }
@@ -299,28 +328,103 @@ fn menu_property(property: &str) -> glib::Variant {
 fn menu_layout(shared: &TrayShared) -> glib::Variant {
     let profiles = (shared.profiles)();
     let mut children = Vec::<glib::Variant>::new();
-    for (index, (name, active)) in profiles.iter().enumerate() {
-        let prefix = if *active { "● " } else { "○ " };
-        children.push(menu_item(
-            1000 + index as i32,
-            &format!("{prefix}{name}"),
-            shared.state.get() == TrayConnectionState::Disconnected,
-        ));
-    }
-    if !profiles.is_empty() {
-        children.push(menu_separator(200));
-    }
+    let active_profile = profiles.iter().find(|(_, _, active)| *active);
+    let endpoint = active_profile.map(|(_, endpoint, _)| endpoint.as_str());
+    let profile_name = active_profile
+        .map(|(name, _, _)| name.as_str())
+        .unwrap_or_else(|| crate::i18n::tr("tray.no_server"));
 
-    let (toggle_label, enabled) = match shared.state.get() {
-        TrayConnectionState::Connected => (crate::i18n::tr("tray.disconnect"), true),
-        TrayConnectionState::Connecting => (crate::i18n::tr("tray.connecting"), false),
-        TrayConnectionState::Disconnecting => (crate::i18n::tr("tray.disconnecting"), false),
-        TrayConnectionState::Disconnected => (crate::i18n::tr("tray.connect"), !profiles.is_empty()),
+    children.push(menu_item(203, crate::i18n::tr("tray.open"), true));
+
+    let (connection_label, connection_enabled) = match shared.state.get() {
+        TrayConnectionState::Connected => (
+            status_label(crate::i18n::tr("tray.connected"), endpoint),
+            true,
+        ),
+        TrayConnectionState::Connecting => (
+            status_label(crate::i18n::tr("tray.connecting"), endpoint),
+            false,
+        ),
+        TrayConnectionState::Disconnecting => (
+            status_label(crate::i18n::tr("tray.disconnecting"), endpoint),
+            false,
+        ),
+        TrayConnectionState::Disconnected => (
+            status_label(crate::i18n::tr("tray.disconnected"), endpoint),
+            active_profile.is_some(),
+        ),
     };
-    children.push(menu_item(201, toggle_label, enabled));
+    children.push(menu_item(201, &connection_label, connection_enabled));
     children.push(menu_separator(202));
-    children.push(menu_item(203, crate::i18n::tr("tray.show_window"), true));
-    children.push(menu_item(204, crate::i18n::tr("tray.show_floating"), true));
+
+    let policy = (shared.policy)();
+    let policy_label = format!(
+        "{}：{}",
+        crate::i18n::tr("tray.global_policy"),
+        policy_name(policy)
+    );
+    children.push(submenu_item(
+        210,
+        &policy_label,
+        vec![
+            toggle_menu_item(
+                300,
+                crate::i18n::tr("action.proxy"),
+                true,
+                "radio",
+                policy == RuleAction::Proxy,
+            ),
+            toggle_menu_item(
+                301,
+                crate::i18n::tr("action.direct"),
+                true,
+                "radio",
+                policy == RuleAction::Direct,
+            ),
+            toggle_menu_item(
+                302,
+                crate::i18n::tr("action.block"),
+                true,
+                "radio",
+                policy == RuleAction::Block,
+            ),
+        ],
+    ));
+
+    let profile_items = profiles
+        .iter()
+        .enumerate()
+        .map(|(index, (name, _, active))| {
+            toggle_menu_item(
+                1000 + index as i32,
+                name,
+                shared.state.get() == TrayConnectionState::Disconnected,
+                "radio",
+                *active,
+            )
+        })
+        .collect();
+    children.push(submenu_item(
+        211,
+        &format!("{}：{profile_name}", crate::i18n::tr("tray.server")),
+        profile_items,
+    ));
+
+    children.push(menu_separator(212));
+    children.push(toggle_menu_item(
+        204,
+        crate::i18n::tr("tray.show_floating"),
+        true,
+        "checkmark",
+        (shared.floating_visible)(),
+    ));
+    children.push(toggle_menu_item(
+        206,
+        crate::i18n::tr("tray.show_speed"),
+        true,
+        "checkmark",
+        (shared.speed_visible)(),
+    ));
     children.push(menu_item(205, crate::i18n::tr("tray.quit"), true));
 
     let mut root_properties = HashMap::new();
@@ -329,11 +433,48 @@ fn menu_layout(shared: &TrayShared) -> glib::Variant {
     (shared.revision.get(), layout).to_variant()
 }
 
+fn status_label(status: &str, endpoint: Option<&str>) -> String {
+    endpoint.map_or_else(|| status.to_string(), |value| format!("{status}：{value}"))
+}
+
+fn policy_name(policy: RuleAction) -> &'static str {
+    match policy {
+        RuleAction::Proxy => crate::i18n::tr("action.proxy"),
+        RuleAction::Direct => crate::i18n::tr("action.direct"),
+        RuleAction::Block => crate::i18n::tr("action.block"),
+    }
+}
+
 fn menu_item(id: i32, label: &str, enabled: bool) -> glib::Variant {
     let mut properties = HashMap::new();
     properties.insert("label".to_string(), label.to_variant());
     properties.insert("enabled".to_string(), enabled.to_variant());
     properties.insert("visible".to_string(), true.to_variant());
+    (id, properties, Vec::<glib::Variant>::new()).to_variant()
+}
+
+fn submenu_item(id: i32, label: &str, children: Vec<glib::Variant>) -> glib::Variant {
+    let mut properties = HashMap::new();
+    properties.insert("label".to_string(), label.to_variant());
+    properties.insert("enabled".to_string(), (!children.is_empty()).to_variant());
+    properties.insert("visible".to_string(), true.to_variant());
+    properties.insert("children-display".to_string(), "submenu".to_variant());
+    (id, properties, children).to_variant()
+}
+
+fn toggle_menu_item(
+    id: i32,
+    label: &str,
+    enabled: bool,
+    toggle_type: &str,
+    active: bool,
+) -> glib::Variant {
+    let mut properties = HashMap::new();
+    properties.insert("label".to_string(), label.to_variant());
+    properties.insert("enabled".to_string(), enabled.to_variant());
+    properties.insert("visible".to_string(), true.to_variant());
+    properties.insert("toggle-type".to_string(), toggle_type.to_variant());
+    properties.insert("toggle-state".to_string(), i32::from(active).to_variant());
     (id, properties, Vec::<glib::Variant>::new()).to_variant()
 }
 
@@ -353,6 +494,21 @@ fn emit_menu_changed(connection: &gio::DBusConnection, shared: &TrayShared) {
         "com.canonical.dbusmenu",
         "LayoutUpdated",
         Some(&(revision, 0i32).to_variant()),
+    );
+}
+
+fn emit_speed_label_changed(connection: &gio::DBusConnection, shared: &TrayShared) {
+    let label = if (shared.speed_visible)() {
+        shared.speed_label.borrow().clone()
+    } else {
+        String::new()
+    };
+    let _ = connection.emit_signal(
+        None,
+        STATUS_PATH,
+        "org.kde.StatusNotifierItem",
+        "XAyatanaNewLabel",
+        Some(&(label.as_str(), SPEED_LABEL_GUIDE).to_variant()),
     );
 }
 

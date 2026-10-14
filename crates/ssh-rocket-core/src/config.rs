@@ -140,6 +140,8 @@ pub struct GlobalSettings {
     pub language: Language,
     #[serde(default)]
     pub floating_widget: FloatingWidgetConfig,
+    #[serde(default = "default_true")]
+    pub tray_speed_visible: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,6 +205,7 @@ impl Default for GlobalSettings {
             theme_mode: ThemeMode::Auto,
             language: Language::Chinese,
             floating_widget: FloatingWidgetConfig::default(),
+            tray_speed_visible: true,
         }
     }
 }
@@ -378,6 +381,7 @@ mod tests {
         assert!((settings.floating_widget.idle_opacity - 0.5).abs() < 1e-4);
         assert_eq!(settings.floating_widget.fade_delay_secs, 5);
         assert_eq!(settings.floating_widget.speed_decimals, 1);
+        assert!(settings.tray_speed_visible);
 
         // 往返序列化
         let mut s = GlobalSettings::default();
@@ -385,12 +389,14 @@ mod tests {
         s.floating_widget.idle_opacity = 0.35;
         s.floating_widget.fade_delay_secs = 10;
         s.floating_widget.speed_decimals = 2;
+        s.tray_speed_visible = false;
         let json = serde_json::to_string(&s).expect("serialize");
         let decoded: GlobalSettings = serde_json::from_str(&json).expect("deserialize");
         assert!(!decoded.floating_widget.enabled);
         assert!((decoded.floating_widget.idle_opacity - 0.35).abs() < 1e-4);
         assert_eq!(decoded.floating_widget.fade_delay_secs, 10);
         assert_eq!(decoded.floating_widget.speed_decimals, 2);
+        assert!(!decoded.tray_speed_visible);
     }
 
     #[test]

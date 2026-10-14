@@ -100,11 +100,15 @@ pub fn build_ui(app: &adw::Application) {
     let on_floating_changed = {
         let config = config.clone();
         let floating_widget = floating_widget.clone();
+        let tray_manager = tray_manager.clone();
         Rc::new(move || {
             let cfg = config.borrow().settings.floating_widget.clone();
             if let Some(hud) = floating_widget.borrow().as_ref() {
                 hud.set_shown(cfg.enabled);
                 hud.update_config(cfg.idle_opacity, cfg.fade_delay_secs, cfg.speed_decimals);
+            }
+            if let Some(tray) = tray_manager.borrow().as_ref() {
+                tray.refresh_menu();
             }
         })
     };
@@ -630,13 +634,20 @@ pub fn build_ui(app: &adw::Application) {
         let select_connected = is_connected.clone();
         let toggle_config = config.clone();
         let toggle_buttons = connection_buttons.clone();
+        let policy_config = config.clone();
+        let select_policy_config = config.clone();
+        let select_policy_row = rules_view.policy_row.clone();
+        let select_policy_controller = controller.clone();
         let show_window = win.window.clone();
         let quit_app = app.clone();
         let quit_controller = controller.clone();
         let quitting_ref = quitting.clone();
         let log_buffer_ref = logs_view.proxy_log_buffer.clone();
-        let show_floating_config = config.clone();
-        let show_floating_widget = floating_widget.clone();
+        let floating_visible_config = config.clone();
+        let set_floating_config = config.clone();
+        let set_floating_widget = floating_widget.clone();
+        let speed_visible_config = config.clone();
+        let set_speed_config = config.clone();
         let quit_action: Rc<dyn Fn()> = Rc::new(move || {
             if *quitting_ref.borrow() {
                 return;
@@ -664,6 +675,11 @@ pub fn build_ui(app: &adw::Application) {
                     .map(|profile| {
                         (
                             profile.name.clone(),
+                            if profile.host.contains(':') {
+                                format!("[{}]:{}", profile.host, profile.port)
+                            } else {
+                                format!("{}:{}", profile.host, profile.port)
+                            },
                             current.active_profile == Some(profile.id),
                         )
                     })
@@ -685,6 +701,23 @@ pub fn build_ui(app: &adw::Application) {
                     }
                 }
             }),
+            Rc::new(move || policy_config.borrow().settings.default_policy),
+            Rc::new(move |policy| {
+                {
+                    let mut current = select_policy_config.borrow_mut();
+                    if current.settings.default_policy == policy {
+                        return;
+                    }
+                    current.settings.default_policy = policy;
+                    let _ = current.save();
+                }
+                select_policy_row.set_selected(match policy {
+                    RuleAction::Proxy => 0,
+                    RuleAction::Direct => 1,
+                    RuleAction::Block => 2,
+                });
+                select_policy_controller.borrow().sync_rules();
+            }),
             Rc::new(move || {
                 let active_id = toggle_config.borrow().active_profile.map(|id| id.to_string());
                 let Some(active_id) = active_id else {
@@ -699,15 +732,22 @@ pub fn build_ui(app: &adw::Application) {
                 }
             }),
             Rc::new(move || show_window.present()),
-            Rc::new(move || {
+            Rc::new(move || floating_visible_config.borrow().settings.floating_widget.enabled),
+            Rc::new(move |visible| {
                 {
-                    let mut current = show_floating_config.borrow_mut();
-                    current.settings.floating_widget.enabled = true;
+                    let mut current = set_floating_config.borrow_mut();
+                    current.settings.floating_widget.enabled = visible;
                     let _ = current.save();
                 }
-                if let Some(hud) = show_floating_widget.borrow().as_ref() {
-                    hud.set_shown(true);
+                if let Some(hud) = set_floating_widget.borrow().as_ref() {
+                    hud.set_shown(visible);
                 }
+            }),
+            Rc::new(move || speed_visible_config.borrow().settings.tray_speed_visible),
+            Rc::new(move |visible| {
+                let mut current = set_speed_config.borrow_mut();
+                current.settings.tray_speed_visible = visible;
+                let _ = current.save();
             }),
             quit_action,
         ) {
@@ -719,6 +759,15 @@ pub fn build_ui(app: &adw::Application) {
                 log_buffer_ref.insert(&mut end, &format!("[tray] {error}\n"));
             }
         }
+    }
+
+    {
+        let tray_manager = tray_manager.clone();
+        rules_view.policy_row.connect_selected_notify(move |_| {
+            if let Some(tray) = tray_manager.borrow().as_ref() {
+                tray.refresh_menu();
+            }
+        });
     }
 
     // 10. 桌面通用悬浮监控球 (Floating HUD)
