@@ -1,9 +1,14 @@
 use gtk4::{gio, glib};
 use glib::variant::{ObjectPath, ToVariant};
-use std::{cell::Cell, collections::HashMap, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+};
 
 const STATUS_PATH: &str = "/StatusNotifierItem";
 const MENU_PATH: &str = "/MenuBar";
+const SPEED_LABEL_GUIDE: &str = "1023K/s↑\n1023K/s↓";
 
 const STATUS_XML: &str = r#"
 <node>
@@ -15,6 +20,8 @@ const STATUS_XML: &str = r#"
     <property name="IconName" type="s" access="read"/>
     <property name="Menu" type="o" access="read"/>
     <property name="ItemIsMenu" type="b" access="read"/>
+    <property name="XAyatanaLabel" type="s" access="read"/>
+    <property name="XAyatanaLabelGuide" type="s" access="read"/>
     <method name="Activate"><arg type="i" direction="in"/><arg type="i" direction="in"/></method>
     <method name="ContextMenu"><arg type="i" direction="in"/><arg type="i" direction="in"/></method>
     <method name="SecondaryActivate"><arg type="i" direction="in"/><arg type="i" direction="in"/></method>
@@ -22,6 +29,7 @@ const STATUS_XML: &str = r#"
     <signal name="NewIcon"/>
     <signal name="NewStatus"><arg type="s"/></signal>
     <signal name="NewTitle"/>
+    <signal name="XAyatanaNewLabel"><arg type="s"/><arg type="s"/></signal>
   </interface>
 </node>
 "#;
@@ -60,6 +68,7 @@ pub enum TrayConnectionState {
 
 struct TrayShared {
     state: Cell<TrayConnectionState>,
+    speed_label: RefCell<String>,
     revision: Cell<u32>,
     profiles: Rc<dyn Fn() -> Vec<(String, bool)>>,
     select_profile: Rc<dyn Fn(usize)>,
@@ -86,6 +95,7 @@ impl TrayManager {
         let connection = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)?;
         let shared = Rc::new(TrayShared {
             state: Cell::new(TrayConnectionState::Disconnected),
+            speed_label: RefCell::new(format_speed_label(0, 0)),
             revision: Cell::new(1),
             profiles,
             select_profile,
@@ -191,6 +201,25 @@ impl TrayManager {
         emit_menu_changed(&self.connection, &self.shared);
     }
 
+    /// 更新托盘中显示的系统总上传和下载速度。
+    pub fn set_speed(&self, upload: u64, download: u64) {
+        let label = format_speed_label(upload, download);
+        let mut current = self.shared.speed_label.borrow_mut();
+        if *current == label {
+            return;
+        }
+        *current = label.clone();
+        drop(current);
+
+        let _ = self.connection.emit_signal(
+            None,
+            STATUS_PATH,
+            "org.kde.StatusNotifierItem",
+            "XAyatanaNewLabel",
+            Some(&(label.as_str(), SPEED_LABEL_GUIDE).to_variant()),
+        );
+    }
+
     pub fn refresh_menu(&self) {
         emit_menu_changed(&self.connection, &self.shared);
     }
@@ -220,7 +249,36 @@ fn status_property(shared: &TrayShared, property: &str) -> glib::Variant {
         }.to_variant(),
         "Menu" => ObjectPath::try_from(MENU_PATH).expect("valid menu object path").to_variant(),
         "ItemIsMenu" => true.to_variant(),
+        "XAyatanaLabel" => shared.speed_label.borrow().as_str().to_variant(),
+        "XAyatanaLabelGuide" => SPEED_LABEL_GUIDE.to_variant(),
         _ => ().to_variant(),
+    }
+}
+
+fn format_speed_label(upload: u64, download: u64) -> String {
+    format!(
+        "{}↑\n{}↓",
+        format_tray_speed(upload),
+        format_tray_speed(download)
+    )
+}
+
+fn format_tray_speed(bytes_per_second: u64) -> String {
+    const UNITS: [&str; 5] = ["B/s", "K/s", "M/s", "G/s", "T/s"];
+
+    let mut value = bytes_per_second as f64;
+    let mut unit_index = 0;
+    while value >= 1024.0 && unit_index < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit_index += 1;
+    }
+
+    if unit_index == 0 {
+        format!("{bytes_per_second}{}", UNITS[unit_index])
+    } else if value >= 100.0 {
+        format!("{value:.0}{}", UNITS[unit_index])
+    } else {
+        format!("{value:.1}{}", UNITS[unit_index])
     }
 }
 
@@ -291,4 +349,38 @@ fn emit_menu_changed(connection: &gio::DBusConnection, shared: &TrayShared) {
         "LayoutUpdated",
         Some(&(revision, 0i32).to_variant()),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_compact_tray_speed() {
+        assert_eq!(format_tray_speed(0), "0B/s");
+        assert_eq!(format_tray_speed(1024), "1.0K/s");
+        assert_eq!(format_tray_speed(14 * 1024), "14.0K/s");
+        assert_eq!(format_tray_speed(120 * 1024), "120K/s");
+        assert_eq!(format_tray_speed(3 * 1024 * 1024), "3.0M/s");
+    }
+
+    #[test]
+    fn formats_two_line_speed_label() {
+        assert_eq!(
+            format_speed_label(14 * 1024, 2 * 1024),
+            "14.0K/s↑\n2.0K/s↓"
+        );
+    }
+
+    #[test]
+    fn declares_ayatana_speed_label_properties() {
+        let node = gio::DBusNodeInfo::for_xml(STATUS_XML).expect("valid StatusNotifierItem XML");
+        let interface = node
+            .lookup_interface("org.kde.StatusNotifierItem")
+            .expect("StatusNotifierItem interface");
+
+        assert!(interface.lookup_property("XAyatanaLabel").is_some());
+        assert!(interface.lookup_property("XAyatanaLabelGuide").is_some());
+        assert!(interface.lookup_signal("XAyatanaNewLabel").is_some());
+    }
 }

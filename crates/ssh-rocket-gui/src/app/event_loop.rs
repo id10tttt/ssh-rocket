@@ -419,6 +419,9 @@ pub fn setup_runtime_event_loop(
             let actual_p_down = if is_conn { p_down } else { 0 };
             let d_up = metrics.sys_upload_speed.saturating_sub(actual_p_up);
             let d_down = metrics.sys_download_speed.saturating_sub(actual_p_down);
+            if let Some(tray) = tray_manager.borrow().as_ref() {
+                tray.set_speed(metrics.sys_upload_speed, metrics.sys_download_speed);
+            }
             if let Some(hud) = floating_widget.borrow().as_ref() {
                 hud.update_stats(is_conn, actual_p_up, actual_p_down, d_up, d_down, &metrics);
             }
