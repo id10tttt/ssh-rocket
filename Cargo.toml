@@ -4,7 +4,6 @@ members = [
     "crates/ssh-rocket-core",
     "crates/ssh-rocket-runtime",
     "crates/ssh-rocket-gui",
-    "crates/ssh-rocket-tauri",
 ]
 
 [workspace.package]
