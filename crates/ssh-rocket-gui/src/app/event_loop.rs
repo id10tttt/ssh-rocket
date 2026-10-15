@@ -141,6 +141,8 @@ pub fn setup_runtime_event_loop(
     let direct_log_view = logs_view.direct_log_view.clone();
     let system_log_buffer = logs_view.system_log_buffer.clone();
     let system_log_view = logs_view.system_log_view.clone();
+    let forward_log_buffer = logs_view.forward_log_buffer.clone();
+    let forward_log_view = logs_view.forward_log_view.clone();
     let all_log_buffer = logs_view.all_log_buffer.clone();
     let all_log_view = logs_view.all_log_view.clone();
     let bottom_status_dot = win.bottom_status_dot.clone();
@@ -304,11 +306,14 @@ pub fn setup_runtime_event_loop(
 
                     append_to(&all_log_buffer, &all_log_view);
 
+                    let is_forward = line.contains("[forward]");
                     let is_proxy = line.contains("[proxy]") || line.contains("-> Proxy");
                     let is_direct = line.contains("[direct]")
                         || line.contains("-> Direct")
                         || line.contains("Direct (");
-                    if is_proxy {
+                    if is_forward {
+                        append_to(&forward_log_buffer, &forward_log_view);
+                    } else if is_proxy {
                         append_to(&proxy_log_buffer, &proxy_log_view);
                     } else if is_direct {
                         append_to(&direct_log_buffer, &direct_log_view);

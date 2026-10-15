@@ -259,6 +259,7 @@ pub fn tr(key: &'static str) -> &'static str {
         // Logs View
         "logs.tab.all" => if is_en { "All" } else { "全部" },
         "logs.tab.system" => if is_en { "System" } else { "系统" },
+        "logs.tab.forward" => if is_en { "Forward" } else { "转发" },
         "logs.tab.proxy" => if is_en { "Proxy" } else { "代理" },
         "logs.tab.direct" => if is_en { "Direct" } else { "直连" },
         "logs.btn.copy" => if is_en { "Copy Logs" } else { "复制日志" },
@@ -308,6 +309,7 @@ mod tests {
         assert_eq!(tr("action.direct"), "直连");
         assert_eq!(tr("action.proxy"), "代理");
         assert_eq!(tr("action.block"), "拦截");
+        assert_eq!(tr("logs.tab.forward"), "转发");
         assert_eq!(tr("settings.theme.auto"), "跟随系统");
         assert_eq!(tr("settings.language.auto"), "跟随系统");
 
@@ -320,6 +322,7 @@ mod tests {
         assert_eq!(tr("action.direct"), "Direct");
         assert_eq!(tr("action.proxy"), "Proxy");
         assert_eq!(tr("action.block"), "Block");
+        assert_eq!(tr("logs.tab.forward"), "Forward");
         assert_eq!(tr("settings.theme.auto"), "Follow System");
         assert_eq!(tr("settings.language.auto"), "Follow System");
         assert_eq!(tr("settings.appearance.group"), "Appearance &amp; Theme");

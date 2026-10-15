@@ -11,6 +11,9 @@ pub struct LogsView {
     pub system_log_scroller: gtk::ScrolledWindow,
     pub system_log_buffer: gtk::TextBuffer,
     pub system_log_view: gtk::TextView,
+    pub forward_log_scroller: gtk::ScrolledWindow,
+    pub forward_log_buffer: gtk::TextBuffer,
+    pub forward_log_view: gtk::TextView,
     pub proxy_log_scroller: gtk::ScrolledWindow,
     pub proxy_log_buffer: gtk::TextBuffer,
     pub proxy_log_view: gtk::TextView,
@@ -96,6 +99,23 @@ impl LogsView {
             .build();
         log_stack.add_titled(&system_log_scroller, Some("system"), tr("logs.tab.system"));
 
+        // 端口转发日志
+        let forward_log_view = gtk::TextView::builder()
+            .editable(false)
+            .cursor_visible(false)
+            .monospace(true)
+            .wrap_mode(gtk::WrapMode::WordChar)
+            .css_classes(["console-view"])
+            .build();
+        let forward_log_buffer = forward_log_view.buffer();
+        let forward_log_scroller = gtk::ScrolledWindow::builder()
+            .child(&forward_log_view)
+            .min_content_height(180)
+            .hexpand(true)
+            .vexpand(true)
+            .build();
+        log_stack.add_titled(&forward_log_scroller, Some("forward"), tr("logs.tab.forward"));
+
         // 代理日志
         let proxy_log_view = gtk::TextView::builder()
             .editable(false)
@@ -141,6 +161,9 @@ impl LogsView {
             system_log_scroller,
             system_log_buffer,
             system_log_view,
+            forward_log_scroller,
+            forward_log_buffer,
+            forward_log_view,
             proxy_log_scroller,
             proxy_log_buffer,
             proxy_log_view,
@@ -156,6 +179,7 @@ impl LogsView {
     pub fn refresh_labels(&self) {
         self.log_stack.page(&self.all_log_scroller).set_title(tr("logs.tab.all"));
         self.log_stack.page(&self.system_log_scroller).set_title(tr("logs.tab.system"));
+        self.log_stack.page(&self.forward_log_scroller).set_title(tr("logs.tab.forward"));
         self.log_stack.page(&self.proxy_log_scroller).set_title(tr("logs.tab.proxy"));
         self.log_stack.page(&self.direct_log_scroller).set_title(tr("logs.tab.direct"));
         self.copy_logs_btn.set_tooltip_text(Some(tr("logs.btn.copy")));

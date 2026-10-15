@@ -602,6 +602,7 @@ pub fn build_ui(app: &adw::Application) {
     {
         let all_buffer = logs_view.all_log_buffer.clone();
         let system_buffer = logs_view.system_log_buffer.clone();
+        let forward_buffer = logs_view.forward_log_buffer.clone();
         let proxy_buffer = logs_view.proxy_log_buffer.clone();
         let direct_buffer = logs_view.direct_log_buffer.clone();
         let stack = logs_view.log_stack.clone();
@@ -609,6 +610,7 @@ pub fn build_ui(app: &adw::Application) {
             match stack.visible_child_name().as_deref() {
                 Some("all") => all_buffer.set_text(""),
                 Some("system") => system_buffer.set_text(""),
+                Some("forward") => forward_buffer.set_text(""),
                 Some("direct") => direct_buffer.set_text(""),
                 _ => proxy_buffer.set_text(""),
             }
@@ -617,6 +619,7 @@ pub fn build_ui(app: &adw::Application) {
     {
         let all_buffer = logs_view.all_log_buffer.clone();
         let system_buffer = logs_view.system_log_buffer.clone();
+        let forward_buffer = logs_view.forward_log_buffer.clone();
         let proxy_buffer = logs_view.proxy_log_buffer.clone();
         let direct_buffer = logs_view.direct_log_buffer.clone();
         let stack = logs_view.log_stack.clone();
@@ -624,6 +627,7 @@ pub fn build_ui(app: &adw::Application) {
             let target_buffer = match stack.visible_child_name().as_deref() {
                 Some("all") => &all_buffer,
                 Some("system") => &system_buffer,
+                Some("forward") => &forward_buffer,
                 Some("direct") => &direct_buffer,
                 _ => &proxy_buffer,
             };
