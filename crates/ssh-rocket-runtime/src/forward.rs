@@ -184,6 +184,22 @@ pub enum ForwardStart {
     Retrying { error: String, delay_secs: u64 },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardState {
+    Stopped,
+    Connecting,
+    Connected,
+}
+
+#[derive(Debug)]
+pub enum ForwardEvent {
+    Log(String),
+    State {
+        rule_id: Uuid,
+        state: ForwardState,
+    },
+}
+
 struct ForwardTask {
     cancel: CancellationToken,
     handle: JoinHandle<()>,
@@ -200,8 +216,16 @@ fn next_retry_delay(current: u64) -> u64 {
     current.saturating_mul(2).min(MAX_RETRY_DELAY_SECS)
 }
 
-fn send_event(events: &UnboundedSender<String>, message: String) {
-    let _ = events.send(message);
+fn send_log(events: &UnboundedSender<ForwardEvent>, message: String) {
+    let _ = events.send(ForwardEvent::Log(message));
+}
+
+fn send_state(
+    events: &UnboundedSender<ForwardEvent>,
+    rule_id: Uuid,
+    state: ForwardState,
+) {
+    let _ = events.send(ForwardEvent::State { rule_id, state });
 }
 
 /// 持续监督单条端口转发；异常退出后独立重建，不依赖代理会话状态。
@@ -210,7 +234,7 @@ async fn supervise_forward(
     profile: Profile,
     mut session: Option<ForwardSession>,
     cancel: CancellationToken,
-    events: UnboundedSender<String>,
+    events: UnboundedSender<ForwardEvent>,
 ) {
     let mut retry_delay_secs = INITIAL_RETRY_DELAY_SECS;
 
@@ -228,7 +252,8 @@ async fn supervise_forward(
                 Ok(status) => format!("进程退出：{status}"),
                 Err(error) => error.to_string(),
             };
-            send_event(
+            send_state(&events, rule.id, ForwardState::Connecting);
+            send_log(
                 &events,
                 format!(
                     "[forward] {} 已断开（{}），{} 秒后重试",
@@ -252,14 +277,15 @@ async fn supervise_forward(
             Ok(new_session) => {
                 session = Some(new_session);
                 retry_delay_secs = INITIAL_RETRY_DELAY_SECS;
-                send_event(
+                send_state(&events, rule.id, ForwardState::Connected);
+                send_log(
                     &events,
                     format!("[forward] 已恢复端口转发：{}", rule.name),
                 );
             }
             Err(error) => {
                 retry_delay_secs = next_retry_delay(retry_delay_secs);
-                send_event(
+                send_log(
                     &events,
                     format!(
                         "[forward] 重启 {} 失败：{}；{} 秒后重试",
@@ -286,7 +312,7 @@ impl ForwardManager {
         &mut self,
         rule: &PortForwardRule,
         profile: &Profile,
-        events: UnboundedSender<String>,
+        events: UnboundedSender<ForwardEvent>,
     ) -> ForwardStart {
         self.stop(&rule.id).await;
 

@@ -2,7 +2,9 @@ use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
 use ssh_rocket_core::{AppConfig, ForwardType};
-use std::{cell::RefCell, rc::Rc, sync::mpsc};
+use ssh_rocket_runtime::ForwardState;
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::mpsc};
+use uuid::Uuid;
 
 use crate::{
     controller::{RuntimeController, RuntimeEvent},
@@ -16,6 +18,20 @@ pub struct ForwardView {
     pub empty_page: adw::StatusPage,
     pub empty_add_button: gtk::Button,
     pub forward_flow: gtk::FlowBox,
+}
+
+fn update_status_dot(dot: &gtk::Box, state: ForwardState) {
+    dot.remove_css_class("status-dot-connected");
+    dot.remove_css_class("status-dot-connecting");
+    dot.remove_css_class("status-dot-disconnected");
+
+    let (class_name, tooltip) = match state {
+        ForwardState::Connected => ("status-dot-connected", tr("status.connected")),
+        ForwardState::Connecting => ("status-dot-connecting", tr("status.connecting")),
+        ForwardState::Stopped => ("status-dot-disconnected", tr("status.disconnected")),
+    };
+    dot.add_css_class(class_name);
+    dot.set_tooltip_text(Some(tooltip));
 }
 
 impl ForwardView {
@@ -79,6 +95,7 @@ pub fn render_forward_cards(
     controller: &Rc<RefCell<RuntimeController>>,
     event_tx: &mpsc::Sender<RuntimeEvent>,
     refresh_handle: &RefreshForwards,
+    forward_states: &Rc<RefCell<HashMap<Uuid, ForwardState>>>,
     parent: &adw::ApplicationWindow,
 ) {
     while let Some(child) = forward_flow.first_child() {
@@ -119,9 +136,16 @@ pub fn render_forward_cards(
         // 状态指示灯
         let dot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         dot.add_css_class("status-dot");
-        if rule.enabled {
-            dot.add_css_class("status-dot-connected");
-        }
+        let state = if rule.enabled {
+            forward_states
+                .borrow()
+                .get(&rule.id)
+                .copied()
+                .unwrap_or(ForwardState::Connecting)
+        } else {
+            ForwardState::Stopped
+        };
+        update_status_dot(&dot, state);
         dot.set_valign(gtk::Align::Center);
         header_row.append(&dot);
 
@@ -153,6 +177,7 @@ pub fn render_forward_cards(
             let event_tx = event_tx.clone();
             let rule_id = rule.id;
             let dot_clone = dot.clone();
+            let forward_states = forward_states.clone();
             switch.connect_state_set(move |_, state| {
                 let mut current = config_clone.borrow_mut();
                 if let Some(target) = current.port_forwards.iter_mut().find(|r| r.id == rule_id) {
@@ -162,11 +187,15 @@ pub fn render_forward_cards(
                     let _ = current.save();
                     drop(current);
 
-                    if state {
-                        dot_clone.add_css_class("status-dot-connected");
+                    let forward_state = if state {
+                        ForwardState::Connecting
                     } else {
-                        dot_clone.remove_css_class("status-dot-connected");
-                    }
+                        ForwardState::Stopped
+                    };
+                    forward_states
+                        .borrow_mut()
+                        .insert(rule_id, forward_state);
+                    update_status_dot(&dot_clone, forward_state);
 
                     controller_clone.borrow().set_forward_enabled(
                         rule_clone,
@@ -207,6 +236,7 @@ pub fn render_forward_cards(
             let controller_clone = controller.clone();
             let event_tx = event_tx.clone();
             let rule_id = rule.id;
+            let forward_states = forward_states.clone();
             delete_btn.connect_clicked(move |_| {
                 let mut current = config_clone.borrow_mut();
                 current.port_forwards.retain(|r| r.id != rule_id);
@@ -216,6 +246,7 @@ pub fn render_forward_cards(
                 controller_clone
                     .borrow()
                     .stop_forward(rule_id, event_tx.clone());
+                forward_states.borrow_mut().remove(&rule_id);
 
                 if let Some(refresh) = refresh_clone.borrow().as_ref() {
                     refresh();

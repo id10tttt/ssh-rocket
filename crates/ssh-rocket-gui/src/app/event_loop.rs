@@ -2,12 +2,15 @@ use adw::prelude::*;
 use gtk4::{self as gtk, prelude::*};
 use libadwaita as adw;
 use ssh_rocket_core::{AppConfig, RuleAction};
+use ssh_rocket_runtime::ForwardState;
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     rc::Rc,
     sync::mpsc,
     time::{SystemTime, UNIX_EPOCH},
 };
+use uuid::Uuid;
 
 use crate::{
     controller::{RuntimeController, RuntimeEvent},
@@ -15,7 +18,7 @@ use crate::{
     sys_monitor::SystemMonitor,
     tray::{TrayConnectionState, TrayManager},
     ui::{
-        dialogs::{RefreshConnections, RefreshRules},
+        dialogs::{RefreshConnections, RefreshForwards, RefreshRules},
         floating_widget::FloatingWidget,
         logs_view::LogsView,
         rules_view::RulesView,
@@ -38,7 +41,9 @@ pub fn setup_runtime_event_loop(
     is_connected: &Rc<RefCell<bool>>,
     connect_start_time: &Rc<RefCell<Option<std::time::Instant>>>,
     refresh_connections: &RefreshConnections,
+    refresh_forwards: &RefreshForwards,
     refresh_rule_views: &RefreshRules,
+    forward_states: &Rc<RefCell<HashMap<Uuid, ForwardState>>>,
     tray_manager: &Rc<RefCell<Option<Rc<TrayManager>>>>,
     floating_widget: &Rc<RefCell<Option<FloatingWidget>>>,
     sys_monitor: &Rc<RefCell<SystemMonitor>>,
@@ -149,6 +154,8 @@ pub fn setup_runtime_event_loop(
     let active_conns_data = active_conns_data.clone();
     let refresh_app_traffic = refresh_app_traffic.clone();
     let refresh_conns = refresh_conns.clone();
+    let refresh_forwards = refresh_forwards.clone();
+    let forward_states = forward_states.clone();
     let traffic_view = traffic_view.clone();
 
     let sys_monitor = sys_monitor.clone();
@@ -257,6 +264,12 @@ pub fn setup_runtime_event_loop(
                     }
                     import_rules.set_sensitive(true);
                     import_button.set_sensitive(true);
+                }
+                RuntimeEvent::ForwardState { rule_id, state } => {
+                    forward_states.borrow_mut().insert(rule_id, state);
+                    if let Some(refresh) = refresh_forwards.borrow().as_ref() {
+                        refresh();
+                    }
                 }
                 RuntimeEvent::Log(line) => {
                     let time_str = gtk::glib::DateTime::now_local()

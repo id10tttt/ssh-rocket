@@ -5,8 +5,10 @@ use adw::prelude::*;
 use gtk4::{self as gtk, gio, glib};
 use libadwaita as adw;
 use ssh_rocket_core::{AppConfig, Language, RuleAction, ThemeMode};
+use ssh_rocket_runtime::ForwardState;
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     fs,
     rc::Rc,
     sync::mpsc,
@@ -87,6 +89,7 @@ pub fn build_ui(app: &adw::Application) {
     let is_connected = Rc::new(RefCell::new(false));
     let connect_start_time = Rc::new(RefCell::new(None::<std::time::Instant>));
     let connection_buttons = Rc::new(RefCell::new(Vec::<(String, gtk::Button)>::new()));
+    let forward_states = Rc::new(RefCell::new(HashMap::<uuid::Uuid, ForwardState>::new()));
     let refresh_connections: RefreshConnections = Rc::new(RefCell::new(None));
     let refresh_forwards: RefreshForwards = Rc::new(RefCell::new(None));
     let tray_manager = Rc::new(RefCell::new(None::<Rc<TrayManager>>));
@@ -322,6 +325,7 @@ pub fn build_ui(app: &adw::Application) {
         let controller = controller.clone();
         let event_tx = event_tx.clone();
         let refresh_handle = refresh_forwards.clone();
+        let forward_states = forward_states.clone();
         let parent = win.window.clone();
 
         let refresh_impl: Rc<dyn Fn()> = Rc::new(move || {
@@ -332,6 +336,7 @@ pub fn build_ui(app: &adw::Application) {
                 &controller,
                 &event_tx,
                 &refresh_handle,
+                &forward_states,
                 &parent,
             );
         });
@@ -888,7 +893,9 @@ pub fn build_ui(app: &adw::Application) {
         &is_connected,
         &connect_start_time,
         &refresh_connections,
+        &refresh_forwards,
         &refresh_rule_views,
+        &forward_states,
         &tray_manager,
         &floating_widget,
         &sys_monitor,
