@@ -109,6 +109,7 @@ pub fn render_connection_cards(
     connect_stack.set_visible_child_name("cards");
 
     let connected = *is_connected.borrow();
+    let is_running = controller.borrow().is_running();
 
     for profile in profiles {
         let is_active = active_profile_id == Some(profile.id);
@@ -117,6 +118,8 @@ pub fn render_connection_cards(
         card.add_css_class("card");
         if is_active && connected {
             card.add_css_class("active-profile-card");
+        } else if is_active && is_running {
+            card.add_css_class("active-profile-card-connecting");
         }
         card.set_hexpand(true);
         card.set_valign(gtk::Align::Start);
@@ -137,7 +140,7 @@ pub fn render_connection_cards(
         dot.add_css_class("status-dot");
         if is_active && connected {
             dot.add_css_class("status-dot-connected");
-        } else if is_active && controller.borrow().is_running() {
+        } else if is_active && is_running {
             dot.add_css_class("status-dot-connecting");
         } else {
             dot.add_css_class("status-dot-disconnected");
@@ -156,6 +159,12 @@ pub fn render_connection_cards(
             let active_tag = gtk::Label::new(Some(tr("status.connected")));
             active_tag.add_css_class("status-badge");
             active_tag.add_css_class("status-badge-connected");
+            active_tag.set_valign(gtk::Align::Center);
+            header_row.append(&active_tag);
+        } else if is_active && is_running {
+            let active_tag = gtk::Label::new(Some(tr("status.connecting")));
+            active_tag.add_css_class("status-badge");
+            active_tag.add_css_class("status-badge-connecting");
             active_tag.set_valign(gtk::Align::Center);
             header_row.append(&active_tag);
         }
@@ -266,12 +275,12 @@ pub fn render_connection_cards(
         actions.set_margin_end(14);
         actions.set_margin_bottom(10);
 
-        let connect_button = gtk::Button::with_label(if is_active && connected {
+        let connect_button = gtk::Button::with_label(if is_active && (connected || is_running) {
             tr("connect.btn.disconnect")
         } else {
             tr("connect.btn.connect")
         });
-        if is_active && connected {
+        if is_active && (connected || is_running) {
             connect_button.add_css_class("destructive-action");
         } else {
             connect_button.add_css_class("suggested-action");
@@ -279,7 +288,7 @@ pub fn render_connection_cards(
         connect_button.add_css_class("pill");
         connect_button.set_halign(gtk::Align::End);
 
-        if connected {
+        if connected || is_running {
             connect_button.set_sensitive(is_active);
         }
 
@@ -312,10 +321,13 @@ pub fn render_connection_cards(
             let config = config.clone();
             let refresh_handle = refresh_handle.clone();
             let is_connected = is_connected.clone();
+            let controller = controller.clone();
             let profile_id = profile.id;
             remove.connect_clicked(move |_| {
                 let mut current = config.borrow_mut();
-                if *is_connected.borrow() && current.active_profile == Some(profile_id) {
+                if (*is_connected.borrow() || controller.borrow().is_running())
+                    && current.active_profile == Some(profile_id)
+                {
                     return;
                 }
                 current.profiles.retain(|item| item.id != profile_id);

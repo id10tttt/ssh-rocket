@@ -232,6 +232,10 @@ pub fn setup_runtime_event_loop(
                     }
                 }
                 RuntimeEvent::Status(status) => {
+                    latest_proxy_speed.set((0, 0));
+                    *is_connected.borrow_mut() = false;
+                    speed_label.set_text("↑ 0 B/s   ↓ 0 B/s");
+
                     bottom_status_dot.remove_css_class("status-dot-connected");
                     bottom_status_dot.remove_css_class("status-dot-disconnected");
                     bottom_status_dot.add_css_class("status-dot-connecting");

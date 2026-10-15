@@ -16,6 +16,11 @@ pub fn init_theme() {
             background-color: alpha(#2ec27e, 0.05);
             box-shadow: 0 0 12px alpha(#2ec27e, 0.15);
         }
+        .active-profile-card-connecting {
+            border: 2px solid #e5a50a;
+            background-color: alpha(#e5a50a, 0.05);
+            box-shadow: 0 0 12px alpha(#e5a50a, 0.15);
+        }
 
         /* 状态指示小徽标 */
         .status-dot {
