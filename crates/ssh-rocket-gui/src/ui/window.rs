@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
@@ -51,8 +53,7 @@ pub fn create_main_window(app: &adw::Application) -> MainWindowWidgets {
     title_box.set_margin_end(18);
     title_box.set_margin_top(18);
     title_box.set_margin_bottom(14);
-    let logo_icon = gtk::Image::from_icon_name("ssh-rocket-symbolic");
-    logo_icon.set_pixel_size(24);
+    let logo_icon = create_nav_icon_widget(&["ssh-rocket", "ssh-rocket-symbolic"], "ssh-rocket-symbolic", 28);
     title_box.append(&logo_icon);
     let app_title = gtk::Label::new(Some("SSH Rocket"));
     app_title.add_css_class("title-2");
@@ -66,12 +67,41 @@ pub fn create_main_window(app: &adw::Application) -> MainWindowWidgets {
     navigation.set_activate_on_single_click(true);
     navigation.set_vexpand(true);
 
-    let (connect_nav, connect_nav_label) = create_navigation_row("ssh-rocket-connect-symbolic", tr("nav.connect"));
-    let (rules_nav, rules_nav_label) = create_navigation_row("ssh-rocket-rules-symbolic", tr("nav.rules"));
-    let (traffic_nav, traffic_nav_label) = create_navigation_row("ssh-rocket-traffic-symbolic", tr("nav.traffic"));
-    let (logs_nav, logs_nav_label) = create_navigation_row("ssh-rocket-logs-symbolic", tr("nav.logs"));
-    let (forward_nav, forward_nav_label) = create_navigation_row("network-transmit-receive-symbolic", tr("nav.forward"));
-    let (settings_nav, settings_nav_label) = create_navigation_row("preferences-system-symbolic", tr("nav.settings"));
+    let (connect_nav, connect_nav_label) = create_navigation_row(
+        &["ssh-rocket-connect", "ssh-rocket-connect-symbolic"],
+        "network-wired-symbolic",
+        tr("nav.connect"),
+    );
+    let (rules_nav, rules_nav_label) = create_navigation_row(
+        &["ssh-rocket-rules", "ssh-rocket-rules-symbolic"],
+        "network-workgroup-symbolic",
+        tr("nav.rules"),
+    );
+    let (traffic_nav, traffic_nav_label) = create_navigation_row(
+        &["ssh-rocket-traffic", "ssh-rocket-traffic-symbolic"],
+        "utilities-system-monitor-symbolic",
+        tr("nav.traffic"),
+    );
+    let (logs_nav, logs_nav_label) = create_navigation_row(
+        &["ssh-rocket-logs", "ssh-rocket-logs-symbolic"],
+        "text-x-generic-symbolic",
+        tr("nav.logs"),
+    );
+    let (forward_nav, forward_nav_label) = create_navigation_row(
+        &["ssh-rocket-forward", "ssh-rocket-forwarding", "ssh-rocket-forward-symbolic"],
+        "network-transmit-receive-symbolic",
+        tr("nav.forward"),
+    );
+    let (settings_nav, settings_nav_label) = create_navigation_row(
+        &[
+            "ssh-rocket-setting",
+            "ssh-rocket-settings",
+            "ssh-rocket-setting-symbolic",
+            "ssh-rocket-settings-symbolic",
+        ],
+        "preferences-system-symbolic",
+        tr("nav.settings"),
+    );
 
     navigation.append(&connect_nav);
     navigation.append(&rules_nav);
@@ -166,16 +196,86 @@ pub fn create_main_window(app: &adw::Application) -> MainWindowWidgets {
     }
 }
 
-fn create_navigation_row(icon_name: &str, title: &str) -> (gtk::ListBoxRow, gtk::Label) {
+fn find_custom_icon_path(candidates: &[&str]) -> Option<PathBuf> {
+    let mut search_dirs = Vec::new();
+    // 1. 本地源码/工作区目录（最优先，支持本地实时调试）
+    search_dirs.push(PathBuf::from("data/icons"));
+    search_dirs.push(PathBuf::from("/home/jx/ssh-rocket/data/icons"));
+
+    // 2. 相对可执行文件路径（构建产物或安装环境）
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            search_dirs.push(parent.join("../../data/icons"));
+            search_dirs.push(parent.join("../share/icons/hicolor/scalable/apps"));
+            search_dirs.push(parent.join("../share/ssh-rocket/icons"));
+        }
+    }
+
+    // 3. 用户与系统 XDG 图标目录
+    if let Some(data_home) = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).or_else(|| {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share"))
+    }) {
+        search_dirs.push(data_home.join("icons/hicolor/scalable/apps"));
+        search_dirs.push(data_home.join("icons/hicolor/symbolic/apps"));
+    }
+    search_dirs.push(PathBuf::from("/usr/local/share/icons/hicolor/scalable/apps"));
+    search_dirs.push(PathBuf::from("/usr/share/icons/hicolor/scalable/apps"));
+
+    for candidate in candidates {
+        let filename = if candidate.ends_with(".svg") || candidate.ends_with(".png") {
+            candidate.to_string()
+        } else {
+            format!("{candidate}.svg")
+        };
+
+        for dir in &search_dirs {
+            let p = dir.join(&filename);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+fn create_nav_icon_widget(candidates: &[&str], fallback_icon_name: &str, size: i32) -> gtk::Widget {
+    let container = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    container.set_size_request(size, size);
+    container.set_halign(gtk::Align::Center);
+    container.set_valign(gtk::Align::Center);
+
+    if let Some(path) = find_custom_icon_path(candidates) {
+        let pic = gtk::Picture::for_filename(&path);
+        pic.set_can_shrink(true);
+        pic.set_content_fit(gtk::ContentFit::Contain);
+        pic.set_size_request(size, size);
+        pic.set_halign(gtk::Align::Center);
+        pic.set_valign(gtk::Align::Center);
+        container.append(&pic);
+    } else {
+        let img = gtk::Image::from_icon_name(fallback_icon_name);
+        img.set_pixel_size(size);
+        img.set_halign(gtk::Align::Center);
+        img.set_valign(gtk::Align::Center);
+        container.append(&img);
+    }
+
+    container.upcast::<gtk::Widget>()
+}
+
+fn create_navigation_row(
+    candidates: &[&str],
+    fallback_icon_name: &str,
+    title: &str,
+) -> (gtk::ListBoxRow, gtk::Label) {
     let row = gtk::ListBoxRow::new();
     row.set_height_request(44);
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     content.set_margin_start(14);
     content.set_margin_end(14);
-    content.set_margin_top(8);
-    content.set_margin_bottom(8);
-    let icon = gtk::Image::from_icon_name(icon_name);
-    icon.set_pixel_size(18);
+    content.set_margin_top(6);
+    content.set_margin_bottom(6);
+    let icon = create_nav_icon_widget(candidates, fallback_icon_name, 24);
     content.append(&icon);
     let label = gtk::Label::new(Some(title));
     label.set_halign(gtk::Align::Start);
