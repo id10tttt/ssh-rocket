@@ -198,6 +198,90 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+/// 构建清理远端残留端口监听的 Shell 脚本。
+pub fn build_remote_cleanup_command(port: u16) -> String {
+    format!(
+        "fuser -k {port}/tcp 2>/dev/null || (command -v lsof >/dev/null 2>&1 && pids=$(lsof -ti tcp:{port} 2>/dev/null) && [ -n \"$pids\" ] && kill -9 $pids 2>/dev/null) || (command -v ss >/dev/null 2>&1 && pids=$(ss -lptn \"sport = :{port}\" 2>/dev/null | grep -o \"pid=[0-9]*\" | cut -d= -f2) && [ -n \"$pids\" ] && kill -9 $pids 2>/dev/null) || true"
+    )
+}
+
+/// 尝试通过 SSH 远程执行命令释放远端残留端口占用。
+pub async fn cleanup_remote_port(rule: &PortForwardRule, profile: &Profile) -> Result<()> {
+    if profile.host.trim().is_empty() || rule.remote_port == 0 {
+        return Ok(());
+    }
+
+    let use_sshpass =
+        profile.auth_type == ssh_rocket_core::AuthType::Password && profile.password.is_some();
+    let mut command = if use_sshpass {
+        let mut cmd = Command::new("sshpass");
+        if let Some(password) = &profile.password {
+            cmd.arg("-p").arg(password);
+        }
+        cmd.arg("ssh");
+        cmd
+    } else {
+        Command::new("ssh")
+    };
+
+    command
+        .arg("-T")
+        .arg("-o").arg("ConnectTimeout=5")
+        .arg("-o").arg("StrictHostKeyChecking=accept-new")
+        .arg("-p").arg(profile.port.to_string());
+
+    if rule.use_proxy {
+        if let Ok(executable) = std::env::current_exe() {
+            let (target_host, target_port) = crate::ssh::effective_server(profile).await;
+            let proxy_command = format!(
+                "{} proxy-connect {} {}",
+                shell_quote_path(&executable),
+                shell_quote(&target_host),
+                target_port
+            );
+            command.arg("-o").arg(format!("ProxyCommand={proxy_command}"));
+        }
+    }
+
+    if !profile.username.trim().is_empty() {
+        command.arg("-l").arg(profile.username.trim());
+    }
+    if profile.auth_type == ssh_rocket_core::AuthType::Key {
+        if let Some(identity_file) = &profile.identity_file {
+            command.arg("-i").arg(identity_file);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    unsafe {
+        command.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            Ok(())
+        });
+    }
+
+    let cleanup_script = build_remote_cleanup_command(rule.remote_port);
+    command.arg(profile.host.trim()).arg(cleanup_script);
+
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+
+    let mut child = command.spawn().context("启动 SSH 远端端口清理进程失败")?;
+    match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(wait_res) => {
+            let _ = wait_res?;
+            Ok(())
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            bail!("远端端口清理超时");
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ForwardStart {
     Established,
@@ -286,6 +370,28 @@ async fn supervise_forward(
         tokio::select! {
             _ = cancel.cancelled() => return,
             _ = sleep(Duration::from_secs(retry_delay_secs)) => {}
+        }
+
+        if rule.forward_type == ForwardType::Remote {
+            send_log(
+                &events,
+                format!(
+                    "[forward] 正在尝试释放远端端口占用：{}:{}",
+                    rule.remote_host.trim(),
+                    rule.remote_port
+                ),
+            );
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                cleanup_res = cleanup_remote_port(&rule, &profile) => {
+                    if let Err(err) = cleanup_res {
+                        send_log(
+                            &events,
+                            format!("[forward] 释放远端端口占用未完成（将继续尝试建连）：{err}"),
+                        );
+                    }
+                }
+            }
         }
 
         let start_result = tokio::select! {
@@ -392,7 +498,7 @@ impl ForwardManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{next_retry_delay, shell_quote, MAX_RETRY_DELAY_SECS};
+    use super::{build_remote_cleanup_command, next_retry_delay, shell_quote, MAX_RETRY_DELAY_SECS};
 
     #[test]
     fn retry_delay_uses_exponential_backoff_with_cap() {
@@ -404,5 +510,14 @@ mod tests {
     #[test]
     fn shell_quote_escapes_single_quotes() {
         assert_eq!(shell_quote("a'b"), "'a'\"'\"'b'");
+    }
+
+    #[test]
+    fn remote_cleanup_command_contains_port_and_fallbacks() {
+        let cmd = build_remote_cleanup_command(10022);
+        assert!(cmd.contains("fuser -k 10022/tcp"));
+        assert!(cmd.contains("lsof -ti tcp:10022"));
+        assert!(cmd.contains("sport = :10022"));
+        assert!(cmd.ends_with("|| true"));
     }
 }
