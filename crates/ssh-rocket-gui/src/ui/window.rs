@@ -254,9 +254,9 @@ fn create_nav_icon_widget(candidates: &[&str], fallback_icon_name: &str, size: i
     container.set_valign(gtk::Align::Center);
 
     if let Some(path) = find_custom_icon_path(candidates) {
-        if let Ok(pixbuf) = gtk::gdk_pixbuf::Pixbuf::from_file_at_scale(&path, size, size, true) {
-            let texture = gtk::gdk::Texture::for_pixbuf(&pixbuf);
-            let img = gtk::Image::from_paintable(Some(&texture));
+        let pic = gtk::Picture::for_filename(&path);
+        if let Some(paintable) = pic.paintable() {
+            let img = gtk::Image::from_paintable(Some(&paintable));
             img.set_pixel_size(size);
             img.set_halign(gtk::Align::Center);
             img.set_valign(gtk::Align::Center);
