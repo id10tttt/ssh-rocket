@@ -66,6 +66,7 @@ pub fn create_main_window(app: &adw::Application) -> MainWindowWidgets {
     navigation.set_selection_mode(gtk::SelectionMode::Single);
     navigation.set_activate_on_single_click(true);
     navigation.set_vexpand(true);
+    navigation.set_valign(gtk::Align::Start);
 
     let (connect_nav, connect_nav_label) = create_navigation_row(
         &["ssh-rocket-connect", "ssh-rocket-connect-symbolic"],
@@ -253,20 +254,22 @@ fn create_nav_icon_widget(candidates: &[&str], fallback_icon_name: &str, size: i
     container.set_valign(gtk::Align::Center);
 
     if let Some(path) = find_custom_icon_path(candidates) {
-        let pic = gtk::Picture::for_filename(&path);
-        pic.set_can_shrink(true);
-        pic.set_content_fit(gtk::ContentFit::Contain);
-        pic.set_size_request(size, size);
-        pic.set_halign(gtk::Align::Center);
-        pic.set_valign(gtk::Align::Center);
-        container.append(&pic);
-    } else {
-        let img = gtk::Image::from_icon_name(fallback_icon_name);
-        img.set_pixel_size(size);
-        img.set_halign(gtk::Align::Center);
-        img.set_valign(gtk::Align::Center);
-        container.append(&img);
+        if let Ok(pixbuf) = gtk::gdk_pixbuf::Pixbuf::from_file_at_scale(&path, size, size, true) {
+            let texture = gtk::gdk::Texture::for_pixbuf(&pixbuf);
+            let img = gtk::Image::from_paintable(Some(&texture));
+            img.set_pixel_size(size);
+            img.set_halign(gtk::Align::Center);
+            img.set_valign(gtk::Align::Center);
+            container.append(&img);
+            return container.upcast::<gtk::Widget>();
+        }
     }
+
+    let img = gtk::Image::from_icon_name(fallback_icon_name);
+    img.set_pixel_size(size);
+    img.set_halign(gtk::Align::Center);
+    img.set_valign(gtk::Align::Center);
+    container.append(&img);
 
     container.upcast::<gtk::Widget>()
 }
