@@ -4,9 +4,15 @@ use ssh_rocket_core::{ForwardType, PortForwardRule, Profile};
 use std::{collections::HashMap, net::TcpListener, process::Stdio, time::Duration};
 use tokio::{
     process::{Child, Command},
+    sync::mpsc::UnboundedSender,
+    task::JoinHandle,
     time::sleep,
 };
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+const INITIAL_RETRY_DELAY_SECS: u64 = 1;
+const MAX_RETRY_DELAY_SECS: u64 = 30;
 
 pub struct ForwardSession {
     child: Child,
@@ -163,12 +169,112 @@ impl ForwardSession {
         }
         Ok(())
     }
+
+    async fn wait(&mut self) -> Result<std::process::ExitStatus> {
+        self.child
+            .wait()
+            .await
+            .context("等待 SSH 端口转发进程退出失败")
+    }
+}
+
+#[derive(Debug)]
+pub enum ForwardStart {
+    Established,
+    Retrying { error: String, delay_secs: u64 },
+}
+
+struct ForwardTask {
+    cancel: CancellationToken,
+    handle: JoinHandle<()>,
+}
+
+impl ForwardTask {
+    async fn stop(self) {
+        self.cancel.cancel();
+        let _ = self.handle.await;
+    }
+}
+
+fn next_retry_delay(current: u64) -> u64 {
+    current.saturating_mul(2).min(MAX_RETRY_DELAY_SECS)
+}
+
+fn send_event(events: &UnboundedSender<String>, message: String) {
+    let _ = events.send(message);
+}
+
+/// 持续监督单条端口转发；异常退出后独立重建，不依赖代理会话状态。
+async fn supervise_forward(
+    rule: PortForwardRule,
+    profile: Profile,
+    mut session: Option<ForwardSession>,
+    cancel: CancellationToken,
+    events: UnboundedSender<String>,
+) {
+    let mut retry_delay_secs = INITIAL_RETRY_DELAY_SECS;
+
+    loop {
+        if let Some(active_session) = session.as_mut() {
+            let exit_result = tokio::select! {
+                _ = cancel.cancelled() => {
+                    let _ = active_session.stop().await;
+                    return;
+                }
+                result = active_session.wait() => result,
+            };
+
+            let reason = match exit_result {
+                Ok(status) => format!("进程退出：{status}"),
+                Err(error) => error.to_string(),
+            };
+            send_event(
+                &events,
+                format!(
+                    "[forward] {} 已断开（{}），{} 秒后重试",
+                    rule.name, reason, retry_delay_secs
+                ),
+            );
+            session = None;
+        }
+
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = sleep(Duration::from_secs(retry_delay_secs)) => {}
+        }
+
+        let start_result = tokio::select! {
+            _ = cancel.cancelled() => return,
+            result = ForwardSession::start(&rule, &profile) => result,
+        };
+
+        match start_result {
+            Ok(new_session) => {
+                session = Some(new_session);
+                retry_delay_secs = INITIAL_RETRY_DELAY_SECS;
+                send_event(
+                    &events,
+                    format!("[forward] 已恢复端口转发：{}", rule.name),
+                );
+            }
+            Err(error) => {
+                retry_delay_secs = next_retry_delay(retry_delay_secs);
+                send_event(
+                    &events,
+                    format!(
+                        "[forward] 重启 {} 失败：{}；{} 秒后重试",
+                        rule.name, error, retry_delay_secs
+                    ),
+                );
+            }
+        }
+    }
 }
 
 /// 集中管理所有正在运行的端口转发会话。
 #[derive(Default)]
 pub struct ForwardManager {
-    sessions: HashMap<Uuid, ForwardSession>,
+    tasks: HashMap<Uuid, ForwardTask>,
 }
 
 impl ForwardManager {
@@ -176,49 +282,76 @@ impl ForwardManager {
         Self::default()
     }
 
-    pub async fn start(&mut self, rule: &PortForwardRule, profile: &Profile) -> Result<()> {
+    pub async fn start(
+        &mut self,
+        rule: &PortForwardRule,
+        profile: &Profile,
+        events: UnboundedSender<String>,
+    ) -> ForwardStart {
         self.stop(&rule.id).await;
-        let session = ForwardSession::start(rule, profile).await?;
-        self.sessions.insert(rule.id, session);
-        info!("端口转发已建立: {} (ID: {})", rule.name, rule.id);
-        Ok(())
+
+        let (session, result) = match ForwardSession::start(rule, profile).await {
+            Ok(session) => {
+                info!("端口转发已建立: {} (ID: {})", rule.name, rule.id);
+                (Some(session), ForwardStart::Established)
+            }
+            Err(error) => (
+                None,
+                ForwardStart::Retrying {
+                    error: error.to_string(),
+                    delay_secs: INITIAL_RETRY_DELAY_SECS,
+                },
+            ),
+        };
+
+        let cancel = CancellationToken::new();
+        let handle = tokio::spawn(supervise_forward(
+            rule.clone(),
+            profile.clone(),
+            session,
+            cancel.clone(),
+            events,
+        ));
+        self.tasks.insert(rule.id, ForwardTask { cancel, handle });
+        result
     }
 
     pub async fn stop(&mut self, rule_id: &Uuid) {
-        if let Some(mut session) = self.sessions.remove(rule_id) {
-            let _ = session.stop().await;
+        if let Some(task) = self.tasks.remove(rule_id) {
+            task.stop().await;
             info!("端口转发已停止 (ID: {})", rule_id);
         }
     }
 
     pub async fn stop_all(&mut self) {
-        for (id, mut session) in self.sessions.drain() {
-            let _ = session.stop().await;
+        for (id, task) in self.tasks.drain() {
+            task.stop().await;
             info!("端口转发已清理停止 (ID: {})", id);
         }
     }
 
-    pub fn is_running(&mut self, rule_id: &Uuid) -> bool {
-        if let Some(session) = self.sessions.get_mut(rule_id) {
-            if session.is_alive() {
-                return true;
-            } else {
-                self.sessions.remove(rule_id);
-            }
-        }
-        false
+    pub fn is_running(&self, rule_id: &Uuid) -> bool {
+        self.tasks
+            .get(rule_id)
+            .is_some_and(|task| !task.handle.is_finished())
     }
 
-    pub fn active_rule_ids(&mut self) -> Vec<Uuid> {
-        let mut dead = Vec::new();
-        for (id, session) in &mut self.sessions {
-            if !session.is_alive() {
-                dead.push(*id);
-            }
-        }
-        for id in dead {
-            self.sessions.remove(&id);
-        }
-        self.sessions.keys().copied().collect()
+    pub fn active_rule_ids(&self) -> Vec<Uuid> {
+        self.tasks
+            .iter()
+            .filter_map(|(id, task)| (!task.handle.is_finished()).then_some(*id))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{next_retry_delay, MAX_RETRY_DELAY_SECS};
+
+    #[test]
+    fn retry_delay_uses_exponential_backoff_with_cap() {
+        assert_eq!(next_retry_delay(1), 2);
+        assert_eq!(next_retry_delay(16), 30);
+        assert_eq!(next_retry_delay(MAX_RETRY_DELAY_SECS), MAX_RETRY_DELAY_SECS);
     }
 }

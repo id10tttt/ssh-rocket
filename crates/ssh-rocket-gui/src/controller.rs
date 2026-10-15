@@ -1,6 +1,7 @@
 use ssh_rocket_core::{AppConfig, PortForwardRule, Profile, RuleImportResult};
 use ssh_rocket_runtime::{
-    check_dns_health, check_socks_health, ForwardManager, PrivilegedHelperSession, SshSession,
+    check_dns_health, check_socks_health, ForwardManager, ForwardStart, PrivilegedHelperSession,
+    SshSession,
 };
 use std::{
     cell::RefCell,
@@ -16,7 +17,7 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     runtime::Handle,
-    sync::{oneshot, Mutex},
+    sync::{mpsc as tokio_mpsc, oneshot, Mutex},
 };
 use uuid::Uuid;
 
@@ -74,6 +75,19 @@ impl Default for RuntimeController {
 }
 
 impl RuntimeController {
+    fn forward_event_channel(
+        &self,
+        events: mpsc::Sender<RuntimeEvent>,
+    ) -> tokio_mpsc::UnboundedSender<String> {
+        let (forward_tx, mut forward_rx) = tokio_mpsc::unbounded_channel();
+        self.runtime.spawn(async move {
+            while let Some(message) = forward_rx.recv().await {
+                let _ = events.send(RuntimeEvent::Log(message));
+            }
+        });
+        forward_tx
+    }
+
     pub fn is_running(&self) -> bool {
         self.is_running.load(Ordering::SeqCst)
     }
@@ -118,6 +132,7 @@ impl RuntimeController {
         events: mpsc::Sender<RuntimeEvent>,
     ) {
         let forward_manager = self.forward_manager.clone();
+        let forward_events = self.forward_event_channel(events.clone());
         self.runtime.spawn(async move {
             let mut manager = forward_manager.lock().await;
             for rule in config.port_forwards.iter().filter(|rule| rule.enabled) {
@@ -132,17 +147,17 @@ impl RuntimeController {
                     )));
                     continue;
                 };
-                match manager.start(rule, profile).await {
-                    Ok(()) => {
+                match manager.start(rule, profile, forward_events.clone()).await {
+                    ForwardStart::Established => {
                         let _ = events.send(RuntimeEvent::Log(format!(
                             "[forward] 已启动端口转发：{}",
                             rule.name
                         )));
                     }
-                    Err(error) => {
+                    ForwardStart::Retrying { error, delay_secs } => {
                         let _ = events.send(RuntimeEvent::Log(format!(
-                            "[forward] 启动 {} 失败：{error}",
-                            rule.name
+                            "[forward] 启动 {} 失败：{}；{} 秒后重试",
+                            rule.name, error, delay_secs
                         )));
                     }
                 }
@@ -159,6 +174,7 @@ impl RuntimeController {
         events: mpsc::Sender<RuntimeEvent>,
     ) {
         let forward_manager = self.forward_manager.clone();
+        let forward_events = self.forward_event_channel(events.clone());
         self.runtime.spawn(async move {
             let mut manager = forward_manager.lock().await;
             if enabled {
@@ -169,17 +185,20 @@ impl RuntimeController {
                     )));
                     return;
                 };
-                match manager.start(&rule, &profile).await {
-                    Ok(()) => {
+                match manager
+                    .start(&rule, &profile, forward_events.clone())
+                    .await
+                {
+                    ForwardStart::Established => {
                         let _ = events.send(RuntimeEvent::Log(format!(
                             "[forward] 已启动端口转发：{}",
                             rule.name
                         )));
                     }
-                    Err(error) => {
+                    ForwardStart::Retrying { error, delay_secs } => {
                         let _ = events.send(RuntimeEvent::Log(format!(
-                            "[forward] 启动 {} 失败：{error}",
-                            rule.name
+                            "[forward] 启动 {} 失败：{}；{} 秒后重试",
+                            rule.name, error, delay_secs
                         )));
                     }
                 }

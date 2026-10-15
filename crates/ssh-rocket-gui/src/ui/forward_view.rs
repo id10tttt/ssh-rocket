@@ -36,14 +36,13 @@ impl ForwardView {
         empty_page.set_child(Some(&empty_add));
         stack.add_named(&empty_page, Some("empty"));
 
-        // 转发规则流式网格（双列等宽）
+        // 端口转发包含两端地址和连接信息，使用单列避免固定双列挤压内容。
         let forward_flow = gtk::FlowBox::new();
         forward_flow.set_selection_mode(gtk::SelectionMode::None);
-        forward_flow.set_column_spacing(14);
-        forward_flow.set_row_spacing(14);
-        forward_flow.set_min_children_per_line(2);
-        forward_flow.set_max_children_per_line(2);
-        forward_flow.set_homogeneous(true);
+        forward_flow.set_row_spacing(10);
+        forward_flow.set_min_children_per_line(1);
+        forward_flow.set_max_children_per_line(1);
+        forward_flow.set_homogeneous(false);
         forward_flow.set_valign(gtk::Align::Start);
         forward_flow.set_margin_start(16);
         forward_flow.set_margin_end(16);
@@ -52,6 +51,7 @@ impl ForwardView {
 
         let scroller = gtk::ScrolledWindow::builder()
             .child(&forward_flow)
+            .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
             .build();
         stack.add_named(&scroller, Some("cards"));
@@ -100,7 +100,7 @@ pub fn render_forward_cards(
     container.set_visible_child_name("cards");
 
     for rule in rules {
-        let card = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        let card = gtk::Box::new(gtk::Orientation::Vertical, 6);
         card.add_css_class("card");
         card.set_hexpand(true);
         card.set_valign(gtk::Align::Start);
@@ -122,6 +122,7 @@ pub fn render_forward_cards(
         if rule.enabled {
             dot.add_css_class("status-dot-connected");
         }
+        dot.set_valign(gtk::Align::Center);
         header_row.append(&dot);
 
         // 规则名称
@@ -289,6 +290,13 @@ pub fn render_forward_cards(
 
         card.append(&topo_box);
 
-        forward_flow.append(&card);
+        forward_flow.insert(&card, -1);
+        if let Some(child) = card
+            .parent()
+            .and_then(|parent| parent.downcast::<gtk::FlowBoxChild>().ok())
+        {
+            child.set_hexpand(true);
+            child.set_halign(gtk::Align::Fill);
+        }
     }
 }
