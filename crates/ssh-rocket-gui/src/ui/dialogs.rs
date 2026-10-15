@@ -9,10 +9,11 @@ use std::{
     cell::{Cell, RefCell},
     path::PathBuf,
     rc::Rc,
+    sync::mpsc,
 };
 use uuid::Uuid;
 
-use crate::{i18n::tr, ListedRule};
+use crate::{i18n::tr, ListedRule, RuntimeController, RuntimeEvent};
 
 pub type RefreshConnections = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
 pub type RefreshRules = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
@@ -435,6 +436,8 @@ pub fn show_forward_dialog(
     config: Rc<RefCell<AppConfig>>,
     rule: Option<PortForwardRule>,
     refresh: RefreshForwards,
+    controller: Rc<RefCell<RuntimeController>>,
+    event_tx: mpsc::Sender<RuntimeEvent>,
 ) {
     let editing = rule.is_some();
     let source = rule.unwrap_or_default();
@@ -482,6 +485,13 @@ pub fn show_forward_dialog(
         tr("dialog.forward.connection"),
         profile_dropdown.upcast_ref(),
     ));
+
+    let use_proxy = adw::SwitchRow::builder()
+        .title(tr("dialog.forward.use_proxy"))
+        .subtitle(tr("dialog.forward.use_proxy_desc"))
+        .active(source.use_proxy)
+        .build();
+    content.append(&use_proxy);
 
     // 映射方向
     let direction_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -770,8 +780,15 @@ pub fn show_forward_dialog(
                 if h.is_empty() { default_forward_host() } else { h }
             },
             remote_port: r_port,
+            use_proxy: use_proxy.is_active(),
             enabled: source.enabled,
         };
+
+        let updated_profile = profiles_clone
+            .iter()
+            .find(|profile| profile.id == updated_rule.profile_id)
+            .cloned();
+        let rule_to_apply = updated_rule.clone();
 
         let mut current = config.borrow_mut();
         if let Some(pos) = current.port_forwards.iter().position(|r| r.id == updated_rule.id) {
@@ -785,6 +802,12 @@ pub fn show_forward_dialog(
             if let Some(refresh) = refresh.borrow().as_ref() {
                 refresh();
             }
+            controller.borrow().set_forward_enabled(
+                rule_to_apply.clone(),
+                updated_profile,
+                rule_to_apply.enabled,
+                event_tx.clone(),
+            );
         }
     });
 

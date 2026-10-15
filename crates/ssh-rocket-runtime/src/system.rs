@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use ipnet::IpNet;
 use ssh_rocket_core::{AppConfig, RuleAction};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::IpAddr,
     path::{Path, PathBuf},
     process::Stdio,
@@ -10,6 +10,7 @@ use std::{
 };
 use tokio::{
     io::AsyncWriteExt,
+    net::lookup_host,
     process::Command,
     time::{sleep, timeout},
 };
@@ -254,6 +255,7 @@ impl SystemState {
             )
             .await?;
         }
+        self.install_direct_forward_bypasses().await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "ip", "daddr", "198.18.0.0/15", "meta", "l4proto", "tcp", "meta", "mark", "set", MARK, "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "dns_output", "meta", "skuid", "0", "return"]).await?;
         command("nft", &["add", "rule", "inet", NFT_TABLE, "dns_output", "ip", "daddr", TUN_DNS_ADDRESS, "return"]).await?;
@@ -272,6 +274,49 @@ impl SystemState {
             }
             RuleAction::Block => command("nft", &["add", "rule", "inet", NFT_TABLE, "output", "meta", "l4proto", "tcp", "reject"]).await?,
             RuleAction::Direct => {}
+        }
+        Ok(())
+    }
+
+    /// 直连端口转发的 SSH 传输层必须绕过透明代理，避免配置变化后出现嵌套代理。
+    async fn install_direct_forward_bypasses(&self) -> Result<()> {
+        let mut endpoints = HashSet::new();
+        for rule in self
+            .config
+            .port_forwards
+            .iter()
+            .filter(|rule| rule.enabled && !rule.use_proxy)
+        {
+            let Some(profile) = self
+                .config
+                .profiles
+                .iter()
+                .find(|profile| profile.id == rule.profile_id)
+            else {
+                continue;
+            };
+            let host = profile.host.trim();
+            if host.is_empty() {
+                continue;
+            }
+            let addresses = lookup_host((host, profile.port))
+                .await
+                .with_context(|| format!("无法解析直连端口转发节点 {host}"))?;
+            endpoints.extend(addresses.map(|address| (address.ip(), profile.port)));
+        }
+
+        for (address, port) in endpoints {
+            let family = if address.is_ipv4() { "ip" } else { "ip6" };
+            let address = address.to_string();
+            let port = port.to_string();
+            command(
+                "nft",
+                &[
+                    "add", "rule", "inet", NFT_TABLE, "output", family, "daddr", &address,
+                    "tcp", "dport", &port, "return",
+                ],
+            )
+            .await?;
         }
         Ok(())
     }

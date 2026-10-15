@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use log::info;
 use ssh_rocket_core::{ForwardType, PortForwardRule, Profile};
-use std::{collections::HashMap, net::TcpListener, process::Stdio, time::Duration};
+use std::{collections::HashMap, net::TcpListener, path::Path, process::Stdio, time::Duration};
 use tokio::{
     process::{Child, Command},
     sync::mpsc::UnboundedSender,
@@ -83,6 +83,18 @@ impl ForwardSession {
             .arg("-o").arg("ServerAliveCountMax=3")
             .arg("-o").arg("StrictHostKeyChecking=accept-new")
             .arg("-p").arg(profile.port.to_string());
+
+        if rule.use_proxy {
+            let executable = std::env::current_exe().context("无法定位 SSH Rocket 可执行文件")?;
+            let (target_host, target_port) = crate::ssh::effective_server(profile).await;
+            let proxy_command = format!(
+                "{} proxy-connect {} {}",
+                shell_quote_path(&executable),
+                shell_quote(&target_host),
+                target_port
+            );
+            command.arg("-o").arg(format!("ProxyCommand={proxy_command}"));
+        }
 
         match rule.forward_type {
             ForwardType::Local => {
@@ -176,6 +188,14 @@ impl ForwardSession {
             .await
             .context("等待 SSH 端口转发进程退出失败")
     }
+}
+
+fn shell_quote_path(path: &Path) -> String {
+    shell_quote(&path.to_string_lossy())
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 #[derive(Debug)]
@@ -372,12 +392,17 @@ impl ForwardManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{next_retry_delay, MAX_RETRY_DELAY_SECS};
+    use super::{next_retry_delay, shell_quote, MAX_RETRY_DELAY_SECS};
 
     #[test]
     fn retry_delay_uses_exponential_backoff_with_cap() {
         assert_eq!(next_retry_delay(1), 2);
         assert_eq!(next_retry_delay(16), 30);
         assert_eq!(next_retry_delay(MAX_RETRY_DELAY_SECS), MAX_RETRY_DELAY_SECS);
+    }
+
+    #[test]
+    fn shell_quote_escapes_single_quotes() {
+        assert_eq!(shell_quote("a'b"), "'a'\"'\"'b'");
     }
 }

@@ -219,8 +219,17 @@ pub fn render_forward_cards(
             let config_clone = config.clone();
             let refresh_clone = refresh_handle.clone();
             let rule_clone = rule.clone();
+            let controller_clone = controller.clone();
+            let event_tx = event_tx.clone();
             edit_btn.connect_clicked(move |_| {
-                show_forward_dialog(&parent_clone, config_clone.clone(), Some(rule_clone.clone()), refresh_clone.clone());
+                show_forward_dialog(
+                    &parent_clone,
+                    config_clone.clone(),
+                    Some(rule_clone.clone()),
+                    refresh_clone.clone(),
+                    controller_clone.clone(),
+                    event_tx.clone(),
+                );
             });
         }
         header_row.append(&edit_btn);
@@ -268,7 +277,7 @@ pub fn render_forward_cards(
         // 左端：本地端
         let local_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
         local_box.set_hexpand(true);
-        let local_title = gtk::Label::new(Some("本地端口"));
+        let local_title = gtk::Label::new(Some(tr("forward.card.local")));
         local_title.add_css_class("dim-label");
         local_title.set_xalign(0.0);
         let local_val = gtk::Label::new(Some(&format!("{}:{}", rule.local_host, rule.local_port)));
@@ -283,20 +292,24 @@ pub fn render_forward_cards(
             .iter()
             .find(|p| p.id == rule.profile_id)
             .map(|p| p.name.as_str())
-            .unwrap_or("未知节点");
+            .unwrap_or(tr("forward.card.unknown_profile"));
 
         let mid_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
         mid_box.set_halign(gtk::Align::Center);
 
         let arrow_text = match rule.forward_type {
-            ForwardType::Local => "── 转发至 ──>",
-            ForwardType::Remote => "<── 暴露自 ──",
+            ForwardType::Local => tr("forward.card.forward_to"),
+            ForwardType::Remote => tr("forward.card.exposed_from"),
         };
         let arrow_lbl = gtk::Label::new(Some(arrow_text));
         arrow_lbl.add_css_class("accent");
         arrow_lbl.set_halign(gtk::Align::Center);
 
-        let conn_badge = gtk::Label::new(Some(&format!("via {}", profile_name)));
+        let conn_badge = gtk::Label::new(Some(&format!(
+            "{} {}",
+            tr("forward.card.via"),
+            profile_name
+        )));
         conn_badge.add_css_class("dim-label");
         conn_badge.set_ellipsize(gtk::pango::EllipsizeMode::End);
         conn_badge.set_max_width_chars(16);
@@ -309,7 +322,7 @@ pub fn render_forward_cards(
         // 右端：远端目标
         let remote_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
         remote_box.set_hexpand(true);
-        let remote_title = gtk::Label::new(Some("目标地址"));
+        let remote_title = gtk::Label::new(Some(tr("forward.card.remote")));
         remote_title.add_css_class("dim-label");
         remote_title.set_xalign(1.0);
         let remote_val = gtk::Label::new(Some(&format!("{}:{}", rule.remote_host, rule.remote_port)));

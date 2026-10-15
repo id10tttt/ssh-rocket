@@ -283,7 +283,7 @@ async fn sync_active_rules(active_session: &mut Option<ActiveSession>) -> Result
 
     let config: AppConfig = serde_json::from_slice(&tokio::fs::read(&config_path).await?)?;
     session.system.config_mtime = current_mtime;
-    if routing_signature(&config.settings)? == routing_signature(&session.system.config.settings)? {
+    if routing_signature(&config)? == routing_signature(&session.system.config)? {
         session.system.config.settings.app_rules = config.settings.app_rules;
         return session.system.assign_apps().await;
     }
@@ -306,7 +306,20 @@ async fn sync_active_rules(active_session: &mut Option<ActiveSession>) -> Result
     Ok(())
 }
 
-fn routing_signature(settings: &GlobalSettings) -> Result<Vec<u8>> {
+fn routing_signature(config: &AppConfig) -> Result<Vec<u8>> {
+    let settings: &GlobalSettings = &config.settings;
+    let direct_forward_profiles = config
+        .port_forwards
+        .iter()
+        .filter(|rule| rule.enabled && !rule.use_proxy)
+        .filter_map(|rule| {
+            config
+                .profiles
+                .iter()
+                .find(|profile| profile.id == rule.profile_id)
+                .map(|profile| (profile.id, &profile.host, profile.port))
+        })
+        .collect::<Vec<_>>();
     Ok(serde_json::to_vec(&(
         settings.default_policy,
         &settings.custom_overrides,
@@ -315,6 +328,7 @@ fn routing_signature(settings: &GlobalSettings) -> Result<Vec<u8>> {
         &settings.ip_rules,
         &settings.imported_ip_rules,
         settings.ipv6,
+        direct_forward_profiles,
     ))?)
 }
 
@@ -561,23 +575,39 @@ async fn run_oneshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ssh_rocket_core::{AppRule, DomainRule, DomainRuleKind, RuleAction};
+    use ssh_rocket_core::{AppRule, DomainRule, DomainRuleKind, PortForwardRule, Profile, RuleAction};
 
     #[test]
     fn routing_signature_tracks_routing_changes_only() {
-        let mut settings = GlobalSettings::default();
-        let original = routing_signature(&settings).unwrap();
-        settings.app_rules.push(AppRule {
+        let mut config = AppConfig::default();
+        let original = routing_signature(&config).unwrap();
+        config.settings.app_rules.push(AppRule {
             executable: "firefox".into(),
             action: RuleAction::Direct,
         });
-        assert_eq!(routing_signature(&settings).unwrap(), original);
+        assert_eq!(routing_signature(&config).unwrap(), original);
 
-        settings.domain_rules.push(DomainRule {
+        config.settings.domain_rules.push(DomainRule {
             pattern: "example.com".into(),
             action: RuleAction::Proxy,
             kind: DomainRuleKind::DomainSuffix,
         });
-        assert_ne!(routing_signature(&settings).unwrap(), original);
+        assert_ne!(routing_signature(&config).unwrap(), original);
+    }
+
+    #[test]
+    fn routing_signature_tracks_direct_forward_profiles() {
+        let mut config = AppConfig::default();
+        let original = routing_signature(&config).unwrap();
+        let profile = Profile::default();
+        let mut rule = PortForwardRule::default();
+        rule.profile_id = profile.id;
+        rule.enabled = true;
+        config.profiles.push(profile);
+        config.port_forwards.push(rule);
+        assert_ne!(routing_signature(&config).unwrap(), original);
+
+        config.port_forwards[0].use_proxy = true;
+        assert_eq!(routing_signature(&config).unwrap(), original);
     }
 }

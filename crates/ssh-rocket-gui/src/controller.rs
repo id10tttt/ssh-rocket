@@ -196,6 +196,7 @@ impl RuntimeController {
         events: mpsc::Sender<RuntimeEvent>,
     ) {
         let forward_manager = self.forward_manager.clone();
+        let helper = self.helper.clone();
         let forward_events = self.forward_event_channel(events.clone());
         self.runtime.spawn(async move {
             let mut manager = forward_manager.lock().await;
@@ -211,6 +212,25 @@ impl RuntimeController {
                     )));
                     return;
                 };
+                if let Err(error) = async {
+                    let mut helper = helper.lock().await;
+                    if let Some(helper) = helper.as_mut() {
+                        helper.sync_rules().await?;
+                    }
+                    anyhow::Ok(())
+                }
+                .await
+                {
+                    let _ = events.send(RuntimeEvent::ForwardState {
+                        rule_id: rule.id,
+                        state: ForwardState::Connecting,
+                    });
+                    let _ = events.send(RuntimeEvent::Log(format!(
+                        "[forward] 无法同步 {} 的直连路由：{}",
+                        rule.name, error
+                    )));
+                    return;
+                }
                 match manager
                     .start(&rule, &profile, forward_events.clone())
                     .await

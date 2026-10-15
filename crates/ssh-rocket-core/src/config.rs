@@ -241,6 +241,8 @@ pub struct PortForwardRule {
     #[serde(default = "default_forward_host")]
     pub remote_host: String,
     pub remote_port: u16,
+    #[serde(default)]
+    pub use_proxy: bool,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -256,6 +258,7 @@ impl Default for PortForwardRule {
             local_port: 0,
             remote_host: default_forward_host(),
             remote_port: 0,
+            use_proxy: false,
             enabled: true,
         }
     }
@@ -417,6 +420,7 @@ mod tests {
             local_port: 13306,
             remote_host: "127.0.0.1".into(),
             remote_port: 3306,
+            use_proxy: true,
             enabled: true,
         };
         let mut new_config = AppConfig::default();
@@ -429,5 +433,20 @@ mod tests {
         assert_eq!(decoded.port_forwards[0].forward_type, ForwardType::Local);
         assert_eq!(decoded.port_forwards[0].local_port, 13306);
         assert_eq!(decoded.port_forwards[0].remote_port, 3306);
+        assert!(decoded.port_forwards[0].use_proxy);
+
+        let legacy_rule = r#"{
+            "id": "32e39d39-6a71-491d-8c08-b88c89d95a6f",
+            "name": "legacy",
+            "profile_id": "46d8aaec-6374-405e-b770-539e0af5b3eb",
+            "forward_type": "remote",
+            "local_host": "127.0.0.1",
+            "local_port": 22,
+            "remote_host": "127.0.0.1",
+            "remote_port": 10022,
+            "enabled": true
+        }"#;
+        let decoded: PortForwardRule = serde_json::from_str(legacy_rule).expect("deserialize legacy rule");
+        assert!(!decoded.use_proxy);
     }
 }

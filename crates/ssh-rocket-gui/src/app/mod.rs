@@ -350,9 +350,18 @@ pub fn build_ui(app: &adw::Application) {
         let refresh_connections = refresh_connections.clone();
         let refresh_forwards = refresh_forwards.clone();
         let view_stack = win.view_stack.clone();
+        let controller = controller.clone();
+        let event_tx = event_tx.clone();
         win.add_connection.connect_clicked(move |_| {
             if view_stack.visible_child_name().as_deref() == Some("forward") {
-                show_forward_dialog(&parent, config.clone(), None, refresh_forwards.clone());
+                show_forward_dialog(
+                    &parent,
+                    config.clone(),
+                    None,
+                    refresh_forwards.clone(),
+                    controller.clone(),
+                    event_tx.clone(),
+                );
             } else {
                 show_profile_dialog(&parent, config.clone(), None, refresh_connections.clone());
             }
@@ -370,8 +379,17 @@ pub fn build_ui(app: &adw::Application) {
         let parent = win.window.clone();
         let config = config.clone();
         let refresh_forwards = refresh_forwards.clone();
+        let controller = controller.clone();
+        let event_tx = event_tx.clone();
         forward_view.empty_add_button.connect_clicked(move |_| {
-            show_forward_dialog(&parent, config.clone(), None, refresh_forwards.clone());
+            show_forward_dialog(
+                &parent,
+                config.clone(),
+                None,
+                refresh_forwards.clone(),
+                controller.clone(),
+                event_tx.clone(),
+            );
         });
     }
 
