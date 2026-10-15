@@ -53,7 +53,7 @@ pub fn create_main_window(app: &adw::Application) -> MainWindowWidgets {
     title_box.set_margin_end(18);
     title_box.set_margin_top(18);
     title_box.set_margin_bottom(14);
-    let logo_icon = create_nav_icon_widget(&["ssh-rocket", "ssh-rocket-symbolic"], "ssh-rocket-symbolic", 28);
+    let logo_icon = create_nav_icon_widget(&["ssh-rocket", "ssh-rocket-symbolic"], "ssh-rocket-symbolic", 24);
     title_box.append(&logo_icon);
     let app_title = gtk::Label::new(Some("SSH Rocket"));
     app_title.add_css_class("title-2");
@@ -88,16 +88,24 @@ pub fn create_main_window(app: &adw::Application) -> MainWindowWidgets {
         tr("nav.logs"),
     );
     let (forward_nav, forward_nav_label) = create_navigation_row(
-        &["ssh-rocket-forward", "ssh-rocket-forwarding", "ssh-rocket-forward-symbolic"],
+        &[
+            "ssh-rocket-portforward-symbolic",
+            "ssh-rocket-portforward",
+            "ssh-rocket-port-forward-symbolic",
+            "ssh-rocket-port-forward",
+            "ssh-rocket-forward",
+            "ssh-rocket-forwarding",
+            "ssh-rocket-forward-symbolic",
+        ],
         "network-transmit-receive-symbolic",
         tr("nav.forward"),
     );
     let (settings_nav, settings_nav_label) = create_navigation_row(
         &[
-            "ssh-rocket-setting",
+            "ssh-rocket-settings-symbolic",
             "ssh-rocket-settings",
             "ssh-rocket-setting-symbolic",
-            "ssh-rocket-settings-symbolic",
+            "ssh-rocket-setting",
         ],
         "preferences-system-symbolic",
         tr("nav.settings"),
@@ -273,9 +281,9 @@ fn create_navigation_row(
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     content.set_margin_start(14);
     content.set_margin_end(14);
-    content.set_margin_top(6);
-    content.set_margin_bottom(6);
-    let icon = create_nav_icon_widget(candidates, fallback_icon_name, 24);
+    content.set_margin_top(8);
+    content.set_margin_bottom(8);
+    let icon = create_nav_icon_widget(candidates, fallback_icon_name, 18);
     content.append(&icon);
     let label = gtk::Label::new(Some(title));
     label.set_halign(gtk::Align::Start);
