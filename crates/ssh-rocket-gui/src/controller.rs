@@ -1,6 +1,6 @@
 use ssh_rocket_core::{AppConfig, PortForwardRule, Profile, RuleImportResult};
 use ssh_rocket_runtime::{
-    check_dns_health, check_socks_health, ForwardEvent, ForwardManager, ForwardStart,
+    check_dns_health, check_socks_health, ForwardEvent, ForwardManager,
     ForwardState, PrivilegedHelperSession, SshSession,
 };
 use std::{
@@ -141,53 +141,30 @@ impl RuntimeController {
         config: AppConfig,
         events: mpsc::Sender<RuntimeEvent>,
     ) {
-        let forward_manager = self.forward_manager.clone();
-        let forward_events = self.forward_event_channel(events.clone());
-        self.runtime.spawn(async move {
-            let mut manager = forward_manager.lock().await;
-            for rule in config.port_forwards.iter().filter(|rule| rule.enabled) {
-                let Some(profile) = config
-                    .profiles
-                    .iter()
-                    .find(|profile| profile.id == rule.profile_id)
-                else {
-                    let _ = events.send(RuntimeEvent::ForwardState {
-                        rule_id: rule.id,
-                        state: ForwardState::Stopped,
-                    });
-                    let _ = events.send(RuntimeEvent::Log(format!(
-                        "[forward] 无法启动 {}：未找到关联的 SSH 节点",
-                        rule.name
-                    )));
-                    continue;
-                };
-                match manager.start(rule, profile, forward_events.clone()).await {
-                    ForwardStart::Established => {
-                        let _ = events.send(RuntimeEvent::ForwardState {
-                            rule_id: rule.id,
-                            state: ForwardState::Connected,
-                        });
-                        let _ = events.send(RuntimeEvent::Log(format!(
-                            "[forward] 已启动端口转发：{}",
-                            rule.name
-                        )));
-                    }
-                    ForwardStart::Retrying { error, delay_secs } => {
-                        let _ = events.send(RuntimeEvent::ForwardState {
-                            rule_id: rule.id,
-                            state: ForwardState::Connecting,
-                        });
-                        let _ = events.send(RuntimeEvent::Log(format!(
-                            "[forward] 启动 {} 失败：{}；{} 秒后重试",
-                            rule.name, error, delay_secs
-                        )));
-                    }
-                }
-            }
-        });
+        for rule in config.port_forwards.iter().filter(|rule| rule.enabled) {
+            let profile = config.profiles.iter()
+                .find(|profile| profile.id == rule.profile_id).cloned();
+            self.set_forward_enabled(rule.clone(), profile, true, events.clone());
+        }
     }
 
-    /// 根据界面操作启动或停止单条端口转发规则。
+    /// 节点保存后，用最新凭据重建所有关联且已启用的转发。
+    pub fn restart_profile_forwards(
+        &self,
+        config: &AppConfig,
+        profile_id: Uuid,
+        events: mpsc::Sender<RuntimeEvent>,
+    ) {
+        let profile = config.profiles.iter()
+            .find(|profile| profile.id == profile_id).cloned();
+        for rule in config.port_forwards.iter()
+            .filter(|rule| rule.enabled && rule.profile_id == profile_id)
+        {
+            self.set_forward_enabled(rule.clone(), profile.clone(), true, events.clone());
+        }
+    }
+
+    /// 将路由准备纳入规则监督任务，失败后持续重试。
     pub fn set_forward_enabled(
         &self,
         rule: PortForwardRule,
@@ -202,60 +179,30 @@ impl RuntimeController {
             let mut manager = forward_manager.lock().await;
             if enabled {
                 let Some(profile) = profile else {
+                    manager.stop(&rule.id).await;
                     let _ = events.send(RuntimeEvent::ForwardState {
                         rule_id: rule.id,
                         state: ForwardState::Stopped,
                     });
                     let _ = events.send(RuntimeEvent::Log(format!(
-                        "[forward] 无法启动 {}：未找到关联的 SSH 节点",
-                        rule.name
+                        "[forward] 无法启动 {}：未找到关联的 SSH 节点", rule.name
                     )));
                     return;
                 };
-                if let Err(error) = async {
-                    let mut helper = helper.lock().await;
-                    if let Some(helper) = helper.as_mut() {
-                        helper.sync_rules().await?;
+                let _ = events.send(RuntimeEvent::ForwardState {
+                    rule_id: rule.id,
+                    state: ForwardState::Connecting,
+                });
+                manager.start_with_prepare(&rule, &profile, forward_events, move || {
+                    let helper = helper.clone();
+                    async move {
+                        let mut helper = helper.lock().await;
+                        if let Some(helper) = helper.as_mut() {
+                            helper.sync_rules().await?;
+                        }
+                        anyhow::Ok(())
                     }
-                    anyhow::Ok(())
-                }
-                .await
-                {
-                    let _ = events.send(RuntimeEvent::ForwardState {
-                        rule_id: rule.id,
-                        state: ForwardState::Connecting,
-                    });
-                    let _ = events.send(RuntimeEvent::Log(format!(
-                        "[forward] 无法同步 {} 的直连路由：{}",
-                        rule.name, error
-                    )));
-                    return;
-                }
-                match manager
-                    .start(&rule, &profile, forward_events.clone())
-                    .await
-                {
-                    ForwardStart::Established => {
-                        let _ = events.send(RuntimeEvent::ForwardState {
-                            rule_id: rule.id,
-                            state: ForwardState::Connected,
-                        });
-                        let _ = events.send(RuntimeEvent::Log(format!(
-                            "[forward] 已启动端口转发：{}",
-                            rule.name
-                        )));
-                    }
-                    ForwardStart::Retrying { error, delay_secs } => {
-                        let _ = events.send(RuntimeEvent::ForwardState {
-                            rule_id: rule.id,
-                            state: ForwardState::Connecting,
-                        });
-                        let _ = events.send(RuntimeEvent::Log(format!(
-                            "[forward] 启动 {} 失败：{}；{} 秒后重试",
-                            rule.name, error, delay_secs
-                        )));
-                    }
-                }
+                }).await;
             } else {
                 manager.stop(&rule.id).await;
                 let _ = events.send(RuntimeEvent::ForwardState {
@@ -263,8 +210,7 @@ impl RuntimeController {
                     state: ForwardState::Stopped,
                 });
                 let _ = events.send(RuntimeEvent::Log(format!(
-                    "[forward] 已停止端口转发：{}",
-                    rule.name
+                    "[forward] 已停止端口转发：{}", rule.name
                 )));
             }
         });

@@ -119,6 +119,7 @@ impl SshSession {
 /// 解析 OpenSSH 配置后的真实服务器地址，确保运行时连接不会被重新送入代理。
 pub(crate) async fn effective_server(profile: &Profile) -> (String, u16) {
     let mut command = Command::new("ssh");
+    command.kill_on_drop(true);
     command.arg("-G").arg("-p").arg(profile.port.to_string());
     if !profile.username.trim().is_empty() {
         command.arg("-l").arg(profile.username.trim());

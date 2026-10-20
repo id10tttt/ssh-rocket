@@ -308,12 +308,16 @@ pub fn render_connection_cards(
             let config = config.clone();
             let refresh_handle = refresh_handle.clone();
             let profile = profile.clone();
+            let controller = controller.clone();
+            let event_tx = event_tx.clone();
             edit.connect_clicked(move |_| {
                 show_profile_dialog(
                     &parent,
                     config.clone(),
                     Some(profile.clone()),
                     refresh_handle.clone(),
+                    controller.clone(),
+                    event_tx.clone(),
                 );
             });
         }

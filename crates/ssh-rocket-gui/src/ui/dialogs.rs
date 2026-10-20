@@ -25,6 +25,8 @@ pub fn show_profile_dialog(
     config: Rc<RefCell<AppConfig>>,
     profile: Option<Profile>,
     refresh: RefreshConnections,
+    controller: Rc<RefCell<RuntimeController>>,
+    event_tx: mpsc::Sender<RuntimeEvent>,
 ) {
     let editing = profile.is_some();
     let source = profile.unwrap_or_default();
@@ -322,6 +324,7 @@ pub fn show_profile_dialog(
             current.active_profile = Some(saved.id);
         }
         if current.save().is_ok() {
+            controller.borrow().restart_profile_forwards(&current, saved.id, event_tx.clone());
             drop(current);
             if let Some(refresh) = refresh.borrow().as_ref() {
                 refresh();

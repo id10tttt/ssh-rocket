@@ -363,7 +363,14 @@ pub fn build_ui(app: &adw::Application) {
                     event_tx.clone(),
                 );
             } else {
-                show_profile_dialog(&parent, config.clone(), None, refresh_connections.clone());
+                show_profile_dialog(
+                    &parent,
+                    config.clone(),
+                    None,
+                    refresh_connections.clone(),
+                    controller.clone(),
+                    event_tx.clone(),
+                );
             }
         });
     }
@@ -371,8 +378,17 @@ pub fn build_ui(app: &adw::Application) {
         let parent = win.window.clone();
         let config = config.clone();
         let refresh_connections = refresh_connections.clone();
+        let controller = controller.clone();
+        let event_tx = event_tx.clone();
         connect_view.empty_add_button.connect_clicked(move |_| {
-            show_profile_dialog(&parent, config.clone(), None, refresh_connections.clone());
+            show_profile_dialog(
+                &parent,
+                config.clone(),
+                None,
+                refresh_connections.clone(),
+                controller.clone(),
+                event_tx.clone(),
+            );
         });
     }
     {
