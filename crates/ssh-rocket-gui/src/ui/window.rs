@@ -286,7 +286,7 @@ fn create_navigation_row(
     content.set_margin_end(14);
     content.set_margin_top(8);
     content.set_margin_bottom(8);
-    let icon = create_nav_icon_widget(candidates, fallback_icon_name, 18);
+    let icon = create_nav_icon_widget(candidates, fallback_icon_name, 28);
     content.append(&icon);
     let label = gtk::Label::new(Some(title));
     label.set_halign(gtk::Align::Start);
