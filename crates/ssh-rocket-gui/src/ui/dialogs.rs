@@ -19,6 +19,56 @@ pub type RefreshConnections = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
 pub type RefreshRules = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
 pub type RefreshForwards = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
 
+fn generated_forward_name(
+    forward_type: ForwardType,
+    local_host: &str,
+    local_port: u16,
+    remote_host: &str,
+    remote_port: u16,
+) -> String {
+    match forward_type {
+        ForwardType::Local => {
+            format!("{local_host}:{local_port} -> {remote_host}:{remote_port}")
+        }
+        ForwardType::Remote => {
+            format!("{remote_host}:{remote_port} -> {local_host}:{local_port}")
+        }
+    }
+}
+
+fn has_generated_forward_name(rule: &PortForwardRule) -> bool {
+    rule.name.is_empty()
+        || rule.name == generated_forward_name(
+            rule.forward_type,
+            &rule.local_host,
+            rule.local_port,
+            &rule.remote_host,
+            rule.remote_port,
+        )
+}
+
+#[cfg(test)]
+mod forward_name_tests {
+    use super::*;
+
+    #[test]
+    fn distinguishes_generated_and_custom_forward_names() {
+        let mut rule = PortForwardRule {
+            name: "0.0.0.0:3389 -> 127.0.0.1:3389".into(),
+            forward_type: ForwardType::Remote,
+            local_host: "127.0.0.1".into(),
+            local_port: 3389,
+            remote_host: "0.0.0.0".into(),
+            remote_port: 3389,
+            ..PortForwardRule::default()
+        };
+
+        assert!(has_generated_forward_name(&rule));
+        rule.name = "远程桌面".into();
+        assert!(!has_generated_forward_name(&rule));
+    }
+}
+
 /// 显示节点连接配置对话框
 pub fn show_profile_dialog(
     parent: &adw::ApplicationWindow,
@@ -693,8 +743,13 @@ pub fn show_forward_dialog(
     remote_direction.connect_toggled(move |button| update_direction(button.is_active()));
 
     // 可选名称
+    let displayed_name = if has_generated_forward_name(&source) {
+        String::new()
+    } else {
+        source.name.clone()
+    };
     let name_entry = gtk::Entry::builder()
-        .text(&source.name)
+        .text(&displayed_name)
         .placeholder_text(tr("dialog.forward.name_placeholder"))
         .hexpand(true)
         .build();
@@ -760,12 +815,25 @@ pub fn show_forward_dialog(
             ForwardType::Local
         };
 
+        let local_host = {
+            let host = local_host_entry.text().trim().to_string();
+            if host.is_empty() {
+                default_forward_host()
+            } else {
+                host
+            }
+        };
+        let remote_host = {
+            let host = remote_host_entry.text().trim().to_string();
+            if host.is_empty() {
+                default_forward_host()
+            } else {
+                host
+            }
+        };
         let mut name = name_entry.text().trim().to_string();
         if name.is_empty() {
-            name = match forward_type {
-                ForwardType::Local => format!("{}:{} -> {}:{}", local_host_entry.text().trim(), l_port, remote_host_entry.text().trim(), r_port),
-                ForwardType::Remote => format!("{}:{} -> {}:{}", remote_host_entry.text().trim(), r_port, local_host_entry.text().trim(), l_port),
-            };
+            name = generated_forward_name(forward_type, &local_host, l_port, &remote_host, r_port);
         }
 
         let updated_rule = PortForwardRule {
@@ -773,15 +841,9 @@ pub fn show_forward_dialog(
             name,
             profile_id: selected_profile_id,
             forward_type,
-            local_host: {
-                let h = local_host_entry.text().trim().to_string();
-                if h.is_empty() { default_forward_host() } else { h }
-            },
+            local_host,
             local_port: l_port,
-            remote_host: {
-                let h = remote_host_entry.text().trim().to_string();
-                if h.is_empty() { default_forward_host() } else { h }
-            },
+            remote_host,
             remote_port: r_port,
             use_proxy: use_proxy.is_active(),
             enabled: source.enabled,
