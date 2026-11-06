@@ -12,7 +12,7 @@ const MENU_PATH: &str = "/MenuBar";
 const WATCHER_BUS_NAME: &str = "org.kde.StatusNotifierWatcher";
 const WATCHER_PATH: &str = "/StatusNotifierWatcher";
 const WATCHER_INTERFACE: &str = "org.kde.StatusNotifierWatcher";
-const SPEED_LABEL_GUIDE: &str = "1023K/s↑ 1023K/s↓";
+const SPEED_LABEL_GUIDE: &str = "99.9K/s↑ 99.9K/s↓";
 const SPEED_FIELD_WIDTH: usize = 7;
 
 const STATUS_XML: &str = r#"
@@ -340,21 +340,16 @@ fn pad_speed_field(speed: &str) -> String {
 }
 
 fn format_tray_speed(bytes_per_second: u64) -> String {
-    const UNITS: [&str; 5] = ["B/s", "K/s", "M/s", "G/s", "T/s"];
+    const KIBIBYTE: f64 = 1024.0;
+    const MEBIBYTE: f64 = KIBIBYTE * KIBIBYTE;
+    const MAX_KIBIBYTES_BEFORE_ROUNDING: f64 = 99.95;
 
-    let mut value = bytes_per_second as f64;
-    let mut unit_index = 0;
-    while value >= 1024.0 && unit_index < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit_index += 1;
-    }
-
-    if unit_index == 0 {
-        format!("{bytes_per_second}{}", UNITS[unit_index])
-    } else if value >= 100.0 {
-        format!("{value:.0}{}", UNITS[unit_index])
+    let kibibytes = bytes_per_second as f64 / KIBIBYTE;
+    if kibibytes < MAX_KIBIBYTES_BEFORE_ROUNDING {
+        format!("{kibibytes:.1}K/s")
     } else {
-        format!("{value:.1}{}", UNITS[unit_index])
+        let mebibytes = bytes_per_second as f64 / MEBIBYTE;
+        format!("{mebibytes:.1}M/s")
     }
 }
 
@@ -561,11 +556,15 @@ mod tests {
 
     #[test]
     fn formats_compact_tray_speed() {
-        assert_eq!(format_tray_speed(0), "0B/s");
+        assert_eq!(format_tray_speed(0), "0.0K/s");
         assert_eq!(format_tray_speed(1024), "1.0K/s");
         assert_eq!(format_tray_speed(14 * 1024), "14.0K/s");
-        assert_eq!(format_tray_speed(120 * 1024), "120K/s");
+        assert_eq!(format_tray_speed(99 * 1024), "99.0K/s");
+        assert_eq!(format_tray_speed(102_348), "99.9K/s");
+        assert_eq!(format_tray_speed(102_349), "0.1M/s");
+        assert_eq!(format_tray_speed(100 * 1024), "0.1M/s");
         assert_eq!(format_tray_speed(3 * 1024 * 1024), "3.0M/s");
+        assert_eq!(format_tray_speed(99 * 1024 * 1024), "99.0M/s");
     }
 
     #[test]
@@ -580,8 +579,20 @@ mod tests {
     fn pads_short_speed_fields_without_changing_arrow_positions() {
         assert_eq!(
             format_speed_label(0, 421),
-            "\u{2007}\u{2007}\u{2007}0B/s↑ \u{2007}421B/s↓"
+            "\u{2007}0.0K/s↑ \u{2007}0.4K/s↓"
         );
+
+        let expected_width = SPEED_FIELD_WIDTH * 2 + 3;
+        for (upload, download) in [
+            (0, 0),
+            (99 * 1024, 100 * 1024),
+            (99 * 1024 * 1024, 14 * 1024),
+        ] {
+            assert_eq!(
+                format_speed_label(upload, download).chars().count(),
+                expected_width
+            );
+        }
     }
 
     #[test]
