@@ -9,6 +9,9 @@ use std::{
 
 const STATUS_PATH: &str = "/StatusNotifierItem";
 const MENU_PATH: &str = "/MenuBar";
+const WATCHER_BUS_NAME: &str = "org.kde.StatusNotifierWatcher";
+const WATCHER_PATH: &str = "/StatusNotifierWatcher";
+const WATCHER_INTERFACE: &str = "org.kde.StatusNotifierWatcher";
 const SPEED_LABEL_GUIDE: &str = "1023K/s↑ 1023K/s↓";
 const SPEED_FIELD_WIDTH: usize = 7;
 
@@ -88,6 +91,7 @@ struct TrayShared {
 pub struct TrayManager {
     connection: gio::DBusConnection,
     shared: Rc<TrayShared>,
+    watcher_subscription: Option<gio::SignalSubscription>,
     status_registration: Option<gio::RegistrationId>,
     menu_registration: Option<gio::RegistrationId>,
 }
@@ -195,25 +199,31 @@ impl TrayManager {
             .property(|_, _, _, _, property| menu_property(property))
             .build()?;
 
-        if let Err(error) = connection.call_sync(
-            Some("org.kde.StatusNotifierWatcher"),
-            "/StatusNotifierWatcher",
-            "org.kde.StatusNotifierWatcher",
-            "RegisterStatusNotifierItem",
-            Some(&(STATUS_PATH,).to_variant()),
-            None,
-            gio::DBusCallFlags::NONE,
-            1500,
-            gio::Cancellable::NONE,
-        ) {
-            let _ = connection.unregister_object(status_registration);
-            let _ = connection.unregister_object(menu_registration);
-            return Err(error);
-        }
+        // GNOME 扩展可能晚于自启动应用就绪，也可能在 Shell 重启后更换 D-Bus owner。
+        let watcher_subscription = connection.subscribe_to_signal(
+            Some("org.freedesktop.DBus"),
+            Some("org.freedesktop.DBus"),
+            Some("NameOwnerChanged"),
+            Some("/org/freedesktop/DBus"),
+            Some(WATCHER_BUS_NAME),
+            gio::DBusSignalFlags::NONE,
+            move |signal| {
+                let Some((_, _, name_owner)) =
+                    signal.parameters.get::<(String, String, String)>()
+                else {
+                    return;
+                };
+                if !name_owner.is_empty() {
+                    register_status_notifier_item(signal.connection, &name_owner);
+                }
+            },
+        );
+        register_status_notifier_item(&connection, WATCHER_BUS_NAME);
 
         Ok(Self {
             connection,
             shared,
+            watcher_subscription: Some(watcher_subscription),
             status_registration: Some(status_registration),
             menu_registration: Some(menu_registration),
         })
@@ -255,6 +265,7 @@ impl TrayManager {
 
 impl Drop for TrayManager {
     fn drop(&mut self) {
+        self.watcher_subscription.take();
         if let Some(registration) = self.status_registration.take() {
             let _ = self.connection.unregister_object(registration);
         }
@@ -262,6 +273,26 @@ impl Drop for TrayManager {
             let _ = self.connection.unregister_object(registration);
         }
     }
+}
+
+/// 向当前托盘宿主注册状态项，宿主重启后可重复调用。
+fn register_status_notifier_item(connection: &gio::DBusConnection, watcher_name: &str) {
+    connection.call(
+        Some(watcher_name),
+        WATCHER_PATH,
+        WATCHER_INTERFACE,
+        "RegisterStatusNotifierItem",
+        Some(&(STATUS_PATH,).to_variant()),
+        None,
+        gio::DBusCallFlags::NONE,
+        1500,
+        gio::Cancellable::NONE,
+        |result| {
+            if let Err(error) = result {
+                eprintln!("[tray] failed to register status notifier item: {error}");
+            }
+        },
+    );
 }
 
 fn status_property(shared: &TrayShared, property: &str) -> glib::Variant {
